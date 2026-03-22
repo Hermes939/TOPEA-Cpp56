@@ -82,6 +82,7 @@ void TOP4EA_Engine::onTick(const Tick& tick) {
         lastTick_ = tick;
     }
     grid_->onTick(tick);
+    recovery_->onTick(tick);   // alimente le CascadeGuard (spread + momentum)
     processTick(tick);
 }
 
@@ -217,24 +218,30 @@ void TOP4EA_Engine::handleTriggers(const std::vector<OrderInfo>& orders) {
     int ss = ssTicket_.load();
     int bs = bsTicket_.load();
 
-    // SS déclenché (ticket existait mais n'est plus pending)
+    Tick tick;
+    { std::lock_guard lk(tickMu_); tick = lastTick_; }
+    int gap = grid_->effectiveGridGap();
+
+    // SS déclenché — prix a franchi ssLevel_ à la baisse
+    // On passe ssLevel_ (prix exact du stop) et le gridGap courant
     if (ss > 0 && !ticketStillPending(ss, orders)) {
-        auto res = recovery_->onSellStopTriggered();
+        auto res = recovery_->onSellStopTriggered(ssLevel_, gap);
         ssTicket_.store(-1);
         if (res.action == TriggerResult::Action::NewRecovery)
             state_.store(EAState::Recovery);
         else if (res.action == TriggerResult::Action::CloseOneSide)
-            closeOneSide(0); // BUY side
+            closeOneSide(0);
+        // Si Blocked : pas de recovery, la grille est simplement recréée
     }
 
-    // BS déclenché
+    // BS déclenché — prix a franchi bsLevel_ à la hausse
     if (bs > 0 && !ticketStillPending(bs, orders)) {
-        auto res = recovery_->onBuyStopTriggered();
+        auto res = recovery_->onBuyStopTriggered(bsLevel_, gap);
         bsTicket_.store(-1);
         if (res.action == TriggerResult::Action::NewRecovery)
             state_.store(EAState::Recovery);
         else if (res.action == TriggerResult::Action::CloseOneSide)
-            closeOneSide(1); // SELL side
+            closeOneSide(1);
     }
 }
 
@@ -537,7 +544,6 @@ std::string TOP4EA_Engine::dashboard() const {
 
     BasketZone zone = basketMon_->zone();
     std::string zoneStr = (zone==BasketZone::A?"A":zone==BasketZone::B?"B":"C");
-    int cdSec = recovery_->cooldownRemainingSec();
 
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2);
@@ -575,7 +581,17 @@ std::string TOP4EA_Engine::dashboard() const {
     oss << "║  Marge lib : " << freePct << "%\n";
     oss << "║  SS @ " << std::setprecision(5) << ssLevel_ << "\n";
     oss << "║  BS @ " << bsLevel_ << "\n";
-    oss << "║  Trigger   : " << (cdSec>0 ? "COOLDOWN "+std::to_string(cdSec)+"s" : "PRET") << "\n";
+    // Dashboard CascadeGuard — 3 conditions de qualité marché
+    auto cg = recovery_->lastCascadeCheck();
+    oss << std::setprecision(1);
+    oss << "╠═══════════════════════════════════╣\n";
+    oss << "║  [1]Déplacement: " << (cg.priceDispatchOk?"✓":"✗")
+        << " " << cg.priceDisplacement << "/" << cg.requiredDisplacement << "pts\n";
+    oss << "║  [2]Spread    : " << (cg.spreadOk?"✓":"✗")
+        << " " << cg.currentSpreadPts << "pts (moy=" << cg.avgSpreadPts << ")\n";
+    oss << "║  [3]Whipsaw   : " << (cg.noWhipsawOk?"✓ tient":"✗ retour")<< "\n";
+    oss << "║  Garde cascade: " << (cg.allowed ? "OUVERT" : "BLOQUÉ") << "\n";
+    oss << "╠═══════════════════════════════════╣\n";
     oss << "║  Pairs tot : " << totalPairs_.load() << " | Singles: " << totalSingles_.load() << "\n";
     oss << "╚═══════════════════════════════════╝";
     return oss.str();

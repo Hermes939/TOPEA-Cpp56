@@ -16,6 +16,7 @@
 #include <atomic>
 #include <optional>
 #include <chrono>
+#include <future>
 #include <stdexcept>
 
 // Portabilité POSIX / Windows

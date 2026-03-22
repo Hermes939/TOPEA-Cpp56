@@ -86,8 +86,13 @@ struct Config {
     double      lotMultiplier   = 1.15;
     int         gridGap         = 500;          // points – valeur initiale
     double      basketTarget    = 7.0;          // $ fixe
-    int         antiCascadeSec  = 3;
     int         maxRecovery     = 20;
+
+    // Garde cascade professionnel (remplace antiCascadeSec)
+    double      cascadePriceDispatchPct = 0.50; // 50% du GridGap comme déplacement min
+    double      cascadeSpreadMaxMult    = 2.5;  // spread max = 2.5× spread moyen
+    int         cascadeMomentumTicks    = 3;    // N ticks consécutifs requis
+    double      cascadeSpreadEwmaAlpha  = 0.05; // lissage spread référence
     int         magic           = 10300;
     int         slippage        = 3;
     double      dailyTargetPct  = 10.0;         // 0 = désactivé
