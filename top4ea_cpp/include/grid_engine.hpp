@@ -36,16 +36,24 @@ public:
 
     // ─── Calcul des niveaux ──────────────────────────────────
     // Calcule le niveau cible SELLSTOP adaptatif
+    // recovDepth : niveau de recovery côté SELL (pour gap expansion)
+    // gapFactor  : facteur asymétrique (1.0 = neutre, >1 = plus large)
     [[nodiscard]] StopPlacement computeSellStop(
         int    currentTicket,
         double currentLevel,
-        double minDist) const noexcept;
+        double minDist,
+        int    recovDepth = 0,
+        double gapFactor  = 1.0) const noexcept;
 
     // Calcule le niveau cible BUYSTOP adaptatif
+    // recovDepth : niveau de recovery côté BUY (pour gap expansion)
+    // gapFactor  : facteur asymétrique (1.0 = neutre, >1 = plus large)
     [[nodiscard]] StopPlacement computeBuyStop(
         int    currentTicket,
         double currentLevel,
-        double minDist) const noexcept;
+        double minDist,
+        int    recovDepth = 0,
+        double gapFactor  = 1.0) const noexcept;
 
     // Demi-gap courant (ATR ou fixe) en points
     [[nodiscard]] double halfGap() const noexcept;

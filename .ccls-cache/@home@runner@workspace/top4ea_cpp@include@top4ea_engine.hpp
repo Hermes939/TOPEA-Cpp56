@@ -67,8 +67,10 @@ private:
     // ─── Trail de grille ────────────────────────────────────
     void trailGrid();
 
-    void ensureSellStop(double lot, const std::string& comment);
-    void ensureBuyStop (double lot, const std::string& comment);
+    void ensureSellStop(double lot, const std::string& comment,
+                        int recovDepth, double gapFactor, bool trailFrozen);
+    void ensureBuyStop (double lot, const std::string& comment,
+                        int recovDepth, double gapFactor, bool trailFrozen);
 
     // ─── Fermetures ─────────────────────────────────────────
     void closeBasketAtomic();

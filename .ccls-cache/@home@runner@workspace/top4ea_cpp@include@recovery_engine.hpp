@@ -2,7 +2,8 @@
 // ============================================================
 //  TOP4EA — recovery_engine.hpp
 //  Contrôle absolu de chaque cycle de recovery
-//  CascadeGuard professionnel : prix + spread + momentum
+//  CascadeGuard : déplacement prix + spread + anti-whipsaw
+//  Aucune prédiction de direction — hedging pur
 // ============================================================
 #include "types.hpp"
 #include "math_core.hpp"
@@ -12,58 +13,57 @@
 
 namespace top4ea {
 
-// ─── Résultat d'une analyse de déclenchement ────────────────
+// ─── Résultat d'un déclenchement ────────────────────────────
 struct TriggerResult {
     enum class Action : uint8_t {
-        None,           // pas de déclenchement
-        NewRecovery,    // conditions validées → recovery autorisé
-        CloseOneSide,   // MaxRecovery atteint → fermer côté
-        Blocked         // CascadeGuard a bloqué (avec explication)
+        None,           // rien
+        NewRecovery,    // 3 conditions validées → recovery ouvert
+        CloseOneSide,   // MaxRecovery atteint → fermer le côté
+        Blocked         // CascadeGuard a bloqué (qualité marché insuffisante)
     };
-    Action            action      = Action::None;
-    int               side        = 0;   // 0=BUY / 1=SELL
-    int               count       = 0;   // nouveau compteur recovery
+    Action             action      = Action::None;
+    int                side        = 0;   // 0=BUY / 1=SELL
+    int                count       = 0;   // compteur recovery après incrément
     CascadeCheckResult cascadeInfo = {};  // détail des 3 conditions
 };
 
 // ============================================================
-//  RecoveryEngine — machine à états pour les recoveries
+//  RecoveryEngine
 // ============================================================
 class RecoveryEngine {
 public:
     explicit RecoveryEngine(const Config& cfg);
 
-    // ─── Alimentation tick (requis pour le CascadeGuard) ────
+    // ─── Alimentation tick (spread EWMA pour le garde) ──────
     void onTick(const Tick& tick) noexcept;
 
     // ─── Déclenchements stops ───────────────────────────────
-    // currentBid : prix courant au moment du déclenchement
-    // gridGap    : GridGap effectif courant (ATR ou fixe)
-    TriggerResult onSellStopTriggered(double currentBid,
-                                      double lastStopPrice,
-                                      int    gridGap) noexcept;
+    // triggerPrice : prix exact du stop déclenché (openPrice)
+    // gridGap      : GridGap effectif courant en points
+    TriggerResult onSellStopTriggered(double triggerPrice, int gridGap) noexcept;
+    TriggerResult onBuyStopTriggered (double triggerPrice, int gridGap) noexcept;
 
-    TriggerResult onBuyStopTriggered (double currentBid,
-                                      double lastStopPrice,
-                                      int    gridGap) noexcept;
-
-    // ─── Lot pour le prochain recovery ──────────────────────
+    // ─── Lots recovery (Kelly-cappés) ───────────────────────
     [[nodiscard]] double sellLot() const noexcept {
         return math::recovLot(cfg_.baseLot, cfg_.lotMultiplier,
-                              sellCount_.load(), cfg_.kellyMaxFraction); }
-
+                              sellCount_.load(), cfg_.kellyMaxFraction);
+    }
     [[nodiscard]] double buyLot() const noexcept {
         return math::recovLot(cfg_.baseLot, cfg_.lotMultiplier,
-                              buyCount_.load(), cfg_.kellyMaxFraction); }
+                              buyCount_.load(), cfg_.kellyMaxFraction);
+    }
 
-    // ─── Accès état ─────────────────────────────────────────
+    // ─── État ───────────────────────────────────────────────
     [[nodiscard]] int sellCount() const noexcept { return sellCount_.load(); }
     [[nodiscard]] int buyCount()  const noexcept { return buyCount_.load();  }
 
-    // Info cascade pour dashboard
     [[nodiscard]] CascadeCheckResult lastCascadeCheck() const noexcept {
         std::lock_guard lk(mu_);
         return lastCheck_;
+    }
+    // Spread moyen de référence pour affichage
+    [[nodiscard]] double avgSpreadPts() const noexcept {
+        return guard_.avgSpreadRaw() / cfg_.point;
     }
 
     // ─── Reset ──────────────────────────────────────────────
@@ -71,16 +71,13 @@ public:
     void resetSell() noexcept { sellCount_.store(0); }
     void resetBuy()  noexcept { buyCount_.store(0);  }
 
-    // ─── Restauration depuis ordres ouverts (redémarrage) ───
     void restoreFromOrders(int sellOrders, int buyOrders) noexcept;
 
 private:
     TriggerResult checkAndIncrement(std::atomic<int>& counter,
-                                    int               sideType,
-                                    int               direction,
-                                    double            lastStopPrice,
-                                    double            currentBid,
-                                    int               gridGap) noexcept;
+                                    int    side,
+                                    double triggerPrice,
+                                    int    gridGap) noexcept;
 
     Config              cfg_;
     CascadeGuard        guard_;

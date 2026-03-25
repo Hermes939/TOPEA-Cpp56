@@ -88,11 +88,11 @@ struct Config {
     double      basketTarget    = 7.0;          // $ fixe
     int         maxRecovery     = 20;
 
-    // Garde cascade professionnel (remplace antiCascadeSec)
-    double      cascadePriceDispatchPct = 0.50; // 50% du GridGap comme déplacement min
-    double      cascadeSpreadMaxMult    = 2.5;  // spread max = 2.5× spread moyen
-    int         cascadeMomentumTicks    = 3;    // N ticks consécutifs requis
-    double      cascadeSpreadEwmaAlpha  = 0.05; // lissage spread référence
+    // Garde cascade professionnel (3 conditions de qualité marché)
+    double      cascadePriceDispatchPct = 0.50; // [1] 50% du GridGap comme déplacement min
+    double      cascadeSpreadMaxMult    = 2.5;  // [2] spread max = 2.5× spread moyen EWMA
+    double      cascadeSpreadEwmaAlpha  = 0.05; // lissage spread référence EWMA
+    // [3] Anti-whipsaw : automatique, pas de paramètre
     int         magic           = 10300;
     int         slippage        = 3;
     double      dailyTargetPct  = 10.0;         // 0 = désactivé
@@ -112,6 +112,26 @@ struct Config {
 
     double      kellyMaxFraction = 0.25;        // cap Kelly lot recovery
     double      spreadAvgAlpha   = 0.1;         // EWMA spread historique
+
+    // ─── Trail Stop adaptatif (4 axes) ──────────────────────
+    // [1] Step Trail : seuil minimum de déplacement (% du GridGap)
+    //     Ex: 0.15 = le stop ne bouge que si le prix s'est déplacé
+    //     de 15% du GridGap depuis le dernier déplacement
+    double      trailStepPct        = 0.15;
+
+    // [2] Gel du trail en zone TP : stop figé si basket > target × ratio
+    //     Ex: 0.60 = stops figés quand P&L > 60% du target
+    double      trailFreezeZone     = 0.60;
+
+    // [3] Gap expansion par niveau de recovery (% par niveau)
+    //     Ex: 0.05 = au recovery 10, gap élargi de +50%
+    //     Évite la cascade rapide sur les mêmes niveaux de prix
+    double      gapExpansionFactor  = 0.05;
+
+    // [4] Trail asymétrique : facteur d'élargissement du côté lourd
+    //     Ex: 0.15 → côté lourd : gap × 1.15, côté léger : gap × 0.85
+    //     Le côté en deep recovery est plus conservateur
+    double      trailAsymmetryFactor = 0.15;
 
     // Connexion MT4 bridge
     std::string bridgeHost      = "127.0.0.1";

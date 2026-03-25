@@ -1,28 +1,34 @@
 #pragma once
 // ============================================================
 //  TOP4EA — cascade_guard.hpp
-//  Garde professionnel contre les faux déclenchements
+//  Garde professionnel pour HEDGING GRID + RECOVERY MARTINGALE
 //
-//  Remplace le cooldown temporel naïf par 3 conditions
-//  basées sur la réalité du marché :
+//  ⚠ Ce système NE prédit PAS la direction du marché.
+//  Il place des stops des DEUX côtés simultanément.
+//  Le garde protège contre les dégradations de qualité
+//  du marché, PAS contre une direction particulière.
 //
-//  [1] DÉPLACEMENT DE PRIX
-//      Le prix doit s'être écarté d'au moins priceDispatchPct%
-//      du GridGap effectif depuis le dernier déclenchement.
-//      → Empêche les re-déclenchements sur le même niveau.
+//  3 CONDITIONS basées sur la qualité du mouvement :
+//
+//  [1] DÉPLACEMENT MINIMUM DEPUIS LE DERNIER TRIGGER
+//      Le prix doit s'être écarté d'au moins X% du GridGap
+//      depuis le niveau du dernier trigger.
+//      → Empêche les déclenchements en chaîne sur des micro-
+//        oscillations autour d'un même niveau de prix.
 //
 //  [2] SPREAD NORMAL
-//      Le spread courant ne doit pas dépasser
-//      spreadMaxMult × spread_moyen_EWMA.
-//      → Bloque les entrées pendant news/spikes/manipulation.
+//      Le spread ne doit pas dépasser N× le spread moyen EWMA.
+//      → Bloque les entrées pendant news/spikes/manipulation
+//        où le spread s'élargit artificiellement.
 //
-//  [3] MOMENTUM CONFIRMÉ
-//      Le prix doit avoir bougé dans la direction du
-//      déclenchement sur au moins momentumTicks ticks consécutifs
-//      avant d'autoriser le recovery suivant.
-//      → Filtre les whipsaws et faux cassements.
+//  [3] ANTI-WHIPSAW : PAS DE RETOUR SUR LE NIVEAU
+//      Après un trigger SS à prix P, si le marché remonte
+//      au-dessus de P → c'était un faux cassement (whipsaw).
+//      Même logique côté BS.
+//      → Condition purement mécanique, sans prédiction de
+//        direction. Le mouvement doit "tenir" son niveau.
 //
-//  Les 3 conditions doivent être TOUTES vraies simultanément.
+//  Les 3 conditions doivent être TOUTES vraies.
 // ============================================================
 #include "types.hpp"
 #include "math_core.hpp"
@@ -30,161 +36,144 @@
 #include <mutex>
 #include <string>
 #include <sstream>
+#include <cmath>
 
 namespace top4ea {
 
-// ─── Résultat d'une vérification cascade ────────────────────
+// ─── Résultat détaillé d'une vérification ───────────────────
 struct CascadeCheckResult {
-    bool   allowed          = false;
-    bool   priceOk          = false;
-    bool   spreadOk         = false;
-    bool   momentumOk       = false;
-    double priceDisplacement= 0.0;   // déplacement réel en points
-    double requiredDisplacement=0.0; // déplacement requis en points
-    double currentSpread    = 0.0;
-    double avgSpread        = 0.0;
-    int    momentumCount    = 0;     // ticks consécutifs dans la direction
-    int    momentumRequired = 0;
+    bool   allowed              = false;
+    bool   priceDispatchOk      = false;  // condition 1
+    bool   spreadOk             = false;  // condition 2
+    bool   noWhipsawOk          = false;  // condition 3
+    double priceDisplacement    = 0.0;    // pts depuis dernier trigger
+    double requiredDisplacement = 0.0;    // pts requis
+    double currentSpreadPts     = 0.0;    // spread courant en points
+    double avgSpreadPts         = 0.0;    // spread moyen EWMA en points
+    double triggerPrice         = 0.0;    // prix du dernier trigger
+    double currentPrice         = 0.0;    // prix courant
+    int    side                 = 0;      // 0=BUY / 1=SELL
 
     [[nodiscard]] std::string explain() const {
         std::ostringstream oss;
-        oss << "CascadeGuard ["
-            << (allowed ? "OK" : "BLOQUÉ") << "]"
-            << " | Prix: " << (priceOk ? "✓" : "✗")
-            << " (" << priceDisplacement << "/" << requiredDisplacement << " pts)"
-            << " | Spread: " << (spreadOk ? "✓" : "✗")
-            << " (" << currentSpread << "/" << avgSpread*2 << ")"
-            << " | Momentum: " << (momentumOk ? "✓" : "✗")
-            << " (" << momentumCount << "/" << momentumRequired << " ticks)";
+        oss << "CascadeGuard [" << (allowed ? "OK" : "BLOQUÉ") << "]"
+            << " | [1]Déplacement: " << (priceDispatchOk ? "✓" : "✗")
+            << " (" << priceDisplacement << "/" << requiredDisplacement << "pts)"
+            << " | [2]Spread: " << (spreadOk ? "✓" : "✗")
+            << " (" << currentSpreadPts << "/" << avgSpreadPts*2.5 << "pts)"
+            << " | [3]Whipsaw: " << (noWhipsawOk ? "✓" : "✗")
+            << " (prix=" << currentPrice << " trigger=" << triggerPrice << ")";
         return oss.str();
     }
 };
 
+// ─── Paramètres du CascadeGuard (défini avant la classe) ────
+struct CascadeGuardParams {
+    double priceDispatchPct = 0.50;  // 50% du GridGap requis comme déplacement min
+    double spreadMaxMult    = 2.5;   // spread max = 2.5× spread moyen EWMA
+    double spreadEwmaAlpha  = 0.05;  // lissage très lent pour spread de référence
+};
+
 // ============================================================
-//  CascadeGuard — gardien professionnel
+//  CascadeGuard
 // ============================================================
 class CascadeGuard {
 public:
-    struct Params {
-        double priceDispatchPct  = 0.50; // 50% du GridGap requis comme déplacement min
-        double spreadMaxMult     = 2.5;  // spread courant ≤ 2.5× spread moyen
-        int    momentumTicks     = 3;    // N ticks consécutifs dans la direction
-        double spreadEwmaAlpha   = 0.05; // lissage lent pour spread de référence
-    };
+    using Params = CascadeGuardParams;
 
-    explicit CascadeGuard(Params p = {}) : params_(p), spreadEwma_(p.spreadEwmaAlpha) {}
+    explicit CascadeGuard(Params p = Params{})
+        : params_(p), spreadEwma_(p.spreadEwmaAlpha) {}
 
-    // ─── Appel à chaque tick ─────────────────────────────────
-    void onTick(const Tick& tick) noexcept {
+    // ─── Appel à chaque tick — alimente le spread EWMA ──────
+    void onTick(const Tick& tick, double pointSize) noexcept {
         std::lock_guard lk(mu_);
-
-        // Mise à jour spread EWMA
         spreadEwma_.update(tick.spread);
-
-        // Mise à jour momentum
-        updateMomentum(tick);
-
-        prev_ = tick;
+        lastBid_   = tick.bid;
+        lastSpread_= tick.spread;
+        pointSize_ = pointSize;
     }
 
-    // ─── Vérification avant d'autoriser un nouveau recovery ──
-    // direction : +1 = BUY déclenchement (prix monte)
-    //             -1 = SELL déclenchement (prix descend)
-    // effectiveGridGap : GridGap courant en points
-    // pointSize : taille d'un point
+    // ─── Vérification avant un nouveau recovery ──────────────
+    //
+    // side          : 0 = BuyStop déclenché  (prix a monté → SS side)
+    //                 1 = SellStop déclenché (prix a descendu → BS side)
+    // triggerPrice  : niveau du stop qui vient de se déclencher
+    // gridGap       : GridGap effectif en points
+    //
+    // Aucune prédiction de direction. Uniquement qualité du marché.
     [[nodiscard]] CascadeCheckResult check(
-        int    direction,
-        double lastTriggerPrice,
-        double currentBid,
-        double effectiveGridGap,
-        double pointSize,
-        double currentSpread) const noexcept
+        int    side,
+        double triggerPrice,
+        double gridGap) const noexcept
     {
         std::lock_guard lk(mu_);
         CascadeCheckResult r;
+        r.side         = side;
+        r.triggerPrice = triggerPrice;
+        r.currentPrice = lastBid_;
 
-        // ── Condition 1 : déplacement de prix ────────────────
-        double requiredPts = effectiveGridGap * params_.priceDispatchPct;
-        double displacement= 0.0;
-        if (lastTriggerPrice > 0.0) {
-            displacement = std::abs(currentBid - lastTriggerPrice) / pointSize;
-        } else {
-            displacement = requiredPts; // premier déclenchement → toujours autorisé
-        }
+        // ── [1] Déplacement depuis le dernier trigger ─────────
+        double requiredPts = gridGap * params_.priceDispatchPct;
+        double displacement = (lastTriggerPrice_ > 0.0 && pointSize_ > 0.0)
+            ? std::abs(lastBid_ - lastTriggerPrice_) / pointSize_
+            : requiredPts; // premier trigger → toujours ok
         r.requiredDisplacement = requiredPts;
         r.priceDisplacement    = displacement;
-        r.priceOk              = (displacement >= requiredPts);
+        r.priceDispatchOk      = (displacement >= requiredPts);
 
-        // ── Condition 2 : spread normal ───────────────────────
+        // ── [2] Spread normal ─────────────────────────────────
         double avgSpread = spreadEwma_.initialized()
                            ? spreadEwma_.value()
-                           : currentSpread;
-        r.currentSpread = currentSpread / pointSize;
-        r.avgSpread     = avgSpread / pointSize;
+                           : lastSpread_;
+        double pts = (pointSize_ > 0.0) ? 1.0 / pointSize_ : 1.0;
+        r.currentSpreadPts = lastSpread_ * pts;
+        r.avgSpreadPts     = avgSpread   * pts;
         r.spreadOk = (avgSpread <= 0.0)
-                     || (currentSpread <= avgSpread * params_.spreadMaxMult);
+                     || (lastSpread_ <= avgSpread * params_.spreadMaxMult);
 
-        // ── Condition 3 : momentum confirmé ──────────────────
-        int dir = direction; // +1 ou -1
-        r.momentumRequired = params_.momentumTicks;
-        r.momentumCount    = getMomentumCount(dir);
-        r.momentumOk       = (r.momentumCount >= params_.momentumTicks);
+        // ── [3] Anti-whipsaw : le prix tient son niveau ───────
+        // Un stop SS (vente, déclenché quand prix descend) doit
+        // rester EN DESSOUS du niveau de trigger → prix < triggerPrice
+        // Un stop BS (achat, déclenché quand prix monte) doit
+        // rester AU DESSUS du niveau de trigger → prix > triggerPrice
+        // Si le prix est revenu de l'autre côté = whipsaw = bloquer.
+        if (triggerPrice <= 0.0) {
+            r.noWhipsawOk = true; // pas de référence → premier trigger ok
+        } else if (side == 1) {
+            // SellStop : prix doit rester < triggerPrice
+            // (le marché a bien continué à descendre)
+            r.noWhipsawOk = (lastBid_ <= triggerPrice);
+        } else {
+            // BuyStop : prix doit rester > triggerPrice
+            // (le marché a bien continué à monter)
+            r.noWhipsawOk = (lastBid_ >= triggerPrice);
+        }
 
-        // ── Résultat global ───────────────────────────────────
-        r.allowed = r.priceOk && r.spreadOk && r.momentumOk;
+        r.allowed = r.priceDispatchOk && r.spreadOk && r.noWhipsawOk;
         return r;
     }
 
-    // Réinitialise après fermeture basket ou reset
-    void reset() noexcept {
-        std::lock_guard lk(mu_);
-        momentumBuf_.clear();
-        lastTriggerPrice_ = 0.0;
-    }
-
-    void setLastTriggerPrice(double price) noexcept {
+    // ─── Enregistre le prix au moment où un recovery est validé
+    void recordTrigger(double price) noexcept {
         std::lock_guard lk(mu_);
         lastTriggerPrice_ = price;
     }
 
-    [[nodiscard]] double lastTriggerPrice() const noexcept {
+    void reset() noexcept {
         std::lock_guard lk(mu_);
-        return lastTriggerPrice_;
+        lastTriggerPrice_ = 0.0;
     }
 
-    [[nodiscard]] double avgSpread() const noexcept {
-        return spreadEwma_.value();
+    [[nodiscard]] double avgSpreadRaw() const noexcept {
+        return spreadEwma_.initialized() ? spreadEwma_.value() : lastSpread_;
     }
 
 private:
-    void updateMomentum(const Tick& tick) noexcept {
-        if (prev_.bid == 0.0) return;
-        double delta = tick.bid - prev_.bid;
-        if      (delta > 0.0) momentumBuf_.push_back(+1);
-        else if (delta < 0.0) momentumBuf_.push_back(-1);
-        else                  momentumBuf_.push_back( 0);
-
-        // Garder seulement les N derniers ticks
-        int maxBuf = params_.momentumTicks * 4;
-        while ((int)momentumBuf_.size() > maxBuf)
-            momentumBuf_.pop_front();
-    }
-
-    // Compte les ticks consécutifs dans la direction donnée
-    // en partant de la fin du buffer
-    [[nodiscard]] int getMomentumCount(int dir) const noexcept {
-        int count = 0;
-        for (int i = (int)momentumBuf_.size() - 1; i >= 0; --i) {
-            if (momentumBuf_[i] == dir) ++count;
-            else                        break;
-        }
-        return count;
-    }
-
     Params             params_;
     math::EWMA         spreadEwma_;
-    std::deque<int>    momentumBuf_;   // +1 / 0 / -1 par tick
-    Tick               prev_;
+    double             lastBid_          = 0.0;
+    double             lastSpread_       = 0.0;
+    double             pointSize_        = 0.00001;
     double             lastTriggerPrice_ = 0.0;
     mutable std::mutex mu_;
 };

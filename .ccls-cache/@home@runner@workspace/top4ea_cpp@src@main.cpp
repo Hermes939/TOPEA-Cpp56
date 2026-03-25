@@ -49,7 +49,6 @@ top4ea::Config loadConfig(const std::string& path) {
             else if (key == "basket_target")    cfg.basketTarget     = std::stod(val);
             else if (key == "cascade_price_dispatch_pct") cfg.cascadePriceDispatchPct = std::stod(val);
             else if (key == "cascade_spread_max_mult")    cfg.cascadeSpreadMaxMult    = std::stod(val);
-            else if (key == "cascade_momentum_ticks")     cfg.cascadeMomentumTicks    = std::stoi(val);
             else if (key == "cascade_spread_ewma_alpha")  cfg.cascadeSpreadEwmaAlpha  = std::stod(val);
             else if (key == "max_recovery")     cfg.maxRecovery      = std::stoi(val);
             else if (key == "magic")            cfg.magic            = std::stoi(val);
