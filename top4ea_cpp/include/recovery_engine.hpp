@@ -66,6 +66,20 @@ public:
         return guard_.avgSpreadRaw() / cfg_.point;
     }
 
+    // [E] Rolling Kelly — enregistre un cycle fermé
+    void recordBasketClose(double realizedPnL) noexcept {
+        rollingKelly_.recordCycle(realizedPnL);
+    }
+    // Fraction Kelly courante (Rolling ou fixe selon config)
+    [[nodiscard]] double kellyFraction() const noexcept {
+        if (cfg_.useRollingKelly && rollingKelly_.ready())
+            return rollingKelly_.fraction();
+        return cfg_.kellyMaxFraction;
+    }
+    [[nodiscard]] int kellyHistoryCount() const noexcept {
+        return rollingKelly_.count();
+    }
+
     // ─── Reset ──────────────────────────────────────────────
     void reset()     noexcept;
     void resetSell() noexcept { sellCount_.store(0); }
@@ -81,6 +95,7 @@ private:
 
     Config              cfg_;
     CascadeGuard        guard_;
+    math::RollingKelly  rollingKelly_;   // [E] Kelly dynamique glissant
     std::atomic<int>    sellCount_ { 0 };
     std::atomic<int>    buyCount_  { 0 };
     CascadeCheckResult  lastCheck_;

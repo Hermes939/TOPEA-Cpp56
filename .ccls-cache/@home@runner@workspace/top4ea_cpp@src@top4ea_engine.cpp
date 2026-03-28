@@ -246,27 +246,74 @@ void TOP4EA_Engine::handleTriggers(const std::vector<OrderInfo>& orders) {
 }
 
 // ────────────────────────────────────────────────────────────
-//  Trail de grille
+//  Trail de grille — 4 axes adaptatifs
 // ────────────────────────────────────────────────────────────
 void TOP4EA_Engine::trailGrid() {
-    double ssLot = recovery_->sellLot();
-    double bsLot = recovery_->buyLot();
     int    ssR   = recovery_->sellCount();
     int    bsR   = recovery_->buyCount();
+    double ssLot = recovery_->sellLot();
+    double bsLot = recovery_->buyLot();
+
+    // ── [2] Gel zone TP ──────────────────────────────────────
+    // Si le basket profit dépasse (target × freezeZone), les stops
+    // sont figés : on ne les modifie plus, on laisse le prix atteindre
+    // le TP naturellement sans risquer un recovery accidentel.
+    // Un stop absent est quand même (re)créé pour ne jamais être à nu.
+    auto orders = fetchOrders();
+    double pnl   = basketProfit(orders);
+    double target = cfg_.basketTarget;
+    bool trailFrozen = (pnl >= target * cfg_.trailFreezeZone);
+
+    if (trailFrozen) {
+        // Log uniquement lors du passage en zone gelée pour ne pas spammer
+        static bool wasFrozen = false;
+        if (!wasFrozen) {
+            log("[TrailFreeze] P&L=" + std::to_string(pnl)
+                + "$ ≥ " + std::to_string(cfg_.trailFreezeZone * 100.0)
+                + "% du target → trail figé, attente TP");
+            wasFrozen = true;
+        }
+    } else {
+        static bool wasFrozen = false;
+        if (wasFrozen) { log("[TrailFreeze] Dégel du trail"); wasFrozen = false; }
+    }
+
+    // ── [4] Facteur asymétrique ───────────────────────────────
+    // Le côté avec le plus de recovery est "lourd" :
+    //   - côté lourd → gap × (1 + asymFactor) = stop plus éloigné du prix
+    //     → plus conservateur, moins de risque de cascade supplémentaire
+    //   - côté léger → gap × (1 - asymFactor) = stop plus proche du prix
+    //     → plus réactif, capturera vite le retournement en sa faveur
+    double ssGapFactor = 1.0;
+    double bsGapFactor = 1.0;
+    double af = cfg_.trailAsymmetryFactor;
+    if (ssR > bsR) {
+        ssGapFactor = 1.0 + af;   // SS lourd → plus conservateur
+        bsGapFactor = 1.0 - af;   // BS léger → plus réactif
+    } else if (bsR > ssR) {
+        bsGapFactor = 1.0 + af;   // BS lourd → plus conservateur
+        ssGapFactor = 1.0 - af;   // SS léger → plus réactif
+    }
 
     std::string ssComment = (ssR > 0) ? "SS_R" + std::to_string(ssR) : "SS_GRID";
     std::string bsComment = (bsR > 0) ? "BS_R" + std::to_string(bsR) : "BS_GRID";
 
-    ensureSellStop(ssLot, ssComment);
-    ensureBuyStop (bsLot, bsComment);
+    ensureSellStop(ssLot, ssComment, ssR, ssGapFactor, trailFrozen);
+    ensureBuyStop (bsLot, bsComment, bsR, bsGapFactor, trailFrozen);
 }
 
-void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment) {
+void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
+                                   int recovDepth, double gapFactor,
+                                   bool trailFrozen) {
     int ss = ssTicket_.load();
-    auto pl = grid_->computeSellStop(ss, ssLevel_, 0.0);
+    // Paramètres [3] et [4] transmis au grid engine
+    auto pl = grid_->computeSellStop(ss, ssLevel_, 0.0, recovDepth, gapFactor);
 
     if (pl.needsCreate) {
-        log("SS absent → création @ " + std::to_string(pl.targetPrice));
+        // Création toujours permise, même en trail gelé (on ne peut pas rester sans stop)
+        log("SS absent → création @ " + std::to_string(pl.targetPrice)
+            + " [recov=" + std::to_string(recovDepth)
+            + " gap×" + std::to_string(gapFactor) + "]");
         TradeCmd cmd = makeSellStop(lot, pl.targetPrice, comment);
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
@@ -274,7 +321,8 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment) {
             ssLevel_ = pl.targetPrice;
             log("SS créé ticket=" + std::to_string(res.ticket));
         }
-    } else if (pl.needsModify && ss > 0) {
+    } else if (pl.needsModify && ss > 0 && !trailFrozen) {
+        // [2] Si trail figé → pas de modification, seulement création
         TradeCmd cmd;
         cmd.op     = TradeCmd::Op::ModifyOrder;
         cmd.ticket = ss;
@@ -283,17 +331,22 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment) {
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             ssLevel_ = pl.targetPrice;
-            log("SS modifié → " + std::to_string(pl.targetPrice));
+            log("SS modifié → " + std::to_string(pl.targetPrice)
+                + " [step=" + std::to_string(pl.delta / cfg_.point) + "pts]");
         }
     }
 }
 
-void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment) {
+void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
+                                  int recovDepth, double gapFactor,
+                                  bool trailFrozen) {
     int bs = bsTicket_.load();
-    auto pl = grid_->computeBuyStop(bs, bsLevel_, 0.0);
+    auto pl = grid_->computeBuyStop(bs, bsLevel_, 0.0, recovDepth, gapFactor);
 
     if (pl.needsCreate) {
-        log("BS absent → création @ " + std::to_string(pl.targetPrice));
+        log("BS absent → création @ " + std::to_string(pl.targetPrice)
+            + " [recov=" + std::to_string(recovDepth)
+            + " gap×" + std::to_string(gapFactor) + "]");
         TradeCmd cmd = makeBuyStop(lot, pl.targetPrice, comment);
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
@@ -301,7 +354,7 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment) {
             bsLevel_ = pl.targetPrice;
             log("BS créé ticket=" + std::to_string(res.ticket));
         }
-    } else if (pl.needsModify && bs > 0) {
+    } else if (pl.needsModify && bs > 0 && !trailFrozen) {
         TradeCmd cmd;
         cmd.op     = TradeCmd::Op::ModifyOrder;
         cmd.ticket = bs;
@@ -310,9 +363,58 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment) {
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             bsLevel_ = pl.targetPrice;
-            log("BS modifié → " + std::to_string(pl.targetPrice));
+            log("BS modifié → " + std::to_string(pl.targetPrice)
+                + " [step=" + std::to_string(pl.delta / cfg_.point) + "pts]");
         }
     }
+}
+
+// ────────────────────────────────────────────────────────────
+//  Sélection du lot — SRH / CPPI / Rolling Kelly
+// ────────────────────────────────────────────────────────────
+double TOP4EA_Engine::selectLot(int recovCount,
+                                double drawdownUSD,
+                                double equity,
+                                double balance,
+                                double gapPoints) const noexcept
+{
+    // [C] SRH prioritaire : auto-calibré sur le drawdown réel
+    if (cfg_.useSRH) {
+        return math::srhLot(drawdownUSD, gapPoints,
+                            cfg_.tickValue, cfg_.baseLot, cfg_.srhMaxLot);
+    }
+    // [B] CPPI : protection du plancher d'equity
+    if (cfg_.useCPPI) {
+        return math::cppiLot(equity, balance,
+                             cfg_.cppiFloorPct, cfg_.cppiMultiplier,
+                             cfg_.baseLot, gapPoints, cfg_.tickValue);
+    }
+    // Défaut : Kelly-capped martingale (Rolling Kelly si activé)
+    double kf = recovery_->kellyFraction();
+    return math::recovLot(cfg_.baseLot, cfg_.lotMultiplier, recovCount, kf);
+}
+
+// ────────────────────────────────────────────────────────────
+//  Target effectif — VABT ou fixe
+// ────────────────────────────────────────────────────────────
+double TOP4EA_Engine::effectiveTarget(
+    const std::vector<OrderInfo>& orders) const noexcept
+{
+    if (!cfg_.useVABT) return cfg_.basketTarget;
+    double atrPts = grid_->atrPoints();
+    double lots   = totalLots(orders);
+    return math::vabtTarget(atrPts, lots, cfg_.tickValue,
+                            cfg_.vabtCoeff, cfg_.basketTarget);
+}
+
+double TOP4EA_Engine::totalLots(
+    const std::vector<OrderInfo>& orders) const noexcept
+{
+    double sum = 0.0;
+    for (const auto& o : orders)
+        if (o.type == OrderType::Buy || o.type == OrderType::Sell)
+            sum += o.lots;
+    return sum;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -557,6 +659,21 @@ std::string TOP4EA_Engine::dashboard() const {
     oss << "║  Basket P&L: " << (pnl>=0?"+":"") << pnl << " $\n";
     oss << "║  Target    : " << cfg_.basketTarget << " $\n";
     oss << "║  Vélocité  : " << basketMon_->velocity() << " $/tick\n";
+    oss << "╠═══════════════════════════════════╣\n";
+    // Trail status
+    int    ssR2 = recovery_->sellCount();
+    int    bsR2 = recovery_->buyCount();
+    double pnl2 = basketProfit(orders);
+    bool   frozen = (pnl2 >= cfg_.basketTarget * cfg_.trailFreezeZone);
+    double ssExp  = 1.0 + ssR2 * cfg_.gapExpansionFactor;
+    double bsExp  = 1.0 + bsR2 * cfg_.gapExpansionFactor;
+    double af2    = cfg_.trailAsymmetryFactor;
+    double ssAsym = (ssR2 > bsR2) ? 1.0+af2 : (bsR2 > ssR2 ? 1.0-af2 : 1.0);
+    double bsAsym = (bsR2 > ssR2) ? 1.0+af2 : (ssR2 > bsR2 ? 1.0-af2 : 1.0);
+
+    oss << "╠═══════════════════════════════════╣\n";
+    oss << "║  Trail  : " << (frozen ? "FIGÉ (zone TP)" : "ACTIF") << "\n";
+    oss << "║  SS gap : ×" << ssExp*ssAsym << "  BS gap : ×" << bsExp*bsAsym << "\n";
     oss << "╠═══════════════════════════════════╣\n";
     oss << "║  SS Recovery: " << recovery_->sellCount() << " / " << cfg_.maxRecovery << "\n";
     oss << "║  BS Recovery: " << recovery_->buyCount()  << " / " << cfg_.maxRecovery << "\n";

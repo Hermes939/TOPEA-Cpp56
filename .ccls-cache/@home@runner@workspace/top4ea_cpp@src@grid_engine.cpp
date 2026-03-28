@@ -13,6 +13,7 @@ GridEngine::GridEngine(const Config& cfg)
     , atr_(cfg.atrPeriod)
     , volReg_(200)
     , spreadTrack_(cfg.spreadAvgAlpha)
+    , ouEst_(cfg.ouWindowSize, cfg.ouMinTheta)
 {}
 
 void GridEngine::onTick(const Tick& tick) noexcept {
@@ -79,13 +80,22 @@ bool GridEngine::isPriceValid(double price, double minDist,
 StopPlacement GridEngine::computeSellStop(
     int    currentTicket,
     double currentLevel,
-    double minDist) const noexcept
+    double minDist,
+    int    recovDepth,
+    double gapFactor) const noexcept
 {
     std::lock_guard lk(mu_);
     StopPlacement sp;
-    double hg    = halfGap();
+
+    // [3] Gap expansion : s'élargit avec la profondeur de recovery
+    //     Plus le recovery est profond, plus le stop est placé loin
+    double expansionMult = 1.0 + recovDepth * cfg_.gapExpansionFactor;
+
+    // [4] Asymétrie : facteur passé depuis trailGrid() selon la balance des côtés
+    double effectiveHalfGap = halfGap() * expansionMult * gapFactor;
+
     double mdist = (minDist > 0.0) ? minDist : minDistPts();
-    double target = math::normalize(lastBid_ - hg, cfg_.digits);
+    double target = math::normalize(lastBid_ - effectiveHalfGap, cfg_.digits);
     if ((lastBid_ - target) < mdist)
         target = math::normalize(lastBid_ - mdist, cfg_.digits);
 
@@ -93,12 +103,15 @@ StopPlacement GridEngine::computeSellStop(
     sp.currentPrice = currentLevel;
 
     if (currentTicket <= 0) {
+        // Stop absent → création obligatoire
         sp.needsCreate = true;
     } else {
         sp.delta = target - currentLevel;
-        // Déplace uniquement si la cible s'est éloignée significativement
-        // (> 2 points vers le bas = conditions plus favorables)
-        sp.needsModify = (target > currentLevel + 2.0 * pointSize());
+        // [1] Step Trail : déplace uniquement si le prix a bougé d'au moins
+        //     trailStepPct × GridGap depuis le dernier niveau connu
+        //     Évite les micro-ajustements inutiles (bruit + OrderModify excessifs)
+        double stepThreshold = effectiveGridGap() * cfg_.trailStepPct * pointSize();
+        sp.needsModify = (target > currentLevel + stepThreshold);
     }
     return sp;
 }
@@ -106,13 +119,21 @@ StopPlacement GridEngine::computeSellStop(
 StopPlacement GridEngine::computeBuyStop(
     int    currentTicket,
     double currentLevel,
-    double minDist) const noexcept
+    double minDist,
+    int    recovDepth,
+    double gapFactor) const noexcept
 {
     std::lock_guard lk(mu_);
     StopPlacement sp;
-    double hg    = halfGap();
+
+    // [3] Gap expansion selon profondeur de recovery
+    double expansionMult = 1.0 + recovDepth * cfg_.gapExpansionFactor;
+
+    // [4] Asymétrie passée depuis trailGrid()
+    double effectiveHalfGap = halfGap() * expansionMult * gapFactor;
+
     double mdist = (minDist > 0.0) ? minDist : minDistPts();
-    double target = math::normalize(lastAsk_ + hg, cfg_.digits);
+    double target = math::normalize(lastAsk_ + effectiveHalfGap, cfg_.digits);
     if ((target - lastAsk_) < mdist)
         target = math::normalize(lastAsk_ + mdist, cfg_.digits);
 
@@ -123,8 +144,9 @@ StopPlacement GridEngine::computeBuyStop(
         sp.needsCreate = true;
     } else {
         sp.delta = currentLevel - target;
-        // Déplace si cible descend (conditions plus favorables)
-        sp.needsModify = (target < currentLevel - 2.0 * pointSize());
+        // [1] Step Trail : seuil minimum de déplacement
+        double stepThreshold = effectiveGridGap() * cfg_.trailStepPct * pointSize();
+        sp.needsModify = (target < currentLevel - stepThreshold);
     }
     return sp;
 }

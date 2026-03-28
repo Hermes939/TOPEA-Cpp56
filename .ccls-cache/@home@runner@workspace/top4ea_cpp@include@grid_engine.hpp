@@ -76,6 +76,9 @@ public:
     [[nodiscard]] bool isPriceValid(double price, double minDist,
                                     OrderType stopType) const noexcept;
 
+    // Gap OU courant en points (0 si marché non mean-reverting)
+    [[nodiscard]] int ouGridGap() const noexcept;
+
 private:
     [[nodiscard]] double minDistPts() const noexcept;
     [[nodiscard]] double pointSize()  const noexcept;
@@ -84,6 +87,7 @@ private:
     math::ATR      atr_;
     math::VolatilityRegime volReg_;
     math::SpreadTracker    spreadTrack_;
+    math::OUEstimator      ouEst_;       // [A] Estimateur Ornstein-Uhlenbeck
 
     double     lastBid_   = 0.0;
     double     lastAsk_   = 0.0;

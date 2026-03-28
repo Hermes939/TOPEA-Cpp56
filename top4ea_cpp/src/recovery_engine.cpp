@@ -15,6 +15,7 @@ RecoveryEngine::RecoveryEngine(const Config& cfg)
         .spreadMaxMult    = cfg.cascadeSpreadMaxMult,
         .spreadEwmaAlpha  = cfg.cascadeSpreadEwmaAlpha
       })
+    , rollingKelly_(cfg.kellyHistoryN, cfg.kellySafetyFactor)
 {}
 
 void RecoveryEngine::onTick(const Tick& tick) noexcept {

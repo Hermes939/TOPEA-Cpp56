@@ -96,6 +96,23 @@ private:
     TradeCmd makeCloseBy (int buyTicket, int sellTicket);
     TradeCmd makeDelete  (int ticket);
 
+    // ─── Sélection du lot (SRH / CPPI / Kelly) ──────────────
+    // drawdownUSD : max(0, -BasketProfit) — utilisé par SRH
+    // equity/bal  : utilisés par CPPI
+    [[nodiscard]] double selectLot(int recovCount,
+                                   double drawdownUSD,
+                                   double equity,
+                                   double balance,
+                                   double gapPoints) const noexcept;
+
+    // ─── Target VABT dynamique ───────────────────────────────
+    [[nodiscard]] double effectiveTarget(
+        const std::vector<OrderInfo>& orders) const noexcept;
+
+    // ─── Total lots des ordres de marché ─────────────────────
+    [[nodiscard]] double totalLots(
+        const std::vector<OrderInfo>& orders) const noexcept;
+
     // ─── Log ─────────────────────────────────────────────────
     void log(const std::string& msg) const;
 

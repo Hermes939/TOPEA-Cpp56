@@ -370,6 +370,54 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
 }
 
 // ────────────────────────────────────────────────────────────
+//  Sélection du lot — SRH / CPPI / Rolling Kelly
+// ────────────────────────────────────────────────────────────
+double TOP4EA_Engine::selectLot(int recovCount,
+                                double drawdownUSD,
+                                double equity,
+                                double balance,
+                                double gapPoints) const noexcept
+{
+    // [C] SRH prioritaire : auto-calibré sur le drawdown réel
+    if (cfg_.useSRH) {
+        return math::srhLot(drawdownUSD, gapPoints,
+                            cfg_.tickValue, cfg_.baseLot, cfg_.srhMaxLot);
+    }
+    // [B] CPPI : protection du plancher d'equity
+    if (cfg_.useCPPI) {
+        return math::cppiLot(equity, balance,
+                             cfg_.cppiFloorPct, cfg_.cppiMultiplier,
+                             cfg_.baseLot, gapPoints, cfg_.tickValue);
+    }
+    // Défaut : Kelly-capped martingale (Rolling Kelly si activé)
+    double kf = recovery_->kellyFraction();
+    return math::recovLot(cfg_.baseLot, cfg_.lotMultiplier, recovCount, kf);
+}
+
+// ────────────────────────────────────────────────────────────
+//  Target effectif — VABT ou fixe
+// ────────────────────────────────────────────────────────────
+double TOP4EA_Engine::effectiveTarget(
+    const std::vector<OrderInfo>& orders) const noexcept
+{
+    if (!cfg_.useVABT) return cfg_.basketTarget;
+    double atrPts = grid_->atrPoints();
+    double lots   = totalLots(orders);
+    return math::vabtTarget(atrPts, lots, cfg_.tickValue,
+                            cfg_.vabtCoeff, cfg_.basketTarget);
+}
+
+double TOP4EA_Engine::totalLots(
+    const std::vector<OrderInfo>& orders) const noexcept
+{
+    double sum = 0.0;
+    for (const auto& o : orders)
+        if (o.type == OrderType::Buy || o.type == OrderType::Sell)
+            sum += o.lots;
+    return sum;
+}
+
+// ────────────────────────────────────────────────────────────
 //  Fermetures
 // ────────────────────────────────────────────────────────────
 void TOP4EA_Engine::closeBasketAtomic() {

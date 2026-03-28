@@ -133,6 +133,43 @@ struct Config {
     //     Le côté en deep recovery est plus conservateur
     double      trailAsymmetryFactor = 0.15;
 
+    // ─── 5 fonctionnalités académiques ──────────────────────
+    // [A] Gap OU Optimal (Avellaneda-Lee 2010)
+    //     Priorité sur ATR si le marché est mean-reverting (ρ₁ < 0)
+    //     Fallback automatique sur ATR si trending
+    bool        useOUGrid           = false;
+    int         ouWindowSize        = 200;   // rolling window estimation OU
+    double      ouMinTheta          = 0.05;  // θ minimum pour valider le régime
+
+    // [B] CPPI Lot Recovery (Black-Perold 1992)
+    //     Protection naturelle : lot → 0 quand equity → floor
+    bool        useCPPI             = false;
+    double      cppiMultiplier      = 3.0;   // k : agressivité (2–5)
+    double      cppiFloorPct        = 0.80;  // floor = balance × 80%
+
+    // [C] SRH Lot auto-calibrant (Symmetric Recursive Hedge)
+    //     lot = drawdown_$ / (gap × tickValue) — récupère en 1 move
+    //     Priorité sur CPPI et martingale si activé
+    bool        useSRH              = false;
+    double      srhMaxLot           = 100.0; // plafond absolu
+
+    // [D] Target VABT dynamique (Risk Parity / Bridgewater)
+    //     target = ATR × vabtCoeff × totalLots × tickValue
+    bool        useVABT             = false;
+    double      vabtCoeff           = 0.15;  // coefficient de calibration
+
+    // [E] Rolling Kelly dynamique (extension de Thorp 1969)
+    //     Recalcule f* sur les N derniers cycles réels fermés
+    bool        useRollingKelly     = true;  // actif par défaut
+    int         kellyHistoryN       = 20;    // N derniers cycles
+    double      kellySafetyFactor   = 0.25;  // fraction de f* à utiliser
+
+    // ─── Valeur du tick ($ par lot par point) ───────────────
+    //     Requis pour SRH, CPPI et VABT
+    //     XAUUSD 5-digit broker : 0.10  (100oz × 0.001 = 0.1$/lot/pt)
+    //     EURUSD 5-digit broker : 1.00  (100000 × 0.00001 = 1$/lot/pt)
+    double      tickValue           = 0.10;
+
     // Connexion MT4 bridge
     std::string bridgeHost      = "127.0.0.1";
     uint16_t    bridgePort      = 9000;
