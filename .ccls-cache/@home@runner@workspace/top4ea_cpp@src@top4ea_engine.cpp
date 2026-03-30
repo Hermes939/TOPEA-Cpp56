@@ -24,6 +24,7 @@ TOP4EA_Engine::TOP4EA_Engine(Config cfg)
     grid_      = std::make_unique<GridEngine>(cfg_);
     basketMon_ = std::make_unique<BasketMonitor>(cfg_);
     recovery_  = std::make_unique<RecoveryEngine>(cfg_);
+    intel_     = std::make_unique<IntelligenceEngine>(cfg_);
 
     // Callbacks bridge
     bridge_->onTick   ([this](const Tick& t)            { onTick(t);    });
@@ -83,7 +84,8 @@ void TOP4EA_Engine::onTick(const Tick& tick) {
         lastTick_ = tick;
     }
     grid_->onTick(tick);
-    recovery_->onTick(tick);   // alimente le CascadeGuard (spread + momentum)
+    recovery_->onTick(tick);  // alimente le CascadeGuard (spread + momentum)
+    intel_->onTick(tick);     // alimente les indicateurs intelligence (OU, momentum)
     processTick(tick);
 }
 
@@ -122,8 +124,15 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
 
     // 1. Objectif journalier
     resetDailyIfNeeded();
-    checkDailyTarget();
-    if (dailyTargetReached_) return;
+    // Si daily désactivé (calibrage) : sortir de PAUSE_DAILY automatiquement
+    if (cfg_.dailyTargetPct <= 0.0) {
+        if (state_.load() == EAState::DailyPause)
+            state_.store(EAState::Init);
+        dailyTargetReached_ = false;
+    } else {
+        checkDailyTarget();
+        if (dailyTargetReached_) return;
+    }
 
     // 2. Vérification basket P&L à CHAQUE tick sur ordres cachés (< 1µs)
     //    ─ Avant la gate 1 seconde pour ne rater aucune opportunité ≤50ms ─
@@ -163,7 +172,34 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
     // 7. Déclenchements stops
     handleTriggers(orders);
 
-    // 8. Trail grille
+    // 8. Analyse intelligence profonde (1×/seconde — données fraîches)
+    {
+        AccountSnapshot acc; { std::lock_guard lk(accMu_); acc = account_; }
+        double pnl    = basketProfit(orders);
+        double target = effectiveTarget(orders);
+        double atrPts = grid_->atrPoints();
+        int    ssR    = recovery_->sellCount();
+        int    bsR    = recovery_->buyCount();
+
+        auto analysis = intel_->analyze(orders, tick, acc, pnl, target,
+                                         atrPts, ssR, bsR);
+        { std::lock_guard lk(intelMu_); lastIntel_ = analysis; }
+
+        // Signal de hedge : log si exposition fortement déséquilibrée
+        if (analysis.needsHedge) {
+            log("[INTEL] ⚠ HEDGE DELTA: delta=" + std::to_string(analysis.netDelta)
+                + " lots | pression=" + std::to_string(analysis.hedgePressure * 100.0)
+                + "% | régime=" + IntelligenceEngine::regimeName(analysis.regime));
+        }
+        // Alerte risque élevé
+        if (analysis.riskScore >= 70.0) {
+            log("[INTEL] ⚠ RISQUE " + std::to_string((int)analysis.riskScore)
+                + "/100 | DD=" + std::to_string(analysis.drawdownPct) + "%"
+                + (analysis.marginAlert ? " | MARGE CRITIQUE" : ""));
+        }
+    }
+
+    // 9. Trail grille (utilise lastIntel_ pour les facteurs adaptatifs)
     trailGrid();
 }
 
@@ -265,45 +301,38 @@ void TOP4EA_Engine::trailGrid() {
     double ssLot = recovery_->sellLot();
     double bsLot = recovery_->buyLot();
 
-    // ── [2] Gel zone TP ──────────────────────────────────────
-    // Si le basket profit dépasse (target × freezeZone), les stops
-    // sont figés : on ne les modifie plus, on laisse le prix atteindre
-    // le TP naturellement sans risquer un recovery accidentel.
-    // Un stop absent est quand même (re)créé pour ne jamais être à nu.
-    auto orders = fetchOrders();
-    double pnl   = basketProfit(orders);
-    double target = cfg_.basketTarget;
-    bool trailFrozen = (pnl >= target * cfg_.trailFreezeZone);
-
-    if (trailFrozen) {
-        // Log uniquement lors du passage en zone gelée pour ne pas spammer
-        static bool wasFrozen = false;
-        if (!wasFrozen) {
-            log("[TrailFreeze] P&L=" + std::to_string(pnl)
-                + "$ ≥ " + std::to_string(cfg_.trailFreezeZone * 100.0)
-                + "% du target → trail figé, attente TP");
-            wasFrozen = true;
-        }
-    } else {
-        static bool wasFrozen = false;
-        if (wasFrozen) { log("[TrailFreeze] Dégel du trail"); wasFrozen = false; }
-    }
-
-    // ── [4] Facteur asymétrique ───────────────────────────────
-    // Le côté avec le plus de recovery est "lourd" :
-    //   - côté lourd → gap × (1 + asymFactor) = stop plus éloigné du prix
-    //     → plus conservateur, moins de risque de cascade supplémentaire
-    //   - côté léger → gap × (1 - asymFactor) = stop plus proche du prix
-    //     → plus réactif, capturera vite le retournement en sa faveur
+    // ── Lire la dernière analyse intelligence ─────────────────
+    // Les facteurs de gap et le freeze sont pilotés par l'intelligence
+    // qui prend en compte : régime marché, delta, recovery, vélocité P&L
     double ssGapFactor = 1.0;
     double bsGapFactor = 1.0;
-    double af = cfg_.trailAsymmetryFactor;
-    if (ssR > bsR) {
-        ssGapFactor = 1.0 + af;   // SS lourd → plus conservateur
-        bsGapFactor = 1.0 - af;   // BS léger → plus réactif
-    } else if (bsR > ssR) {
-        bsGapFactor = 1.0 + af;   // BS lourd → plus conservateur
-        ssGapFactor = 1.0 - af;   // SS léger → plus réactif
+    bool   trailFrozen = false;
+    {
+        std::lock_guard lk(intelMu_);
+        if (lastIntel_.regime != IntelligenceEngine::Regime::Unknown) {
+            ssGapFactor = lastIntel_.ssGapFactor;
+            bsGapFactor = lastIntel_.bsGapFactor;
+            trailFrozen = lastIntel_.trailFrozen;
+        } else {
+            // Fallback statique si intelligence pas encore initialisée
+            double af = cfg_.trailAsymmetryFactor;
+            if (ssR > bsR)      { ssGapFactor = 1.0+af; bsGapFactor = 1.0-af; }
+            else if (bsR > ssR) { bsGapFactor = 1.0+af; ssGapFactor = 1.0-af; }
+            // Gel zone TP fallback
+            std::vector<OrderInfo> ord; { std::lock_guard lk2(ordersMu_); ord = orders_; }
+            double pnl  = basketProfit(ord);
+            trailFrozen = (pnl >= cfg_.basketTarget * cfg_.trailFreezeZone && pnl > 0.0);
+        }
+    }
+
+    // Log transition freeze
+    static bool wasFrozen = false;
+    if (trailFrozen && !wasFrozen) {
+        log("[INTEL/Trail] ❄ FIGÉ — zone TP atteinte, stops conservés");
+        wasFrozen = true;
+    } else if (!trailFrozen && wasFrozen) {
+        log("[INTEL/Trail] ✓ Dégel — trail adaptatif réactivé");
+        wasFrozen = false;
     }
 
     std::string ssComment = (ssR > 0) ? "SS_R" + std::to_string(ssR) : "SS_GRID";
@@ -712,10 +741,21 @@ std::string TOP4EA_Engine::dashboard() const {
     BasketZone zone = basketMon_->zone();
     std::string zoneStr = (zone==BasketZone::A?"A":zone==BasketZone::B?"B":"C");
 
+    // Lire les valeurs intelligence pour le trail
+    double dashSsGap = 1.0, dashBsGap = 1.0; bool dashFrozen = false;
+    {
+        std::lock_guard lk(intelMu_);
+        if (lastIntel_.regime != IntelligenceEngine::Regime::Unknown) {
+            dashSsGap  = lastIntel_.ssGapFactor;
+            dashBsGap  = lastIntel_.bsGapFactor;
+            dashFrozen = lastIntel_.trailFrozen;
+        }
+    }
+
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2);
     oss << "\n╔═══════════════════════════════════╗\n";
-    oss << "║        TOP4EA  C++20  V1.0        ║\n";
+    oss << "║    TOP4EA  C++20  V3.0 — INTEL    ║\n";
     oss << "╠═══════════════════════════════════╣\n";
     oss << "║  Symbole   : " << cfg_.symbol << "\n";
     oss << "║  État      : " << stateStr << "\n";
@@ -725,20 +765,9 @@ std::string TOP4EA_Engine::dashboard() const {
     oss << "║  Target    : " << cfg_.basketTarget << " $\n";
     oss << "║  Vélocité  : " << basketMon_->velocity() << " $/tick\n";
     oss << "╠═══════════════════════════════════╣\n";
-    // Trail status
-    int    ssR2 = recovery_->sellCount();
-    int    bsR2 = recovery_->buyCount();
-    double pnl2 = basketProfit(orders);
-    bool   frozen = (pnl2 >= cfg_.basketTarget * cfg_.trailFreezeZone);
-    double ssExp  = 1.0 + ssR2 * cfg_.gapExpansionFactor;
-    double bsExp  = 1.0 + bsR2 * cfg_.gapExpansionFactor;
-    double af2    = cfg_.trailAsymmetryFactor;
-    double ssAsym = (ssR2 > bsR2) ? 1.0+af2 : (bsR2 > ssR2 ? 1.0-af2 : 1.0);
-    double bsAsym = (bsR2 > ssR2) ? 1.0+af2 : (ssR2 > bsR2 ? 1.0-af2 : 1.0);
-
-    oss << "╠═══════════════════════════════════╣\n";
-    oss << "║  Trail  : " << (frozen ? "FIGÉ (zone TP)" : "ACTIF") << "\n";
-    oss << "║  SS gap : ×" << ssExp*ssAsym << "  BS gap : ×" << bsExp*bsAsym << "\n";
+    oss << "║  Trail  : " << (dashFrozen ? "❄FIGÉ (zone TP)" : "ACTIF") << "\n";
+    oss << "║  SS gap : ×" << std::setprecision(3) << dashSsGap
+        << "  BS gap : ×" << dashBsGap << "\n";
     oss << "╠═══════════════════════════════════╣\n";
     oss << "║  SS Recovery: " << recovery_->sellCount() << " / " << cfg_.maxRecovery << "\n";
     oss << "║  BS Recovery: " << recovery_->buyCount()  << " / " << cfg_.maxRecovery << "\n";
@@ -753,17 +782,11 @@ std::string TOP4EA_Engine::dashboard() const {
     }
     oss << std::setprecision(2);
     oss << "╠═══════════════════════════════════╣\n";
-    if (cfg_.dailyTargetPct > 0) {
-        double profDay = acc.balance - dailyStartBalance_;
-        double pctDay  = (dailyStartBalance_ > 0) ? (profDay/dailyStartBalance_*100.0) : 0;
-        oss << "║  Daily P&L : " << (profDay>=0?"+":"") << profDay << "$ ("
-            << pctDay << "% / " << cfg_.dailyTargetPct << "%)\n";
-    }
     oss << "║  Balance   : " << acc.balance << " " << acc.currency << "\n";
     oss << "║  Marge lib : " << freePct << "%\n";
     oss << "║  SS @ " << std::setprecision(5) << ssLevel_ << "\n";
     oss << "║  BS @ " << bsLevel_ << "\n";
-    // Dashboard CascadeGuard — 3 conditions de qualité marché
+    // Cascade guard
     auto cg = recovery_->lastCascadeCheck();
     oss << std::setprecision(1);
     oss << "╠═══════════════════════════════════╣\n";
@@ -775,6 +798,38 @@ std::string TOP4EA_Engine::dashboard() const {
     oss << "║  Garde cascade: " << (cg.allowed ? "OUVERT" : "BLOQUÉ") << "\n";
     oss << "╠═══════════════════════════════════╣\n";
     oss << "║  Pairs tot : " << totalPairs_.load() << " | Singles: " << totalSingles_.load() << "\n";
+    // ─── Panneau INTELLIGENCE ─────────────────────────────────
+    {
+        std::lock_guard lk(intelMu_);
+        const auto& ia = lastIntel_;
+        if (ia.regime != IntelligenceEngine::Regime::Unknown) {
+            oss << std::setprecision(2);
+            oss << "╠═══════ INTELLIGENCE ENGINE ════════╣\n";
+            oss << "║  Régime    : " << IntelligenceEngine::regimeName(ia.regime)
+                << "  ρ₁=" << std::setprecision(3) << ia.rho1 << "\n";
+            oss << std::setprecision(2);
+            oss << "║  Δ Delta   : " << (ia.netDelta>=0?"+":"") << ia.netDelta
+                << " lots  (B=" << ia.buyLots << " S=" << ia.sellLots << ")\n";
+            oss << "║  Pression  : " << (ia.hedgePressure*100.0) << "% ";
+            if (ia.needsHedge)
+                oss << "→ ⚠ HEDGE "
+                    << (ia.hedgeType==0?"BUY":"SELL") << " " << ia.hedgeLot << "L";
+            else
+                oss << "→ ✓ neutre";
+            oss << "\n";
+            oss << "║  Risque    : " << (int)ia.riskScore << "/100"
+                << "  DD=" << ia.drawdownPct << "%";
+            if (ia.marginAlert)  oss << " ⚠MARGE";
+            if (ia.cascadeRisk)  oss << " ⚠CASCADE";
+            oss << "\n";
+            oss << "║  Trail SS×" << std::setprecision(3) << ia.ssGapFactor
+                << " BS×" << ia.bsGapFactor;
+            if (ia.trailFrozen) oss << " ❄FIGÉ";
+            oss << "\n";
+            oss << "║  Vélocité  : " << std::setprecision(3) << ia.pnlVelocity << " $/tick"
+                << "  CloseProb=" << std::setprecision(1) << ia.closeProbPct << "%\n";
+        }
+    }
     oss << "╚═══════════════════════════════════╝";
     return oss.str();
 }

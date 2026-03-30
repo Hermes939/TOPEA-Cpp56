@@ -338,7 +338,7 @@ std::string MetaApiBridge::cmdToJson(const TradeCmd& cmd) const {
         oss << ",\"symbol\":\""   << sym          << "\"";
         oss << ",\"volume\":"     << cmd.lots;
         if (cmd.price > 0.0)
-            oss << ",\"openPrice\":"  << cmd.price;
+            oss << ",\"openPrice\":" << std::fixed << std::setprecision(2) << cmd.price << std::defaultfloat;
         if (cmd.sl > 0.0)
             oss << ",\"stopLoss\":"   << cmd.sl;
         if (cmd.tp > 0.0)
@@ -356,7 +356,7 @@ std::string MetaApiBridge::cmdToJson(const TradeCmd& cmd) const {
         oss << ",\"stopLoss\":"   << cmd.sl;
         oss << ",\"takeProfit\":" << cmd.tp;
         if (cmd.price > 0.0)
-            oss << ",\"openPrice\":" << cmd.price;
+            oss << ",\"openPrice\":" << std::fixed << std::setprecision(2) << cmd.price << std::defaultfloat;
     }
 
     oss << "}";

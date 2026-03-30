@@ -96,7 +96,8 @@ public:
     };
 
     // ─── Construction ─────────────────────────────────────────
-    explicit IntelligenceEngine(const Config& cfg);
+    //     Config passé par valeur (copie) — durée de vie garantie
+    explicit IntelligenceEngine(Config cfg);
 
     // ─── Alimentation tick (indicateurs internes) ─────────────
     void onTick(const Tick& tick) noexcept;
@@ -158,7 +159,7 @@ private:
                                               double pnlRatio) const;
 
     // ─── Membres ─────────────────────────────────────────────
-    const Config&         cfg_;
+    Config                cfg_;  // copie locale (durée de vie autonome)
     math::OUEstimator     ouEst_;
     math::VolatilityRegime volReg_;
     math::EWMA            momentumFast_ { 0.30 };
