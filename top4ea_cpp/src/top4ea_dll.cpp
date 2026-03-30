@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <cmath>
 
 // ─── Handle interne ─────────────────────────────────────────
 struct TOP4EA_Handle {
@@ -85,7 +86,10 @@ static top4ea::Config loadConfig(const char* path) {
             else if (key=="reconnect_ms")     cfg.reconnectMs       = std::stoi(val);
         } catch (...) {}
     }
-    std::cout << "[DLL] Config chargé : " << path << "\n";
+    cfg.point = std::pow(10.0, -(double)cfg.digits);
+    std::cout << "[DLL] Config chargé : " << path
+              << " | digits=" << cfg.digits
+              << " point=" << cfg.point << "\n";
     return cfg;
 }
 

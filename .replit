@@ -87,12 +87,12 @@ args = "TOP4EA C++20 Engine"
 name = "TOP4EA C++20 Engine"
 author = "agent"
 
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "cd top4ea_cpp && make all && ./build/top4ea top4ea.conf"
-
 [workflows.workflow.metadata]
 outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd top4ea_cpp && make clean && make all && ./build/top4ea top4ea.conf"
 
 [deployment]
 deploymentTarget = "cloudrun"
