@@ -564,6 +564,21 @@ void TOP4EA_Engine::closeBasketAtomic() {
     state_.store(EAState::Closing);
     auto orders = fetchOrders();
 
+    // ── Capturer métriques cycle AVANT fermeture (pour auto-apprentissage) ─
+    double cycleGapPoints   = (double)grid_->effectiveGridGap();
+    double cycleGapOptimal  = grid_->atrPoints() * cfg_.atrMultiplier;
+    int    cycleSsDepth     = recovery_->sellCount();
+    int    cycleBsDepth     = recovery_->buyCount();
+    int    cycleRecovDepth  = std::max(cycleSsDepth, cycleBsDepth);
+    double cyclePnL         = basketProfit(orders);
+    double cycleTarget      = effectiveTarget(orders);
+    double cycleLotUsed     = totalLots(orders);
+    double cycleDrawdownPct = 0.0;
+    { AccountSnapshot acc; { std::lock_guard lk(accMu_); acc = account_; }
+      if (acc.balance > 1.0 && acc.equity < acc.balance)
+          cycleDrawdownPct = (acc.balance - acc.equity) / acc.balance * 100.0;
+    }
+
     // Injection des fonctions de trading dans BasketCloser
     BasketCloser closer(
         cfg_,
@@ -602,6 +617,22 @@ void TOP4EA_Engine::closeBasketAtomic() {
     totalPairs_.fetch_add(res.pairsClosedBy);
     totalSingles_.fetch_add(res.singlesClosedOk);
 
+    // ── Auto-apprentissage : enregistrement cycle fermé ────────
+    //   Toujours après le close (P&L réel), avant le reset
+    if (intel_) {
+        intel_->recordCycleClosed(
+            cyclePnL,
+            cycleTarget,
+            cycleDrawdownPct,
+            cycleGapPoints,
+            cycleGapOptimal,
+            cycleRecovDepth,
+            cycleLotUsed
+        );
+        // Appliquer calibration à la config locale
+        intel_->applyCalibration(cfg_);
+    }
+
     // Reset complet
     ssTicket_.store(-1); bsTicket_.store(-1);
     ssLevel_ = 0.0; bsLevel_ = 0.0;
@@ -614,7 +645,8 @@ void TOP4EA_Engine::closeBasketAtomic() {
         Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
         gridOrigin_ = (t.bid + t.ask) * 0.5;
         log("=== BASKET FERMÉ en " + std::to_string(res.elapsed.count()) + "ms"
-            + " | nouvelle origin=" + std::to_string(gridOrigin_) + " ===");
+            + " | nouvelle origin=" + std::to_string(gridOrigin_)
+            + " | θ-calibration appliquée ===");
     }
     state_.store(EAState::Init);
 }

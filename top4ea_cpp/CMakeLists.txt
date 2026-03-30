@@ -13,13 +13,18 @@ endif()
 set(CMAKE_CXX_FLAGS_RELEASE "-O3 -march=native -DNDEBUG")
 set(CMAKE_CXX_FLAGS_DEBUG   "-g -O0 -fsanitize=address,undefined")
 
-# Sources
+# Sources (noyau + modules institutionnels)
 add_executable(top4ea
     src/main.cpp
     src/mt4_bridge.cpp
     src/grid_engine.cpp
     src/basket_manager.cpp
     src/recovery_engine.cpp
+    src/intelligence_engine.cpp
+    src/geometric_imbalance.cpp
+    src/institutional_delta.cpp
+    src/error_memory.cpp
+    src/math_calibrator.cpp
     src/top4ea_engine.cpp
 )
 

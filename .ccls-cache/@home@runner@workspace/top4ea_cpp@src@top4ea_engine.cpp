@@ -34,7 +34,17 @@ TOP4EA_Engine::TOP4EA_Engine(Config cfg)
     bridge_->onConnect([this](bool b)                   { onConnect(b); });
 }
 
-TOP4EA_Engine::~TOP4EA_Engine() { stop(); }
+TOP4EA_Engine::~TOP4EA_Engine() {
+    stop();
+    // Destruction explicite dans l'ordre pour éviter toute
+    // corruption de tas résiduelle (deque nodes libérés proprement)
+    { std::lock_guard lk(ordersMu_); orders_.clear(); }
+    intel_.reset();
+    recovery_.reset();
+    basketMon_.reset();
+    grid_.reset();
+    bridge_.reset();
+}
 
 // ────────────────────────────────────────────────────────────
 //  Lifecycle
@@ -70,7 +80,10 @@ void TOP4EA_Engine::start() {
 
 void TOP4EA_Engine::stop() {
     running_.store(false);
-    if (dashThread_.joinable()) dashThread_.request_stop();
+    if (dashThread_.joinable()) {
+        dashThread_.request_stop();
+        dashThread_.join();
+    }
     bridge_->stop();
     log("TOP4EA stoppé.");
 }

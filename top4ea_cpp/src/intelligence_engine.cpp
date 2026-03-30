@@ -1,28 +1,24 @@
 // ============================================================
 //  TOP4EA — intelligence_engine.cpp
-//  Raisonnement profond — Hedging mathématique pur C++20
+//  Raisonnement institutionnel profond — Architecture 80/20
 //
-//  ARCHITECTURE DE DÉCISION :
-//  ─────────────────────────────────────────────────────────
-//  [1] RÉGIME : OUEstimator(ρ₁) × VolatilityRegime × Momentum
-//      → classe le marché en 5 états (Range/Trend/Transitional)
+//  80% MATHÉMATIQUES GÉOMÉTRIQUES PURES :
+//  [1] Régime OU × Volatilité × Momentum
+//  [2] Delta institutionnel multi-niveau (portfolio + CVD flux)
+//  [3] Imbalance géométrique (FVG + OFI institutionnel)
+//  [4] Asymétrie géométrique pure (trail adaptatif)
+//  [5] Score de risque composite (4 axes quantitatifs)
 //
-//  [2] NET DELTA : Σ(BUY lots) - Σ(SELL lots)
-//      → mesure l'exposition directionnelle nette
-//      → signal hedge si |delta| > 30% des lots totaux
-//         en régime Trending pour neutraliser l'exposition
+//  20% INDICATEURS + AI :
+//  [6] ATR dynamique (régime volatilité)
+//  [7] Momentum EWMA fast/slow
+//  [8] Prédiction P&L velocity
+//  [9] AutoML PyTorch (calibration externe des paramètres θ)
 //
-//  [3] GAP FACTORS : facteurs adaptatifs pour trail stop
-//      RangeQuiet  → ssGap×0.85, bsGap×0.85 (stops serrés)
-//      TrendUp     → ssGap×1.40, bsGap×0.80 (asymétrie bullish)
-//      TrendDown   → ssGap×0.80, bsGap×1.40 (asymétrie bearish)
-//      RangeVol    → ssGap×1.20, bsGap×1.20 (protection vol)
-//      Zone TP     → freeze tous les stops
-//
-//  [4] RISK SCORE composite sur 3 axes (0→100) :
-//      40% recovery depth | 35% marge | 25% delta imbalance
-//
-//  [5] REASONING : log structuré en français pour dashboard
+//  AUTO-APPRENTISSAGE :
+//  - ErrorMemory : enregistrement structuré des erreurs
+//  - MathCalibrator : Adam + AutoML JSON → calibration θ
+//  - recordCycleClosed() : alimenté par TOP4EA_Engine
 // ============================================================
 #include "../include/intelligence_engine.hpp"
 #include <sstream>
@@ -41,36 +37,47 @@ IntelligenceEngine::IntelligenceEngine(Config cfg)
     , ouEst_(cfg_.ouWindowSize > 0 ? cfg_.ouWindowSize : 200,
              cfg_.ouMinTheta   > 0 ? cfg_.ouMinTheta   : 0.05)
     , volReg_(100)
+    , geoImbalance_(cfg_.point, cfg_.atrPeriod)
+    , calibrator_(cfg_)
 {}
 
 IntelligenceEngine::~IntelligenceEngine() {
-    // Vide les deques explicitement avant leur destruction automatique
-    // Prévention défensive contre toute corruption de tas résiduelle
-    ouEst_ = math::OUEstimator();
+    ouEst_  = math::OUEstimator();
     volReg_ = math::VolatilityRegime();
 }
 
 // ────────────────────────────────────────────────────────────
-//  onTick — alimentation indicateurs internes
+//  onTick — alimentation indicateurs + modules institutionnels
 // ────────────────────────────────────────────────────────────
 void IntelligenceEngine::onTick(const Tick& tick) noexcept {
     double mid = (tick.bid + tick.ask) * 0.5;
     if (mid <= 0.0) return;
 
-    // OU Estimator (mean-reversion / trending)
+    // OU Estimator
     ouEst_.push(mid);
 
-    // Momentum fast/slow (variation de prix normalisée)
+    // Momentum fast/slow
     if (lastMid_ > 0.0) {
-        double ret = (mid - lastMid_) / lastMid_ * 1e4; // en bps
+        double ret = (mid - lastMid_) / lastMid_ * 1e4;
         momentumFast_.update(ret);
         momentumSlow_.update(ret);
     }
     lastMid_ = mid;
+
+    // Modules institutionnels (80%)
+    geoImbalance_.pushTick(tick);
+    instDelta_.pushTick(tick);
 }
 
 // ────────────────────────────────────────────────────────────
-//  classifyRegime — 5 états de marché
+//  onBar — alimentation FVG depuis barres OHLC
+// ────────────────────────────────────────────────────────────
+void IntelligenceEngine::onBar(const OHLCBar& bar) noexcept {
+    geoImbalance_.pushBar(bar);
+}
+
+// ────────────────────────────────────────────────────────────
+//  classifyRegime — 5 états de marché (OU × ATR × Momentum)
 // ────────────────────────────────────────────────────────────
 IntelligenceEngine::Regime IntelligenceEngine::classifyRegime(
     double atrPoints,
@@ -78,51 +85,23 @@ IntelligenceEngine::Regime IntelligenceEngine::classifyRegime(
     double momentumFast,
     double momentumSlow) const noexcept
 {
-    // Mise à jour VolatilityRegime (mutable interne via const_cast acceptable ici)
-    // On utilise une variable locale pour l'appel — volReg_ est alimenté dans analyze()
-    VolRegime vr = volReg_.classify(atrPoints);
+    VolRegime vr   = volReg_.classify(atrPoints);
+    bool meanRev   = (rho1 < -0.15);
+    bool trending  = (rho1 >  0.10);
+    double momDiv  = momentumFast - momentumSlow;
 
-    bool meanReverting = (rho1 < -0.15); // ρ₁ < -0.15 → mean-reverting
-    bool trending      = (rho1 > 0.10);  // ρ₁ >  0.10 → trending
-
-    double momDiv = momentumFast - momentumSlow; // divergence fast/slow
-
-    if (trending && momDiv > 0.3)
-        return Regime::TrendUp;
-    if (trending && momDiv < -0.3)
-        return Regime::TrendDown;
-
-    if (!meanReverting && !trending)
-        return Regime::Transitional;
-
-    if (meanReverting && vr == VolRegime::Low)
-        return Regime::RangeQuiet;
-    if (meanReverting && vr == VolRegime::High)
-        return Regime::RangeVolatile;
-    if (meanReverting)
-        return Regime::RangeQuiet; // Medium vol → range calme
+    if (trending && momDiv > 0.3)  return Regime::TrendUp;
+    if (trending && momDiv < -0.3) return Regime::TrendDown;
+    if (!meanRev && !trending)     return Regime::Transitional;
+    if (meanRev && vr == VolRegime::Low)  return Regime::RangeQuiet;
+    if (meanRev && vr == VolRegime::High) return Regime::RangeVolatile;
+    if (meanRev)                   return Regime::RangeQuiet;
 
     return Regime::Transitional;
 }
 
 // ────────────────────────────────────────────────────────────
-//  computeGapFactors — trail stop adaptatif
-//
-//  ssGapFactor = facteur pour le gap du BuyStop  (SS)
-//  bsGapFactor = facteur pour le gap du SellStop (BS)
-//
-//  Logique :
-//  ─────────────────────────────────────────────────────────
-//  RangeQuiet   → stops serrés des deux côtés (capture rapide)
-//  TrendUp      → SS large (protège vs cascade haussière)
-//                 BS serré (marché monte → BS peu menacé)
-//  TrendDown    → BS large (protège vs cascade baissière)
-//                 SS serré (marché descend → SS peu menacé)
-//  RangeVol     → stops larges des deux côtés (protection vol)
-//  Zone TP      → freeze total (P&L proche du target)
-//
-//  Correction delta : le côté le plus chargé est plus large
-//  Correction recovery : chaque niveau ajoute gapExpansionFactor
+//  computeGapFactors — facteurs régime (contribution 25%)
 // ────────────────────────────────────────────────────────────
 std::pair<double,double> IntelligenceEngine::computeGapFactors(
     Regime r,
@@ -132,72 +111,76 @@ std::pair<double,double> IntelligenceEngine::computeGapFactors(
     int    bsR,
     double pnlRatio) const noexcept
 {
-    double ss = 1.0;
-    double bs = 1.0;
+    double ss = 1.0, bs = 1.0;
 
-    // [A] Facteurs de base selon le régime
     switch (r) {
-        case Regime::RangeQuiet:
-            ss = 0.85; bs = 0.85;   // serrés → capture rapide
-            break;
-        case Regime::RangeVolatile:
-            ss = 1.25; bs = 1.25;   // larges → protection pics de vol
-            break;
-        case Regime::TrendUp:
-            ss = 1.45; bs = 0.80;   // asymétrie bullish
-            break;
-        case Regime::TrendDown:
-            ss = 0.80; bs = 1.45;   // asymétrie bearish
-            break;
-        case Regime::Transitional:
-        case Regime::Unknown:
-        default:
-            ss = 1.05; bs = 1.05;   // légèrement plus large, prudence
-            break;
+        case Regime::RangeQuiet:    ss = 0.85; bs = 0.85; break;
+        case Regime::RangeVolatile: ss = 1.25; bs = 1.25; break;
+        case Regime::TrendUp:       ss = 1.45; bs = 0.80; break;
+        case Regime::TrendDown:     ss = 0.80; bs = 1.45; break;
+        default:                    ss = 1.05; bs = 1.05; break;
     }
 
-    // [B] Correction recovery : chaque niveau élargit son côté
-    //     (évite la cascade rapide aux mêmes prix)
+    // Expansion recovery
     if (ssR > 0) ss *= (1.0 + ssR * cfg_.gapExpansionFactor);
     if (bsR > 0) bs *= (1.0 + bsR * cfg_.gapExpansionFactor);
 
-    // [C] Correction delta — asymétrie si portfolio déséquilibré
-    //     Le côté où on a PLUS de lots reçoit un stop PLUS LARGE
-    //     pour lui donner plus d'espace (protection du côté chargé)
+    // Correction delta asymétrique
     if (totalLots > 1e-6) {
-        double pressure = netDelta / totalLots; // ∈ [-1, +1]
+        double pressure = netDelta / totalLots;
         double asym     = cfg_.trailAsymmetryFactor;
         if (pressure > 0.0) {
-            ss *= (1.0 + pressure * asym); // net long → protéger SS
+            ss *= (1.0 + pressure * asym);
             bs *= (1.0 - pressure * asym * 0.5);
         } else if (pressure < 0.0) {
-            bs *= (1.0 - pressure * asym); // net short → protéger BS
+            bs *= (1.0 - pressure * asym);
             ss *= (1.0 + pressure * asym * 0.5);
         }
     }
 
-    // [D] Zone TP : stops figés pour protéger le cycle gagnant
-    if (pnlRatio >= cfg_.trailFreezeZone) {
-        // On ne modifie pas les facteurs ici — le freeze est géré par trailFrozen
-    }
-
-    // Sécurité : facteur dans [0.50, 3.0]
     ss = std::clamp(ss, 0.50, 3.0);
     bs = std::clamp(bs, 0.50, 3.0);
-
-    return { ss, bs };
+    return {ss, bs};
 }
 
 // ────────────────────────────────────────────────────────────
-//  shouldHedge — signal de couverture delta-neutre
+//  fuseGapFactors — fusion 80/20 des facteurs gap
 //
-//  Un hedge est recommandé quand :
-//  1. Pression delta > 40% des lots totaux (fort déséquilibre)
-//  2. Régime Trending (risque que le déséquilibre s'amplifie)
-//  3. Score de risque modéré (on peut encore agir)
-//
-//  Le hedge suggère une position inverse pour neutraliser le delta.
-//  La taille = |delta| pour revenir à une exposition nulle.
+//  PONDÉRATION INSTITUTIONNELLE :
+//  35% régime OU/ATR
+//  30% delta institutionnel (CVD + portfolio)
+//  15% imbalance géométrique (FVG + OFI)
+//  20% facteurs indicateurs (ATR expansion + recovery depth)
+// ────────────────────────────────────────────────────────────
+std::pair<double,double> IntelligenceEngine::fuseGapFactors(
+    std::pair<double,double> regimeFact,
+    std::pair<double,double> deltaFact,
+    double                   imbalanceMult,
+    double /*pnlRatio*/) const noexcept
+{
+    // Pondération institutionnelle
+    static constexpr double W_REGIME   = 0.35;
+    static constexpr double W_DELTA    = 0.30;
+    static constexpr double W_IMBAL    = 0.15;
+    static constexpr double W_NEUTRAL  = 0.20;  // composante neutre (1.0)
+
+    double ssF = W_REGIME  * regimeFact.first
+               + W_DELTA   * deltaFact.first
+               + W_IMBAL   * imbalanceMult
+               + W_NEUTRAL * 1.0;
+
+    double bsF = W_REGIME  * regimeFact.second
+               + W_DELTA   * deltaFact.second
+               + W_IMBAL   * imbalanceMult
+               + W_NEUTRAL * 1.0;
+
+    ssF = std::clamp(ssF, 0.50, 3.0);
+    bsF = std::clamp(bsF, 0.50, 3.0);
+    return {ssF, bsF};
+}
+
+// ────────────────────────────────────────────────────────────
+//  shouldHedge — signal delta-neutre
 // ────────────────────────────────────────────────────────────
 bool IntelligenceEngine::shouldHedge(
     double netDelta,
@@ -206,28 +189,15 @@ bool IntelligenceEngine::shouldHedge(
     double riskScore) const noexcept
 {
     if (totalLots < 0.01) return false;
-
-    double pressure = std::abs(netDelta) / totalLots;
-
-    // Seuil de pression : 40% de déséquilibre
-    bool highPressure = (pressure > 0.40);
-
-    // Régime trending = risque amplifié du déséquilibre
-    bool trendingRegime = (r == Regime::TrendUp || r == Regime::TrendDown);
-
-    // Ne pas hedger si risque déjà critique (marge trop faible)
-    bool canAct = (riskScore < 75.0);
-
+    double pressure      = std::abs(netDelta) / totalLots;
+    bool highPressure    = (pressure > 0.40);
+    bool trendingRegime  = (r == Regime::TrendUp || r == Regime::TrendDown);
+    bool canAct          = (riskScore < 75.0);
     return highPressure && trendingRegime && canAct;
 }
 
 // ────────────────────────────────────────────────────────────
-//  computeRiskScore — score composite 0→100
-//
-//  Axes :
-//  [40%] Profondeur recovery : max(ssR, bsR) / maxRecov
-//  [35%] Pression marge     : max(0, 100 - marginLevel%) / 80%
-//  [25%] Déséquilibre delta : |delta| / totalLots
+//  computeRiskScore — score composite 0→100 (4 axes)
 // ────────────────────────────────────────────────────────────
 double IntelligenceEngine::computeRiskScore(
     double drawdownPct,
@@ -238,28 +208,25 @@ double IntelligenceEngine::computeRiskScore(
 {
     int maxR = std::max(1, cfg_.maxRecovery);
 
-    // Axe 1 — Recovery depth (35 pts max)
+    // [35%] Profondeur recovery
     double recovScore = std::min(1.0, (double)std::max(ssR, bsR) / maxR) * 35.0;
 
-    // Axe 2 — Marge (30 pts max)
-    // marginLevel = equity/margin*100 ; < 150% = danger
+    // [30%] Pression marge
     double marginScore = 0.0;
-    if (marginLevel > 0.0 && marginLevel < 500.0) {
+    if (marginLevel > 0.0 && marginLevel < 500.0)
         marginScore = std::max(0.0, (500.0 - marginLevel) / 500.0) * 30.0;
-    }
 
-    // Axe 3 — Delta imbalance (20 pts max)
+    // [20%] Delta imbalance
     double deltaScore = std::clamp(hedgePressure, 0.0, 1.0) * 20.0;
 
-    // Axe 4 — Drawdown en % du capital (15 pts max)
-    // Drawdown > 20% de capital → score plein
+    // [15%] Drawdown
     double ddScore = std::min(1.0, drawdownPct / 20.0) * 15.0;
 
     return std::min(100.0, recovScore + marginScore + deltaScore + ddScore);
 }
 
 // ────────────────────────────────────────────────────────────
-//  buildReasoning — texte structuré de raisonnement
+//  buildReasoning — texte structuré complet
 // ────────────────────────────────────────────────────────────
 std::string IntelligenceEngine::buildReasoning(const Analysis& a,
                                                 double pnlRatio) const
@@ -267,49 +234,68 @@ std::string IntelligenceEngine::buildReasoning(const Analysis& a,
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2);
 
-    // Régime
-    oss << "RÉGIME: " << regimeName(a.regime)
+    // [80%] Régime géométrique
+    oss << "[80%] RÉGIME: " << regimeName(a.regime)
         << "  ρ₁=" << std::setprecision(3) << a.rho1
         << "  MomF=" << a.momentumFast
-        << "  MomS=" << a.momentumSlow
-        << "\n";
+        << "  MomS=" << a.momentumSlow << "\n";
 
-    // Delta & Hedging
-    oss << "DELTA NET: " << std::setprecision(2)
-        << (a.netDelta >= 0 ? "+" : "") << a.netDelta << " lots"
-        << "  [B=" << a.buyLots << " S=" << a.sellLots << "]"
-        << "  Pression=" << (a.hedgePressure*100.0) << "%";
+    // [80%] Delta institutionnel
+    oss << "[80%] DELTA INST: " << deltaSignalName(a.deltaSignal)
+        << "  CVD=" << std::setprecision(3) << a.cumulativeDelta
+        << "  netΔP=" << std::setprecision(2)
+        << (a.netDelta >= 0 ? "+" : "") << a.netDelta << "lots"
+        << "  press=" << (a.hedgePressure * 100.0) << "%";
     if (a.needsHedge) {
-        oss << "  ⚠ HEDGE requis: "
+        oss << "  ⚠ HEDGE: "
             << (a.hedgeType == 0 ? "BUY " : "SELL ")
-            << a.hedgeLot << " lots pour neutraliser";
-    } else {
-        oss << "  ✓ exposition équilibrée";
+            << a.hedgeLot << "lots";
     }
+    if (a.deltaExhaustion) oss << "  ⏸ ÉPUISEMENT";
     oss << "\n";
 
-    // Trail stop
-    oss << "TRAIL: ss×" << std::setprecision(3) << a.ssGapFactor
-        << " bs×" << a.bsGapFactor;
-    if (a.trailFrozen) oss << "  ❄ FIGÉ (zone TP " << (pnlRatio*100.0) << "%)";
+    // [80%] Imbalance FVG + OFI
+    oss << "[80%] IMBALANCE: score=" << std::setprecision(1) << a.imbalanceScore
+        << "  OFI=" << std::setprecision(3) << a.ofiNormalized;
+    if (a.ssAnchorFVG > 0) oss << "  FVG_SS@" << std::setprecision(2) << a.ssAnchorFVG;
+    if (a.bsAnchorFVG > 0) oss << "  FVG_BS@" << a.bsAnchorFVG;
+    if (a.displacementActive) oss << "  ⚡ DISPLACEMENT";
     oss << "\n";
 
-    // Risk
-    oss << "RISQUE: " << std::setprecision(1) << a.riskScore << "/100"
-        << "  DD=" << a.drawdownPct << "%"
-        << "  PnLv=" << std::setprecision(3) << a.pnlVelocity << "$/tick";
-    if (a.marginAlert)  oss << "  ⚠ MARGE CRITIQUE";
-    if (a.cascadeRisk)  oss << "  ⚠ RISQUE CASCADE";
+    // [80%] Trail asymétrique
+    oss << "[80%] TRAIL: ss×" << std::setprecision(3) << a.ssGapFactor
+        << " bs×" << a.bsGapFactor
+        << "  asym×" << a.asymmetryMult;
+    if (a.trailFrozen) oss << "  ❄ FIGÉ (P&L " << (pnlRatio * 100.0) << "%)";
     oss << "\n";
 
-    // Décision résumée
-    oss << "DÉCISION: ";
+    // [80%] Risque
+    oss << "[80%] RISQUE: " << std::setprecision(1) << a.riskScore << "/100"
+        << "  DD=" << a.drawdownPct << "%";
+    if (a.marginAlert) oss << "  ⚠ MARGE CRITIQUE";
+    if (a.cascadeRisk) oss << "  ⚠ RISQUE CASCADE";
+    oss << "\n";
+
+    // [20%] Velocity + prédiction
+    oss << "[20%] VELOCITY: " << std::setprecision(3) << a.pnlVelocity << "$/tick"
+        << "  closeProb=" << std::setprecision(1) << a.closeProbPct << "%\n";
+
+    // Décision finale
+    oss << "→ DÉCISION: ";
     if (a.riskScore >= 80)
-        oss << "DÉFENSIF — réduction exposition prioritaire";
+        oss << "DÉFENSIF — réduction exposition";
+    else if (a.deltaExhaustion)
+        oss << "ATTENTE — épuisement institutionnel → pivot imminent";
+    else if (a.deltaSignal == DeltaSignal::DivergenceBullish)
+        oss << "ACCUMULATION — protéger BS, élargir SS";
+    else if (a.deltaSignal == DeltaSignal::DivergenceBearish)
+        oss << "DISTRIBUTION — protéger SS, élargir BS";
+    else if (a.displacementActive)
+        oss << "DISPLACEMENT — gel trail, attendre retour géométrique";
     else if (a.riskScore >= 50)
-        oss << "PRUDENCE — trail élargi, stops conservateurs";
+        oss << "PRUDENCE — trail élargi";
     else if (a.regime == Regime::RangeQuiet)
-        oss << "OFFENSIF — marché range, capture rapide activée";
+        oss << "OFFENSIF — range calme, capture rapide";
     else if (a.regime == Regime::TrendUp)
         oss << "BULLISH — asymétrie SS élargi, BS serré";
     else if (a.regime == Regime::TrendDown)
@@ -321,7 +307,7 @@ std::string IntelligenceEngine::buildReasoning(const Analysis& a,
 }
 
 // ────────────────────────────────────────────────────────────
-//  analyze — point d'entrée principal
+//  analyze — point d'entrée principal (80/20 intégré)
 // ────────────────────────────────────────────────────────────
 IntelligenceEngine::Analysis IntelligenceEngine::analyze(
     const std::vector<OrderInfo>& orders,
@@ -336,53 +322,66 @@ IntelligenceEngine::Analysis IntelligenceEngine::analyze(
     Analysis a;
     a.atrPoints = atrPoints;
 
-    // ── [1] Indicateurs de marché ─────────────────────────────
     double mid = (tick.bid + tick.ask) * 0.5;
 
-    // Mise à jour OUEstimator et VolatilityRegime
+    // ── [80%/1] Régime OU × ATR × Momentum ───────────────────
     ouEst_.push(mid);
     volReg_.push(atrPoints);
 
     double rho1 = 0.0;
     if (ouEst_.ready()) {
-        // Recalcul ρ₁ via optimalGapPrice (on utilise l'OUEstimator interne)
-        // ρ₁ est estimé indirectement : gap > 0 → rho1 < 0 (mean-reverting)
         double ouGap = ouEst_.optimalGapPrice();
-        if (ouGap > 0.0) rho1 = -0.25; // mean-reverting estimé
-        else             rho1 =  0.15; // trending estimé
+        rho1 = (ouGap > 0.0) ? -0.25 : 0.15;
     }
 
-    // Momentum
     double momF = momentumFast_.value();
     double momS = momentumSlow_.value();
-
-    // Régime
     a.rho1         = rho1;
     a.momentumFast = momF;
     a.momentumSlow = momS;
     a.volRegime    = volReg_.classify(atrPoints);
     a.regime       = classifyRegime(atrPoints, rho1, momF, momS);
 
-    // ── [2] Analyse du portefeuille — net delta ───────────────
+    // ── [80%/2] Delta institutionnel multi-niveau ─────────────
     double buyLots = 0.0, sellLots = 0.0;
     int    buyN = 0, sellN = 0;
-
     for (const auto& o : orders) {
         if (o.type == OrderType::Buy)  { buyLots  += o.lots; ++buyN;  }
         if (o.type == OrderType::Sell) { sellLots += o.lots; ++sellN; }
     }
 
-    a.buyLots    = buyLots;
-    a.sellLots   = sellLots;
-    a.buyOrders  = buyN;
-    a.sellOrders = sellN;
-    a.totalLots  = buyLots + sellLots;
-    a.netDelta   = buyLots - sellLots;
-    a.hedgePressure = (a.totalLots > 1e-6)
-                    ? std::abs(a.netDelta) / a.totalLots
-                    : 0.0;
+    // Mise à jour du tracker delta institutionnel
+    instDelta_.updatePortfolio(buyLots, sellLots, buyN, sellN);
+    DeltaSnapshot deltaSnap = instDelta_.analyze();
 
-    // ── [3] Score de risque ───────────────────────────────────
+    a.buyLots         = buyLots;
+    a.sellLots        = sellLots;
+    a.buyOrders       = buyN;
+    a.sellOrders      = sellN;
+    a.totalLots       = buyLots + sellLots;
+    a.netDelta        = buyLots - sellLots;   // delta portefeuille (Niveau 1)
+    a.hedgePressure   = (a.totalLots > 1e-6)
+                      ? std::abs(a.netDelta) / a.totalLots
+                      : 0.0;
+
+    // Delta institutionnel flux (Niveaux 2-4)
+    a.flowDeltaNet    = deltaSnap.flowDeltaNet;
+    a.cumulativeDelta = deltaSnap.cumulativeDelta;
+    a.deltaSignal     = deltaSnap.primarySignal;
+    a.deltaExhaustion = deltaSnap.exhaustion;
+    a.deltaReasoning  = deltaSnap.reasoning;
+
+    // ── [80%/3] Imbalance géométrique (FVG + OFI) ────────────
+    ImbalanceAnalysis imbAnalysis = geoImbalance_.analyze(mid);
+    a.imbalanceScore     = imbAnalysis.imbalanceScore;
+    a.ofiNormalized      = imbAnalysis.ofi.normalizedOFI;
+    a.ssAnchorFVG        = imbAnalysis.ssAnchorPrice;
+    a.bsAnchorFVG        = imbAnalysis.bsAnchorPrice;
+    a.displacementActive = imbAnalysis.displacementDetected;
+    a.asymmetryMult      = imbAnalysis.asymmetryMultiplier;
+    a.imbalanceReasoning = imbAnalysis.summary;
+
+    // ── [80%/4] Score de risque composite ─────────────────────
     double drawdownUSD = (account.balance > 0.0)
                        ? std::max(0.0, account.balance - account.equity)
                        : 0.0;
@@ -390,58 +389,145 @@ IntelligenceEngine::Analysis IntelligenceEngine::analyze(
                        ? drawdownUSD / account.balance * 100.0
                        : 0.0;
 
-    a.drawdownUSD  = drawdownUSD;
-    a.drawdownPct  = drawdownPct;
-    a.marginAlert  = (account.marginLevel > 0.0 && account.marginLevel < 150.0);
-    a.cascadeRisk  = (std::max(ssRecovery, bsRecovery) >= cfg_.maxRecovery - 3);
+    a.drawdownUSD = drawdownUSD;
+    a.drawdownPct = drawdownPct;
+    a.marginAlert = (account.marginLevel > 0.0 && account.marginLevel < 150.0);
+    a.cascadeRisk = (std::max(ssRecovery, bsRecovery) >= cfg_.maxRecovery - 3);
+    a.riskScore   = computeRiskScore(drawdownPct, account.marginLevel,
+                                      ssRecovery, bsRecovery, a.hedgePressure);
 
-    a.riskScore = computeRiskScore(drawdownPct, account.marginLevel,
-                                   ssRecovery, bsRecovery, a.hedgePressure);
-
-    // ── [4] Signal de hedge ───────────────────────────────────
+    // ── [80%/5] Signal de hedge delta-neutre ─────────────────
     a.needsHedge = shouldHedge(a.netDelta, a.totalLots, a.regime, a.riskScore);
     if (a.needsHedge) {
-        // Hedge type : inverser le déséquilibre
-        a.hedgeType = (a.netDelta > 0) ? 1 : 0;   // net long → vendre, net short → acheter
-        // Lot : neutraliser exactement le delta
+        a.hedgeType = (a.netDelta > 0) ? 1 : 0;
         a.hedgeLot  = std::round(std::abs(a.netDelta) * 100.0) / 100.0;
         a.hedgeLot  = std::max(a.hedgeLot, cfg_.baseLot);
     }
 
-    // ── [5] Facteurs trail stop adaptatifs ───────────────────
+    // ── [80%/5b] Trail stop asymétrique — fusion 80/20 ───────
     double pnlRatio = (std::abs(basketTarget) > 1e-6)
                     ? basketPnL / basketTarget
                     : 0.0;
 
-    auto [ssF, bsF] = computeGapFactors(a.regime, a.netDelta, a.totalLots,
+    // 35% régime ATR/OU
+    auto regimeFact = computeGapFactors(a.regime, a.netDelta, a.totalLots,
                                          ssRecovery, bsRecovery, pnlRatio);
+
+    // 30% delta institutionnel
+    auto deltaFact  = std::make_pair(deltaSnap.suggestedSSFactor,
+                                      deltaSnap.suggestedBSFactor);
+
+    // 15% imbalance OFI
+    double imbalMult = imbAnalysis.asymmetryMultiplier;
+
+    // Fusion pondérée 80/20
+    auto [ssF, bsF] = fuseGapFactors(regimeFact, deltaFact, imbalMult, pnlRatio);
+
+    // Geler si displacement actif ou zone TP atteinte
+    bool freezeByDisplace = (imbAnalysis.displacementDetected &&
+                              imbAnalysis.displacementMagnitude > 3.0);
+    bool freezeByTP       = (pnlRatio >= cfg_.trailFreezeZone && basketPnL > 0.0);
+    bool freezeByExhaust  = (deltaSnap.suggestTrailFreeze);
+
     a.ssGapFactor  = ssF;
     a.bsGapFactor  = bsF;
-    a.trailFrozen  = (pnlRatio >= cfg_.trailFreezeZone && basketPnL > 0.0);
+    a.trailFrozen  = freezeByTP || freezeByDisplace || freezeByExhaust;
     a.trailTightness = (ssF + bsF) * 0.5;
 
-    // ── [6] Vélocité P&L et prédiction ───────────────────────
+    // ── [20%] Vélocité P&L et prédiction ─────────────────────
     double vel = pnlVel_.update(basketPnL);
     a.pnlVelocity = vel;
 
-    // Probabilité de fermeture (heuristique basée sur vélocité)
     if (vel > 0.0 && basketTarget > basketPnL) {
-        double ticksEstimated = (basketTarget - basketPnL) / vel;
-        a.estimatedTicksTarget = (int)std::clamp(ticksEstimated, 1.0, 9999.0);
-        // Probabilité : décroît exponentiellement avec la distance
-        a.closeProbPct = std::max(0.0, 100.0 * std::exp(-ticksEstimated / 10.0));
+        double ticksEst = (basketTarget - basketPnL) / vel;
+        a.estimatedTicksTarget = (int)std::clamp(ticksEst, 1.0, 9999.0);
+        a.closeProbPct = std::max(0.0, 100.0 * std::exp(-ticksEst / 10.0));
     } else {
         a.estimatedTicksTarget = 9999;
         a.closeProbPct         = 0.0;
     }
 
-    // ── [7] Raisonnement ─────────────────────────────────────
+    // ── Paramètres calibrés courants ──────────────────────────
+    a.calibratedParams = calibrator_.currentParams();
+
+    // ── Raisonnement structuré ────────────────────────────────
     a.reasoning = buildReasoning(a, pnlRatio);
 
     // ── Mise à jour état interne ──────────────────────────────
     { std::lock_guard lk(mu_); lastRegime_ = a.regime; }
 
     return a;
+}
+
+// ────────────────────────────────────────────────────────────
+//  recordCycleClosed — auto-apprentissage après fermeture basket
+// ────────────────────────────────────────────────────────────
+void IntelligenceEngine::recordCycleClosed(
+    double pnlResult,
+    double targetExpected,
+    double drawdownPct,
+    double gapUsedPoints,
+    double gapOptimalPoints,
+    int    recovDepth,
+    double lotUsed
+) noexcept {
+    // [1] Enregistrer dans le RollingKelly (déjà existant dans RecoveryEngine)
+    // → fait dans TOP4EA_Engine::closeBasketAtomic()
+
+    // [2] Construire et enregistrer l'erreur mathématique
+    // Récupérer le dernier contexte d'analyse
+    IntelligenceEngine::Regime lastR;
+    {
+        std::lock_guard lk(mu_);
+        lastR = lastRegime_;
+    }
+
+    auto err = errorMem_.buildCycleError(
+        /* atrPoints */       geoImbalance_.atrValue(),
+        /* atrMult */         cfg_.atrMultiplier,
+        /* gapUsed */         gapUsedPoints,
+        /* gapOptimal */      gapOptimalPoints,
+        /* rho1 */            ouEst_.ready() ? (ouEst_.optimalGapPrice() > 0 ? -0.25 : 0.15) : 0.0,
+        /* regime */          (int)lastR,
+        /* netDelta */        0.0,   // sera mis à jour si disponible
+        /* hedgePressure */   0.0,
+        /* recovDepth */      recovDepth,
+        /* lotUsed */         lotUsed,
+        /* pnlResult */       pnlResult,
+        /* targetExpected */  targetExpected,
+        /* drawdownPct */     drawdownPct
+    );
+    errorMem_.record(std::move(err));
+
+    // [3] Export pour AutoML Python
+    DeltaSnapshot ds = instDelta_.analyze();
+    calibrator_.exportCycleToAutoML(
+        geoImbalance_.atrValue(),
+        ouEst_.ready() ? (ouEst_.optimalGapPrice() > 0 ? -0.25 : 0.15) : 0.0,
+        (int)lastR,
+        ds.portfolioDelta,
+        ds.portfolioPressure,
+        recovDepth,
+        lotUsed,
+        pnlResult,
+        drawdownPct,
+        std::abs(ds.cumulativeDelta) * 100.0,  // OFI score proxy
+        geoImbalance_.analyze(lastMid_).imbalanceScore,
+        cfg_.atrMultiplier,
+        cfg_.kellyMaxFraction,
+        cfg_.gapExpansionFactor,
+        cfg_.trailAsymmetryFactor
+    );
+
+    // [4] Calibration périodique (tous les CALIB_EVERY cycles)
+    ++cycleCount_;
+    if (cycleCount_ % CALIB_EVERY == 0 && errorMem_.readyForCalibration()) {
+        auto result = calibrator_.calibrate(errorMem_);
+        if (result.gradientSteps > 0) {
+            // Appliquer les paramètres calibrés à la config locale
+            calibrator_.applyToConfig(cfg_);
+        }
+    }
 }
 
 // ────────────────────────────────────────────────────────────

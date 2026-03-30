@@ -17,9 +17,9 @@ GridEngine::GridEngine(const Config& cfg)
 {}
 
 void GridEngine::onTick(const Tick& tick) noexcept {
+    lastBid_.store(tick.bid, std::memory_order_relaxed);
+    lastAsk_.store(tick.ask, std::memory_order_relaxed);
     std::lock_guard lk(mu_);
-    lastBid_ = tick.bid;
-    lastAsk_ = tick.ask;
     spreadTrack_.push(tick.spread);
 
     // [A] Alimentation estimateur OU avec le prix mid
@@ -41,7 +41,7 @@ void GridEngine::pushOHLC(double o, double h, double l, double c) noexcept {
     lastHigh_   = h;
     lastLow_    = l;
     volReg_.push(atrV);
-    regime_ = volReg_.classify(atrV);
+    regime_.store(volReg_.classify(atrV), std::memory_order_relaxed);
 }
 
 double GridEngine::pointSize() const noexcept {
@@ -50,10 +50,12 @@ double GridEngine::pointSize() const noexcept {
 }
 
 double GridEngine::atrPoints() const noexcept {
+    std::lock_guard lk(mu_);
     return atr_.ready() ? atr_.toPoints(pointSize()) : (double)cfg_.gridGap;
 }
 
 int GridEngine::ouGridGap() const noexcept {
+    std::lock_guard lk(mu_);
     if (!cfg_.useOUGrid || !ouEst_.ready()) return 0;
     double gapPrice = ouEst_.optimalGapPrice();
     if (gapPrice <= 0.0) return 0;
@@ -62,11 +64,12 @@ int GridEngine::ouGridGap() const noexcept {
 }
 
 int GridEngine::effectiveGridGap() const noexcept {
+    std::lock_guard lk(mu_);
     // Priorité 1 : OU optimal si marché mean-reverting et activé
     if (cfg_.useOUGrid) {
+        // Re-entrant: mu_ est recursive_mutex, l'appel interne est sûr
         int ou = ouGridGap();
         if (ou > 0) return ou;
-        // Fallback si trending : ATR ou fixe
     }
     // Priorité 2 : ATR dynamique
     if (cfg_.useAtrGrid && atr_.ready())
@@ -90,10 +93,12 @@ double GridEngine::minDistPts() const noexcept {
 
 bool GridEngine::isPriceValid(double price, double minDist,
                               OrderType stopType) const noexcept {
+    double bid = lastBid_.load(std::memory_order_relaxed);
+    double ask = lastAsk_.load(std::memory_order_relaxed);
     if (stopType == OrderType::SellStop)
-        return (lastBid_ - price) >= minDist;
+        return (bid - price) >= minDist;
     if (stopType == OrderType::BuyStop)
-        return (price - lastAsk_) >= minDist;
+        return (price - ask) >= minDist;
     return true;
 }
 
@@ -107,11 +112,13 @@ StopPlacement GridEngine::computeSellStop(
     std::lock_guard lk(mu_);
     StopPlacement sp;
 
+    double bid = lastBid_.load(std::memory_order_relaxed);
+
     // ── Ancrage géométrique pur ────────────────────────────────
     // Le SellStop est placé à EXACTEMENT (depth+1) niveaux de grille
     // EN DESSOUS de l'origine. Jamais calculé depuis le prix courant.
     // Si anchorPrice non encore établi → fallback bid courant (init)
-    double anchor = (anchorPrice > 0.0) ? anchorPrice : lastBid_;
+    double anchor = (anchorPrice > 0.0) ? anchorPrice : bid;
 
     // Pas géométrique : 1 GridGap complet × facteur asymétrique intelligence
     double step = effectiveGridGap() * gapFactor * pointSize();
@@ -121,8 +128,8 @@ StopPlacement GridEngine::computeSellStop(
 
     // Garde broker : le stop doit respecter le STOPLEVEL minimum
     double mdist = minDistPts();
-    if ((lastBid_ - target) < mdist)
-        target = math::normalize(lastBid_ - mdist, cfg_.digits);
+    if ((bid - target) < mdist)
+        target = math::normalize(bid - mdist, cfg_.digits);
 
     sp.targetPrice  = target;
     sp.currentPrice = currentLevel;
@@ -151,10 +158,12 @@ StopPlacement GridEngine::computeBuyStop(
     std::lock_guard lk(mu_);
     StopPlacement sp;
 
+    double ask = lastAsk_.load(std::memory_order_relaxed);
+
     // ── Ancrage géométrique pur ────────────────────────────────
     // Le BuyStop est placé à EXACTEMENT (depth+1) niveaux de grille
     // AU DESSUS de l'origine. Jamais calculé depuis le prix courant.
-    double anchor = (anchorPrice > 0.0) ? anchorPrice : lastAsk_;
+    double anchor = (anchorPrice > 0.0) ? anchorPrice : ask;
 
     // Pas géométrique : 1 GridGap complet × facteur asymétrique intelligence
     double step = effectiveGridGap() * gapFactor * pointSize();
@@ -164,8 +173,8 @@ StopPlacement GridEngine::computeBuyStop(
 
     // Garde broker : le stop doit respecter le STOPLEVEL minimum
     double mdist = minDistPts();
-    if ((target - lastAsk_) < mdist)
-        target = math::normalize(lastAsk_ + mdist, cfg_.digits);
+    if ((target - ask) < mdist)
+        target = math::normalize(ask + mdist, cfg_.digits);
 
     sp.targetPrice  = target;
     sp.currentPrice = currentLevel;

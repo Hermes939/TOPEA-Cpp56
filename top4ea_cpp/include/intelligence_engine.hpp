@@ -1,32 +1,36 @@
 #pragma once
 // ============================================================
 //  TOP4EA — intelligence_engine.hpp
-//  Raisonnement profond — Hedging mathématique pur
+//  Raisonnement profond — Hedging mathématique institutionnel pur
 //
-//  PRINCIPES FONDAMENTAUX :
+//  ARCHITECTURE 80/20 INSTITUTIONNELLE :
 //  ─────────────────────────────────────────────────────────
-//  1. RÉGIME DE MARCHÉ — classifie le comportement du prix
-//     sur 4 axes : mean-reversion (OU), volatilité (ATR),
-//     momentum (EWMA fast/slow), spread qualité.
+//  80% MATHÉMATIQUES GÉOMÉTRIQUES PURES :
+//    1. RÉGIME OU — Ornstein-Uhlenbeck mean-reversion
+//    2. NET DELTA INSTITUTIONNEL — multi-niveau (portfolio + flux)
+//    3. IMBALANCE GÉOMÉTRIQUE — FVG + OFI institutionnel
+//    4. ASYMÉTRIE GÉOMÉTRIQUE PURE — trail adaptatif par régime
+//    5. SCORE DE RISQUE COMPOSITE — 4 axes mathématiques
 //
-//  2. NET DELTA (HEDGING PUR) — mesure l'exposition nette
-//     delta = Σ(BUY lots) - Σ(SELL lots)
-//     Idéal delta-neutre = 0. Signal hedge si |delta| > seuil.
+//  20% INDICATEURS + AI :
+//    6. ATR DYNAMIQUE — régime de volatilité
+//    7. MOMENTUM EWMA — fast/slow divergence
+//    8. PRÉDICTION P&L VELOCITY — fermeture prédictive
+//    9. AutoML PyTorch — optimisation externe des paramètres
 //
-//  3. TRAIL STOP INTELLIGENT — facteurs adaptatifs
-//     ssGapFactor, bsGapFactor modulés par régime + delta
-//     pour maximiser la capture de profit et minimiser les
-//     cascades de recovery inutiles.
-//
-//  4. SCORE DE RISQUE — 0 (sécurisé) → 100 (danger critique)
-//     Composantes : profondeur recovery, pression marge,
-//     déséquilibre delta, qualité de marché.
-//
-//  5. RAISONNEMENT TEXTUEL — chaque décision est expliquée
-//     en clair pour l'opérateur et le tableau de bord.
+//  NOUVEAU — MODULES INSTITUTIONNELS :
+//  ─────────────────────────────────────────────────────────
+//  GeometricImbalance : FVG + OFI pour ancrage de grille
+//  InstitutionalDelta : CVD proxy + divergence + épuisement
+//  ErrorMemory        : mémoire des erreurs mathématiques
+//  MathCalibrator     : auto-calibration par Adam + AutoML
 // ============================================================
 #include "types.hpp"
 #include "math_core.hpp"
+#include "geometric_imbalance.hpp"
+#include "institutional_delta.hpp"
+#include "error_memory.hpp"
+#include "math_calibrator.hpp"
 #include <string>
 #include <vector>
 #include <deque>
@@ -53,7 +57,7 @@ public:
     // ─── Résultat complet de l'analyse ───────────────────────
     struct Analysis {
 
-        // === Régime de marché ===
+        // === [80%] Régime de marché (OU + Géométrie) ===
         Regime       regime          = Regime::Unknown;
         double       rho1            = 0.0;   // autocorrélation lag-1 (Ornstein-Uhlenbeck)
         double       momentumFast    = 0.0;   // momentum court terme (EWMA α=0.30)
@@ -61,38 +65,57 @@ public:
         VolRegime    volRegime       = VolRegime::Medium;
         double       atrPoints       = 0.0;
 
-        // === Hedging Delta-Neutre Pur ===
+        // === [80%] Delta Institutionnel Multi-Niveau ===
         double       buyLots         = 0.0;
         double       sellLots        = 0.0;
         int          buyOrders       = 0;
         int          sellOrders      = 0;
         double       totalLots       = 0.0;
-        double       netDelta        = 0.0;   // BUY lots - SELL lots (+>0 = net long)
+        double       netDelta        = 0.0;   // BUY lots - SELL lots (portefeuille)
         double       hedgePressure   = 0.0;   // |delta| / totalLots  ∈ [0,1]
         bool         needsHedge      = false; // signal de couverture requis
         int          hedgeType       = -1;    // 0=BUY, 1=SELL  (-1=aucun)
-        double       hedgeLot        = 0.0;   // lot suggéré pour neutraliser le delta
+        double       hedgeLot        = 0.0;   // lot pour neutraliser le delta
 
-        // === Trail Stop Intelligent ===
+        // Delta institutionnel flux (CVD proxy)
+        double       flowDeltaNet    = 0.0;   // fast - slow EWMA flux
+        double       cumulativeDelta = 0.0;   // CVD normalisé [-1,+1]
+        DeltaSignal  deltaSignal     = DeltaSignal::Neutral;  // signal institutionnel
+        bool         deltaExhaustion = false; // épuisement institutionnel → pivot
+
+        // === [80%] Imbalance Géométrique (FVG + OFI) ===
+        double       imbalanceScore  = 0.0;   // score d'imbalance [0,100]
+        double       ofiNormalized   = 0.0;   // OFI normalisé [-1,+1]
+        double       ssAnchorFVG     = 0.0;   // ancre SellStop sur FVG (0=non dispo)
+        double       bsAnchorFVG     = 0.0;   // ancre BuyStop sur FVG (0=non dispo)
+        bool         displacementActive = false; // déplacement impulsif actif
+        double       asymmetryMult   = 1.0;   // multiplicateur OFI pour asymétrie
+
+        // === [80%] Trail Stop Asymétrique Institutionnel ===
         double       ssGapFactor     = 1.0;   // multiplicateur gap BuyStop  (SS)
         double       bsGapFactor     = 1.0;   // multiplicateur gap SellStop (BS)
         bool         trailFrozen     = false; // stops figés (zone TP proche)
-        double       trailTightness  = 1.0;   // serrage global (< 1 = plus serré)
+        double       trailTightness  = 1.0;   // serrage global
 
-        // === Score de risque multidimensionnel ===
+        // === [80%] Score de risque composite (4 axes) ===
         double       riskScore       = 0.0;   // 0=sécurisé, 100=danger critique
-        double       drawdownUSD     = 0.0;   // drawdown absolu en $
-        double       drawdownPct     = 0.0;   // drawdown en % du capital
-        bool         marginAlert     = false; // alerte niveau de marge critique
-        bool         cascadeRisk     = false; // risque cascade imminente
+        double       drawdownUSD     = 0.0;
+        double       drawdownPct     = 0.0;
+        bool         marginAlert     = false;
+        bool         cascadeRisk     = false;
 
-        // === Prédiction convergence ===
-        double       closeProbPct    = 0.0;   // probabilité de close ≤ horizon ticks
-        int          estimatedTicksTarget = 9999; // ticks estimés avant target
-        double       pnlVelocity     = 0.0;   // vitesse P&L ($/tick, EWMA)
+        // === [20%] Prédiction convergence (velocity) ===
+        double       closeProbPct    = 0.0;
+        int          estimatedTicksTarget = 9999;
+        double       pnlVelocity     = 0.0;
 
-        // === Raisonnement lisible ===
+        // === Calibration auto (paramètres courants) ===
+        CalibrableParams calibratedParams;   // paramètres θ courants
+
+        // === Raisonnement structuré complet ===
         std::string  reasoning;
+        std::string  deltaReasoning;
+        std::string  imbalanceReasoning;
     };
 
     // ─── Construction ─────────────────────────────────────────
@@ -103,7 +126,10 @@ public:
     // ─── Alimentation tick (indicateurs internes) ─────────────
     void onTick(const Tick& tick) noexcept;
 
-    // ─── Analyse complète ─────────────────────────────────────
+    // ─── Alimentation barre OHLC (détection FVG) ─────────────
+    void onBar(const OHLCBar& bar) noexcept;
+
+    // ─── Analyse complète (point d'entrée principal) ──────────
     Analysis analyze(
         const std::vector<OrderInfo>& orders,
         const Tick&                   tick,
@@ -114,6 +140,33 @@ public:
         int    ssRecovery,
         int    bsRecovery
     );
+
+    // ─── Enregistrement d'un cycle fermé (auto-apprentissage) ─
+    //  Appelé par TOP4EA_Engine après chaque fermeture de basket
+    void recordCycleClosed(
+        double pnlResult,
+        double targetExpected,
+        double drawdownPct,
+        double gapUsedPoints,
+        double gapOptimalPoints,
+        int    recovDepth,
+        double lotUsed
+    ) noexcept;
+
+    // ─── Application des paramètres calibrés à la config ─────
+    void applyCalibration(Config& cfg) const noexcept {
+        calibrator_.applyToConfig(cfg);
+    }
+
+    // ─── Accès paramètres calibrés courants ──────────────────
+    [[nodiscard]] CalibrableParams currentCalibration() const noexcept {
+        return calibrator_.currentParams();
+    }
+
+    // ─── Rapport d'auto-calibration ──────────────────────────
+    [[nodiscard]] std::string calibrationReport() const {
+        return calibrator_.report() + "\n" + errorMem_.report();
+    }
 
     // ─── Accès état courant ───────────────────────────────────
     [[nodiscard]] Regime lastRegime() const noexcept {
@@ -159,16 +212,37 @@ private:
     [[nodiscard]] std::string buildReasoning(const Analysis& a,
                                               double pnlRatio) const;
 
-    // ─── Membres ─────────────────────────────────────────────
-    Config                cfg_;  // copie locale (durée de vie autonome)
+    // ─── Fusion des facteurs gap (80/20) ─────────────────────
+    //  80% = mathématiques géométriques (OU + delta + imbalance)
+    //  20% = indicateurs (ATR + momentum)
+    [[nodiscard]] std::pair<double,double> fuseGapFactors(
+        std::pair<double,double> regimeFact,
+        std::pair<double,double> deltaFact,
+        double                   imbalanceMult,
+        double                   pnlRatio) const noexcept;
+
+    // ─── Membres core ─────────────────────────────────────────
+    Config                cfg_;
     math::OUEstimator     ouEst_;
     math::VolatilityRegime volReg_;
     math::EWMA            momentumFast_ { 0.30 };
     math::EWMA            momentumSlow_ { 0.03 };
     math::PnLVelocity     pnlVel_       { 0.30 };
 
+    // ─── Membres institutionnels (80% mathématiques) ──────────
+    GeometricImbalance    geoImbalance_;   // FVG + OFI
+    InstitutionalDelta    instDelta_;      // CVD proxy + divergence
+
+    // ─── Membres auto-apprentissage ───────────────────────────
+    ErrorMemory           errorMem_;       // mémoire des erreurs
+    MathCalibrator        calibrator_;     // auto-calibration Adam + AutoML
+
     double                lastMid_      = 0.0;
     double                lastPnL_      = 0.0;
+
+    // Compteur de cycles pour calibration périodique
+    int                   cycleCount_   = 0;
+    static constexpr int  CALIB_EVERY   = 5;   // calibrer tous les 5 cycles
 
     mutable std::mutex    mu_;
     Regime                lastRegime_   = Regime::Unknown;

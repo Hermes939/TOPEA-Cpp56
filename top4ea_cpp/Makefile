@@ -22,6 +22,10 @@ DLL_SRCS  := $(SRCDIR)/metaapi_bridge.cpp       \
              $(SRCDIR)/basket_manager.cpp        \
              $(SRCDIR)/recovery_engine.cpp       \
              $(SRCDIR)/intelligence_engine.cpp   \
+             $(SRCDIR)/geometric_imbalance.cpp   \
+             $(SRCDIR)/institutional_delta.cpp   \
+             $(SRCDIR)/error_memory.cpp          \
+             $(SRCDIR)/math_calibrator.cpp       \
              $(SRCDIR)/top4ea_engine.cpp         \
              $(SRCDIR)/top4ea_dll.cpp
 
@@ -41,41 +45,41 @@ LOADER_TARGET := $(BUILDDIR)/top4ea
 .PHONY: all lib loader clean run
 
 all: lib loader
-	@echo ""
-	@echo "TOP4EA DLL build OK"
-	@echo "  $(LIB_TARGET)"
-	@echo "  $(LOADER_TARGET)"
+        @echo ""
+        @echo "TOP4EA DLL build OK"
+        @echo "  $(LIB_TARGET)"
+        @echo "  $(LOADER_TARGET)"
 
 ## ── Shared library (DLL) ─────────────────────────────────────
 lib: $(LIB_TARGET)
 
 $(LIB_TARGET): $(DLL_OBJS) | $(BUILDDIR)
-	$(CXX) $(CXXFLAGS) -shared -o $@ $^ $(LDFLAGS)
-	@echo "DLL OK : $@"
+        $(CXX) $(CXXFLAGS) -shared -o $@ $^ $(LDFLAGS)
+        @echo "DLL OK : $@"
 
 ## ── DLL objects (Position Independent Code) ─────────────────
 $(BUILDDIR)/dll_%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
-	$(CXX) $(CXXFLAGS) -fPIC -c $< -o $@
+        $(CXX) $(CXXFLAGS) -fPIC -c $< -o $@
 
 ## ── Loader thin ──────────────────────────────────────────────
 loader: $(LOADER_TARGET)
 
 $(LOADER_TARGET): $(LOADER_OBJ) $(LIB_TARGET) | $(BUILDDIR)
-	$(CXX) $(CXXFLAGS) $< -o $@ -L$(BUILDDIR) -ltop4ea -Wl,-rpath,'$$ORIGIN/../build' $(LDFLAGS)
-	@echo "Loader OK : $@"
+        $(CXX) $(CXXFLAGS) $< -o $@ -L$(BUILDDIR) -ltop4ea -Wl,-rpath,'$$ORIGIN/../build' $(LDFLAGS)
+        @echo "Loader OK : $@"
 
 $(LOADER_OBJ): $(LOADER_SRC) | $(BUILDDIR)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+        $(CXX) $(CXXFLAGS) -c $< -o $@
 
 ## ── Répertoire de build ──────────────────────────────────────
 $(BUILDDIR):
-	mkdir -p $(BUILDDIR)
+        mkdir -p $(BUILDDIR)
 
 ## ── Nettoyage ────────────────────────────────────────────────
 clean:
-	rm -rf $(BUILDDIR)
-	@echo "Nettoyé"
+        rm -rf $(BUILDDIR)
+        @echo "Nettoyé"
 
 ## ── Lancement ────────────────────────────────────────────────
 run: all
-	LD_LIBRARY_PATH=$(BUILDDIR):$$LD_LIBRARY_PATH $(LOADER_TARGET) top4ea.conf
+        LD_LIBRARY_PATH=$(BUILDDIR):$$LD_LIBRARY_PATH $(LOADER_TARGET) top4ea.conf

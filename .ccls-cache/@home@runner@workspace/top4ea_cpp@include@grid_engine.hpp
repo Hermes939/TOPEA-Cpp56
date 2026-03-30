@@ -9,6 +9,7 @@
 #include <functional>
 #include <mutex>
 #include <atomic>
+#include <cstdint>
 
 namespace top4ea {
 
@@ -64,15 +65,20 @@ public:
     [[nodiscard]] int effectiveGridGap() const noexcept;
 
     // Régime volatilité courant
-    [[nodiscard]] VolRegime regime() const noexcept { return regime_; }
+    [[nodiscard]] VolRegime regime() const noexcept {
+        return regime_.load(std::memory_order_relaxed);
+    }
 
     // ATR courant en points
     [[nodiscard]] double atrPoints() const noexcept;
 
     // ─── Accesseurs tick ────────────────────────────────────
-    [[nodiscard]] double bid() const noexcept { return lastBid_; }
-    [[nodiscard]] double ask() const noexcept { return lastAsk_; }
-    [[nodiscard]] double mid() const noexcept { return (lastBid_ + lastAsk_) * 0.5; }
+    [[nodiscard]] double bid() const noexcept { return lastBid_.load(std::memory_order_relaxed); }
+    [[nodiscard]] double ask() const noexcept { return lastAsk_.load(std::memory_order_relaxed); }
+    [[nodiscard]] double mid() const noexcept {
+        return (lastBid_.load(std::memory_order_relaxed)
+              + lastAsk_.load(std::memory_order_relaxed)) * 0.5;
+    }
 
     // ─── Validation de prix ─────────────────────────────────
     [[nodiscard]] bool isPriceValid(double price, double minDist,
@@ -91,14 +97,14 @@ private:
     math::SpreadTracker    spreadTrack_;
     math::OUEstimator      ouEst_;       // [A] Estimateur Ornstein-Uhlenbeck
 
-    double     lastBid_   = 0.0;
-    double     lastAsk_   = 0.0;
-    double     prevClose_ = 0.0;
-    double     lastHigh_  = 0.0;
-    double     lastLow_   = 0.0;
-    VolRegime  regime_    = VolRegime::Medium;
+    std::atomic<double>    lastBid_   { 0.0 };
+    std::atomic<double>    lastAsk_   { 0.0 };
+    double                 prevClose_ = 0.0;
+    double                 lastHigh_  = 0.0;
+    double                 lastLow_   = 0.0;
+    std::atomic<VolRegime> regime_    { VolRegime::Medium };
 
-    mutable std::mutex mu_;
+    mutable std::recursive_mutex mu_;
 };
 
 } // namespace top4ea

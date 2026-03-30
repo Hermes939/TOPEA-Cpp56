@@ -98,6 +98,7 @@ public:
     // ─── Construction ─────────────────────────────────────────
     //     Config passé par valeur (copie) — durée de vie garantie
     explicit IntelligenceEngine(Config cfg);
+    ~IntelligenceEngine();
 
     // ─── Alimentation tick (indicateurs internes) ─────────────
     void onTick(const Tick& tick) noexcept;
