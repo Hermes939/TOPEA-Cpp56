@@ -63,7 +63,13 @@ top4ea::Config loadConfig(const std::string& path) {
             else if (key == "use_pnl_velocity") cfg.usePnlVelocity   = (val=="true"||val=="1");
             else if (key == "velocity_alpha")   cfg.velocityAlpha    = std::stod(val);
             else if (key == "velocity_trigger") cfg.velocityTrigger  = std::stod(val);
-            else if (key == "kelly_max")        cfg.kellyMaxFraction = std::stod(val);
+            else if (key == "kelly_max")            cfg.kellyMaxFraction    = std::stod(val);
+            else if (key == "spread_avg_alpha")     cfg.spreadAvgAlpha      = std::stod(val);
+            // Trail Stop adaptatif — 4 axes
+            else if (key == "trail_step_pct")       cfg.trailStepPct        = std::stod(val);
+            else if (key == "trail_freeze_zone")    cfg.trailFreezeZone     = std::stod(val);
+            else if (key == "gap_expansion_factor") cfg.gapExpansionFactor  = std::stod(val);
+            else if (key == "trail_asymmetry_factor") cfg.trailAsymmetryFactor = std::stod(val);
             else if (key == "bridge_host")      cfg.bridgeHost       = val;
             else if (key == "bridge_port")      cfg.bridgePort       = (uint16_t)std::stoi(val);
             else if (key == "reconnect_ms")     cfg.reconnectMs      = std::stoi(val);
