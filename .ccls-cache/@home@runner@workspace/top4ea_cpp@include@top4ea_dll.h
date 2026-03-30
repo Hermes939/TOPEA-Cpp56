@@ -39,6 +39,11 @@ void   TOP4EA_OnTick(void* handle,
                      double ask,
                      long long time_ms);
 
+// ─── Fermeture globale (urgence / fin session) ───────────────
+//     Ferme immédiatement TOUS les ordres (marché + pendants)
+//     Retourne 0 = OK, -1 = erreur
+int    TOP4EA_CloseAll(void* handle);
+
 // ─── Commandes de trading directes (mode MT4 DLL) ───────────
 //     Retournent le ticket (>0) ou un code erreur (<0)
 int    TOP4EA_PlaceOrder(void* handle,

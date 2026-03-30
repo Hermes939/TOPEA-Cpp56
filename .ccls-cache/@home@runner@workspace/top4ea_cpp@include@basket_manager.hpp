@@ -11,6 +11,7 @@
 #include <mutex>
 #include <atomic>
 #include <chrono>
+#include <future>
 
 namespace top4ea {
 

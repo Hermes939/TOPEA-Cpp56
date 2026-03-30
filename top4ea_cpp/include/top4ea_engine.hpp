@@ -9,6 +9,7 @@
 #include "grid_engine.hpp"
 #include "basket_manager.hpp"
 #include "recovery_engine.hpp"
+#include "intelligence_engine.hpp"
 #include <memory>
 #include <atomic>
 #include <mutex>
@@ -115,11 +116,16 @@ private:
     void log(const std::string& msg) const;
 
     // ─── Membres ─────────────────────────────────────────────
-    Config                          cfg_;
-    std::unique_ptr<MetaApiBridge>  bridge_;
-    std::unique_ptr<GridEngine>     grid_;
-    std::unique_ptr<BasketMonitor>  basketMon_;
-    std::unique_ptr<RecoveryEngine> recovery_;
+    Config                              cfg_;
+    std::unique_ptr<MetaApiBridge>      bridge_;
+    std::unique_ptr<GridEngine>         grid_;
+    std::unique_ptr<BasketMonitor>      basketMon_;
+    std::unique_ptr<RecoveryEngine>     recovery_;
+    std::unique_ptr<IntelligenceEngine> intel_;
+
+    // Cache de la dernière analyse (pour dashboard)
+    mutable std::mutex                  intelMu_;
+    IntelligenceEngine::Analysis        lastIntel_;
 
     std::atomic<EAState> state_ { EAState::Init };
     mutable std::mutex   mu_;

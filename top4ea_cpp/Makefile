@@ -17,11 +17,12 @@ SRCDIR    := src
 BUILDDIR  := build
 
 ## ── Sources DLL (toute la logique, sans loader ni main) ──────
-DLL_SRCS  := $(SRCDIR)/metaapi_bridge.cpp \
-             $(SRCDIR)/grid_engine.cpp     \
-             $(SRCDIR)/basket_manager.cpp  \
-             $(SRCDIR)/recovery_engine.cpp \
-             $(SRCDIR)/top4ea_engine.cpp   \
+DLL_SRCS  := $(SRCDIR)/metaapi_bridge.cpp       \
+             $(SRCDIR)/grid_engine.cpp           \
+             $(SRCDIR)/basket_manager.cpp        \
+             $(SRCDIR)/recovery_engine.cpp       \
+             $(SRCDIR)/intelligence_engine.cpp   \
+             $(SRCDIR)/top4ea_engine.cpp         \
              $(SRCDIR)/top4ea_dll.cpp
 
 ## ── Source loader (thin main) ─────────────────────────────────
@@ -41,18 +42,16 @@ LOADER_TARGET := $(BUILDDIR)/top4ea
 
 all: lib loader
 	@echo ""
-	@echo "╔══════════════════════════════════════╗"
-	@echo "║  TOP4EA DLL build OK                 ║"
-	@echo "║  $(LIB_TARGET)"
-	@echo "║  $(LOADER_TARGET)"
-	@echo "╚══════════════════════════════════════╝"
+	@echo "TOP4EA DLL build OK"
+	@echo "  $(LIB_TARGET)"
+	@echo "  $(LOADER_TARGET)"
 
 ## ── Shared library (DLL) ─────────────────────────────────────
 lib: $(LIB_TARGET)
 
 $(LIB_TARGET): $(DLL_OBJS) | $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) -shared -o $@ $^ $(LDFLAGS)
-	@echo "✓ DLL : $@"
+	@echo "DLL OK : $@"
 
 ## ── DLL objects (Position Independent Code) ─────────────────
 $(BUILDDIR)/dll_%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
@@ -63,7 +62,7 @@ loader: $(LOADER_TARGET)
 
 $(LOADER_TARGET): $(LOADER_OBJ) $(LIB_TARGET) | $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) $< -o $@ -L$(BUILDDIR) -ltop4ea -Wl,-rpath,'$$ORIGIN/../build' $(LDFLAGS)
-	@echo "✓ Loader : $@"
+	@echo "Loader OK : $@"
 
 $(LOADER_OBJ): $(LOADER_SRC) | $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -75,7 +74,7 @@ $(BUILDDIR):
 ## ── Nettoyage ────────────────────────────────────────────────
 clean:
 	rm -rf $(BUILDDIR)
-	@echo "✓ Nettoyé"
+	@echo "Nettoyé"
 
 ## ── Lancement ────────────────────────────────────────────────
 run: all

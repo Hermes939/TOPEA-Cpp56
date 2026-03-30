@@ -9,6 +9,7 @@
 #include "grid_engine.hpp"
 #include "basket_manager.hpp"
 #include "recovery_engine.hpp"
+#include "intelligence_engine.hpp"
 #include <memory>
 #include <atomic>
 #include <mutex>
@@ -43,6 +44,10 @@ public:
 
     // Envoi direct d'une commande trade
     [[nodiscard]] BridgeResponse sendTrade(const TradeCmd& cmd);
+
+    // Fermeture globale de tous les ordres (urgence / fin session)
+    // Parallèle : stops supprimés + positions fermées simultanément
+    void closeAllOrders();
 
     // Getters compte
     [[nodiscard]] double getBalance    () const noexcept;
@@ -111,11 +116,16 @@ private:
     void log(const std::string& msg) const;
 
     // ─── Membres ─────────────────────────────────────────────
-    Config                          cfg_;
-    std::unique_ptr<MetaApiBridge>  bridge_;
-    std::unique_ptr<GridEngine>     grid_;
-    std::unique_ptr<BasketMonitor>  basketMon_;
-    std::unique_ptr<RecoveryEngine> recovery_;
+    Config                              cfg_;
+    std::unique_ptr<MetaApiBridge>      bridge_;
+    std::unique_ptr<GridEngine>         grid_;
+    std::unique_ptr<BasketMonitor>      basketMon_;
+    std::unique_ptr<RecoveryEngine>     recovery_;
+    std::unique_ptr<IntelligenceEngine> intel_;
+
+    // Cache de la dernière analyse (pour dashboard)
+    mutable std::mutex                  intelMu_;
+    IntelligenceEngine::Analysis        lastIntel_;
 
     std::atomic<EAState> state_ { EAState::Init };
     mutable std::mutex   mu_;
@@ -146,8 +156,9 @@ private:
     mutable std::mutex     ordersMu_;
     std::vector<OrderInfo> orders_;
 
-    std::atomic<int> totalPairs_   { 0 };
-    std::atomic<int> totalSingles_ { 0 };
+    std::atomic<int>  totalPairs_    { 0 };
+    std::atomic<int>  totalSingles_  { 0 };
+    std::atomic<bool> basketClosing_ { false };  // garde anti-double close
 };
 
 } // namespace top4ea

@@ -278,9 +278,23 @@ int TOP4EA_GetOrderCount(void* handle) {
     return static_cast<TOP4EA_Handle*>(handle)->engine.getOrderCount();
 }
 
+// ─── Fermeture globale ───────────────────────────────────────
+int TOP4EA_CloseAll(void* handle) {
+    if (!handle) return -1;
+    auto* h = static_cast<TOP4EA_Handle*>(handle);
+    try {
+        h->engine.closeAllOrders();
+        std::cout << "[DLL] TOP4EA_CloseAll OK\n";
+        return 0;
+    } catch (const std::exception& e) {
+        std::cerr << "[DLL] TOP4EA_CloseAll erreur: " << e.what() << "\n";
+        return -1;
+    }
+}
+
 // ─── Version ─────────────────────────────────────────────────
 const char* TOP4EA_Version(void) {
-    return "TOP4EA C++20 DLL v1.0";
+    return "TOP4EA C++20 DLL v3.0 (V3/v6.04)";
 }
 
 } // extern "C"
