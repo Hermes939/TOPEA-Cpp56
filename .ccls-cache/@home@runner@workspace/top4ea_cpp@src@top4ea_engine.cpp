@@ -19,7 +19,7 @@ namespace top4ea {
 TOP4EA_Engine::TOP4EA_Engine(Config cfg)
     : cfg_(std::move(cfg))
 {
-    bridge_    = std::make_unique<MT4Bridge>(cfg_);
+    bridge_    = std::make_unique<MetaApiBridge>(cfg_);
     grid_      = std::make_unique<GridEngine>(cfg_);
     basketMon_ = std::make_unique<BasketMonitor>(cfg_);
     recovery_  = std::make_unique<RecoveryEngine>(cfg_);
@@ -101,15 +101,15 @@ void TOP4EA_Engine::onAccount(const AccountSnapshot& acc) {
 }
 
 void TOP4EA_Engine::onError(int code, const std::string& msg) {
-    std::cerr << "[MT4Bridge ERR " << code << "] " << msg << "\n";
+    std::cerr << "[MetaApi ERR " << code << "] " << msg << "\n";
 }
 
 void TOP4EA_Engine::onConnect(bool connected) {
     if (connected) {
-        log("MT4 Bridge connecté");
+        log("MetaApi connecté");
         state_.store(EAState::Init);
     } else {
-        log("MT4 Bridge déconnecté — en attente de reconnexion");
+        log("MetaApi déconnecté — en attente de reconnexion");
     }
 }
 

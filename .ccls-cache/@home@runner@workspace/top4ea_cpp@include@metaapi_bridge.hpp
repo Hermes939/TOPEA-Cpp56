@@ -1,12 +1,13 @@
 #pragma once
 // ============================================================
-//  TOP4EA — metaapi_bridge.hpp
-//  Connexion MetaApi REST (libcurl) — MT4 via cloud
-//  Auth   : Bearer token (env METAAPI_TOKEN)
-//  Account: env METAAPI_ACCOUNT_ID
-//  Ticks  : polling /symbols/{sym}/currentPrice toutes les 200ms
-//  Ordres : polling /positions + /orders toutes les 2s
-//  Trades : POST /trade (synchrone, libcurl)
+//  TOP4EA — metaapi_bridge.hpp  C++20
+//  Connexion MetaApi REST (libcurl)
+//  Auth    : env METAAPI_TOKEN
+//  Account : env METAAPI_ACCOUNT_ID
+//  Region  : env METAAPI_REGION (défaut: new-york)
+//  Ticks   : REST polling /symbols/{sym}/currentPrice
+//  Ordres  : REST polling /positions + /orders
+//  Trades  : REST POST /trade
 // ============================================================
 #include "types.hpp"
 #include <functional>
@@ -16,9 +17,6 @@
 #include <optional>
 #include <string>
 #include <vector>
-#include <future>
-#include <queue>
-#include <condition_variable>
 
 namespace top4ea {
 
@@ -36,26 +34,26 @@ struct TradeCmd {
         CloseBy,
         ModifyOrder
     };
-    Op          op        = Op::MarketOrder;
-    OrderType   type      = OrderType::Buy;
-    int         ticket    = -1;
-    int         ticket2   = -1;
-    double      lots      = 0.0;
-    double      price     = 0.0;
-    double      sl        = 0.0;
-    double      tp        = 0.0;
-    int         slippage  = 3;
-    int         magic     = 0;
-    std::string comment   = {};
-    std::string symbol    = {};
+    Op          op       = Op::MarketOrder;
+    OrderType   type     = OrderType::Buy;
+    int         ticket   = -1;
+    int         ticket2  = -1;
+    double      lots     = 0.0;
+    double      price    = 0.0;
+    double      sl       = 0.0;
+    double      tp       = 0.0;
+    int         slippage = 3;
+    int         magic    = 0;
+    std::string comment  = {};
+    std::string symbol   = {};
 };
 
 struct BridgeResponse {
-    bool        success  = false;
-    int         ticket   = -1;
-    int         error    = 0;
-    double      price    = 0.0;
-    std::string msg      = {};
+    bool        success = false;
+    int         ticket  = -1;
+    int         error   = 0;
+    double      price   = 0.0;
+    std::string msg     = {};
 };
 
 // ============================================================
@@ -78,40 +76,30 @@ public:
     void onError  (ErrorCallback   cb) { errorCb_   = std::move(cb); }
     void onConnect(ConnectCallback cb) { connectCb_ = std::move(cb); }
 
-    [[nodiscard]] std::vector<OrderInfo>          requestOrders (int timeoutMs = 3000);
-    [[nodiscard]] std::optional<AccountSnapshot>  requestAccount(int timeoutMs = 3000);
+    [[nodiscard]] std::vector<OrderInfo>         requestOrders (int timeoutMs = 3000);
+    [[nodiscard]] std::optional<AccountSnapshot> requestAccount(int timeoutMs = 3000);
 
 private:
-    // Threads de polling
     void tickLoop();
     void stateLoop();
 
-    // Appels REST
     std::string httpGet (const std::string& path);
     std::string httpPost(const std::string& path, const std::string& body);
 
-    // Construction URL
-    std::string url(const std::string& path) const;
+    static std::string jsonGet    (const std::string& json, const std::string& key);
+    static double      jsonGetD   (const std::string& json, const std::string& key);
+    static int         jsonGetI   (const std::string& json, const std::string& key);
+    static bool        jsonGetB   (const std::string& json, const std::string& key);
+    static std::string jsonGetNested(const std::string& json, const std::string& key);
 
-    // Parsing JSON (sans lib externe)
-    static std::string jsonGet (const std::string& json, const std::string& key);
-    static double      jsonGetD(const std::string& json, const std::string& key);
-    static int         jsonGetI(const std::string& json, const std::string& key);
-    static bool        jsonGetB(const std::string& json, const std::string& key);
-    static std::string jsonGetNested(const std::string& json,
-                                     const std::string& key);
-
-    // Parseurs
-    static Tick            parseTick   (const std::string& json);
-    static OrderInfo       parsePosition(const std::string& json);
+    static Tick            parseTick        (const std::string& json);
+    static OrderInfo       parsePosition    (const std::string& json);
     static OrderInfo       parsePendingOrder(const std::string& json);
-    static AccountSnapshot parseAccount(const std::string& json);
-    static BridgeResponse  parseTradeResult(const std::string& json);
+    static AccountSnapshot parseAccount     (const std::string& json);
+    static BridgeResponse  parseTradeResult (const std::string& json);
 
-    // Sérialisation commande → JSON MetaApi
     std::string cmdToJson(const TradeCmd& cmd) const;
 
-    // Extraction d'un tableau JSON d'objets [{...},{...}]
     static std::vector<std::string> parseJsonArray(const std::string& json);
 
     Config      cfg_;
@@ -119,8 +107,8 @@ private:
     std::string accountId_;
     std::string baseUrl_;
 
-    std::atomic<bool> connected_  { false };
-    std::atomic<bool> running_    { false };
+    std::atomic<bool> connected_ { false };
+    std::atomic<bool> running_   { false };
 
     std::jthread tickThread_;
     std::jthread stateThread_;
