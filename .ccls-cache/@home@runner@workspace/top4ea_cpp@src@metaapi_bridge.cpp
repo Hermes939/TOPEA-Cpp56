@@ -319,7 +319,7 @@ std::string MetaApiBridge::cmdToJson(const TradeCmd& cmd) const {
         if (cmd.op == TradeCmd::Op::DeletePending) return "ORDER_CANCEL";
         if (cmd.op == TradeCmd::Op::CloseOrder)   return "POSITION_CLOSE_ID";
         if (cmd.op == TradeCmd::Op::CloseBy)      return "POSITION_CLOSE_ID";
-        if (cmd.op == TradeCmd::Op::ModifyOrder)  return "POSITION_MODIFY";
+        if (cmd.op == TradeCmd::Op::ModifyOrder)  return "ORDER_MODIFY";
         switch (cmd.type) {
             case OrderType::Buy:       return "ORDER_TYPE_BUY";
             case OrderType::Sell:      return "ORDER_TYPE_SELL";
@@ -352,11 +352,14 @@ std::string MetaApiBridge::cmdToJson(const TradeCmd& cmd) const {
     } else if (cmd.op == TradeCmd::Op::DeletePending) {
         oss << ",\"orderId\":\"" << cmd.ticket << "\"";
     } else if (cmd.op == TradeCmd::Op::ModifyOrder) {
-        oss << ",\"positionId\":\"" << cmd.ticket << "\"";
-        oss << ",\"stopLoss\":"   << cmd.sl;
-        oss << ",\"takeProfit\":" << cmd.tp;
+        // Ordres pending (SellStop / BuyStop) → orderId + openPrice obligatoire
+        oss << ",\"orderId\":\"" << cmd.ticket << "\"";
         if (cmd.price > 0.0)
             oss << ",\"openPrice\":" << std::fixed << std::setprecision(2) << cmd.price << std::defaultfloat;
+        if (cmd.sl > 0.0)
+            oss << ",\"stopLoss\":"   << std::fixed << std::setprecision(2) << cmd.sl;
+        if (cmd.tp > 0.0)
+            oss << ",\"takeProfit\":" << std::fixed << std::setprecision(2) << cmd.tp;
     }
 
     oss << "}";
