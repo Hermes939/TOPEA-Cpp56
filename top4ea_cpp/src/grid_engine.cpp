@@ -58,7 +58,7 @@ int GridEngine::ouGridGap() const noexcept {
     double gapPrice = ouEst_.optimalGapPrice();
     if (gapPrice <= 0.0) return 0;
     int pts = (int)std::round(gapPrice / pointSize());
-    return std::clamp(pts, cfg_.atrGridMin, cfg_.atrGridMax);
+    return std::clamp(pts, (int)cfg_.atrGridMin, (int)cfg_.atrGridMax);
 }
 
 int GridEngine::effectiveGridGap() const noexcept {

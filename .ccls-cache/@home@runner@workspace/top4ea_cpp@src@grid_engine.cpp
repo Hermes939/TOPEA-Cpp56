@@ -22,6 +22,10 @@ void GridEngine::onTick(const Tick& tick) noexcept {
     lastAsk_ = tick.ask;
     spreadTrack_.push(tick.spread);
 
+    // [A] Alimentation estimateur OU avec le prix mid
+    double mid = (tick.bid + tick.ask) * 0.5;
+    ouEst_.push(mid);
+
     // Mise à jour High/Low intra-tick pour ATR synthetic
     if (lastHigh_ == 0.0) lastHigh_ = tick.ask;
     if (lastLow_  == 0.0) lastLow_  = tick.bid;
@@ -49,13 +53,29 @@ double GridEngine::atrPoints() const noexcept {
     return atr_.ready() ? atr_.toPoints(pointSize()) : (double)cfg_.gridGap;
 }
 
+int GridEngine::ouGridGap() const noexcept {
+    if (!cfg_.useOUGrid || !ouEst_.ready()) return 0;
+    double gapPrice = ouEst_.optimalGapPrice();
+    if (gapPrice <= 0.0) return 0;
+    int pts = (int)std::round(gapPrice / pointSize());
+    return std::clamp(pts, cfg_.atrGridMin, cfg_.atrGridMax);
+}
+
 int GridEngine::effectiveGridGap() const noexcept {
-    if (!cfg_.useAtrGrid || !atr_.ready())
-        return cfg_.gridGap;
-    return math::dynamicGridGap(atrPoints(),
-                                cfg_.atrMultiplier,
-                                cfg_.atrGridMin,
-                                cfg_.atrGridMax);
+    // Priorité 1 : OU optimal si marché mean-reverting et activé
+    if (cfg_.useOUGrid) {
+        int ou = ouGridGap();
+        if (ou > 0) return ou;
+        // Fallback si trending : ATR ou fixe
+    }
+    // Priorité 2 : ATR dynamique
+    if (cfg_.useAtrGrid && atr_.ready())
+        return math::dynamicGridGap(atrPoints(),
+                                    cfg_.atrMultiplier,
+                                    cfg_.atrGridMin,
+                                    cfg_.atrGridMax);
+    // Priorité 3 : GridGap fixe de config
+    return cfg_.gridGap;
 }
 
 double GridEngine::halfGap() const noexcept {
