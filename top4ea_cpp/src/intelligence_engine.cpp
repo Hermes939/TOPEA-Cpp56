@@ -43,6 +43,13 @@ IntelligenceEngine::IntelligenceEngine(Config cfg)
     , volReg_(100)
 {}
 
+IntelligenceEngine::~IntelligenceEngine() {
+    // Vide les deques explicitement avant leur destruction automatique
+    // Prévention défensive contre toute corruption de tas résiduelle
+    ouEst_ = math::OUEstimator();
+    volReg_ = math::VolatilityRegime();
+}
+
 // ────────────────────────────────────────────────────────────
 //  onTick — alimentation indicateurs internes
 // ────────────────────────────────────────────────────────────
