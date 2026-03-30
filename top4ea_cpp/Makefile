@@ -1,12 +1,12 @@
 CXX      := g++
 CXXFLAGS := -std=c++20 -O2 -Wall -Wextra -pthread -I include
-LDFLAGS  := -pthread
+LDFLAGS  := -pthread -lcurl
 SRCDIR   := src
 BUILDDIR := build
 TARGET   := $(BUILDDIR)/top4ea
 
 SRCS := $(SRCDIR)/main.cpp \
-        $(SRCDIR)/mt4_bridge.cpp \
+        $(SRCDIR)/metaapi_bridge.cpp \
         $(SRCDIR)/grid_engine.cpp \
         $(SRCDIR)/basket_manager.cpp \
         $(SRCDIR)/recovery_engine.cpp \

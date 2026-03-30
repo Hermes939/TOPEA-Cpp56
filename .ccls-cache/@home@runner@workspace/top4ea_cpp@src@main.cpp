@@ -70,10 +70,9 @@ top4ea::Config loadConfig(const std::string& path) {
             else if (key == "trail_freeze_zone")    cfg.trailFreezeZone     = std::stod(val);
             else if (key == "gap_expansion_factor") cfg.gapExpansionFactor  = std::stod(val);
             else if (key == "trail_asymmetry_factor") cfg.trailAsymmetryFactor = std::stod(val);
-            else if (key == "bridge_host")      cfg.bridgeHost       = val;
-            else if (key == "bridge_port")      cfg.bridgePort       = (uint16_t)std::stoi(val);
+            else if (key == "tick_poll_ms")     cfg.tickPollMs       = std::stoi(val);
+            else if (key == "state_poll_ms")    cfg.statePollMs      = std::stoi(val);
             else if (key == "reconnect_ms")     cfg.reconnectMs      = std::stoi(val);
-            else if (key == "ping_interval_ms") cfg.pingIntervalMs   = std::stoi(val);
         } catch (...) {
             std::cerr << "[Config] Erreur parsing: " << key << "=" << val << "\n";
         }

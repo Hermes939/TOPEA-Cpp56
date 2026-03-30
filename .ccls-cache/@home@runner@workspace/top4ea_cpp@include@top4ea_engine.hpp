@@ -5,7 +5,7 @@
 //  Machine à états centrale C++20
 // ============================================================
 #include "types.hpp"
-#include "mt4_bridge.hpp"
+#include "metaapi_bridge.hpp"
 #include "grid_engine.hpp"
 #include "basket_manager.hpp"
 #include "recovery_engine.hpp"
@@ -118,7 +118,7 @@ private:
 
     // ─── Membres ─────────────────────────────────────────────
     Config                     cfg_;
-    std::unique_ptr<MT4Bridge> bridge_;
+    std::unique_ptr<MetaApiBridge> bridge_;
     std::unique_ptr<GridEngine>    grid_;
     std::unique_ptr<BasketMonitor> basketMon_;
     std::unique_ptr<RecoveryEngine> recovery_;

@@ -70,10 +70,9 @@ top4ea::Config loadConfig(const std::string& path) {
             else if (key == "trail_freeze_zone")    cfg.trailFreezeZone     = std::stod(val);
             else if (key == "gap_expansion_factor") cfg.gapExpansionFactor  = std::stod(val);
             else if (key == "trail_asymmetry_factor") cfg.trailAsymmetryFactor = std::stod(val);
-            else if (key == "bridge_host")      cfg.bridgeHost       = val;
-            else if (key == "bridge_port")      cfg.bridgePort       = (uint16_t)std::stoi(val);
+            else if (key == "tick_poll_ms")     cfg.tickPollMs       = std::stoi(val);
+            else if (key == "state_poll_ms")    cfg.statePollMs      = std::stoi(val);
             else if (key == "reconnect_ms")     cfg.reconnectMs      = std::stoi(val);
-            else if (key == "ping_interval_ms") cfg.pingIntervalMs   = std::stoi(val);
         } catch (...) {
             std::cerr << "[Config] Erreur parsing: " << key << "=" << val << "\n";
         }
@@ -87,7 +86,7 @@ void printBanner(const top4ea::Config& cfg) {
     std::cout << R"(
 ╔══════════════════════════════════════════════════╗
 ║           TOP4EA  C++20  v1.0                    ║
-║   Grid Recovery EA — Connexion MT4 TCP Bridge    ║
+║   Grid Recovery EA — Connexion MetaApi MT4       ║
 ╠══════════════════════════════════════════════════╣
 )" << "║  Symbole   : " << cfg.symbol       << "\n"
    << "║  BaseLot   : " << cfg.baseLot      << "\n"
@@ -97,7 +96,7 @@ void printBanner(const top4ea::Config& cfg) {
    << "║  Target    : " << cfg.basketTarget << " $\n"
    << "║  MaxRecov  : " << cfg.maxRecovery  << "\n"
    << "║  Daily%    : " << cfg.dailyTargetPct << "%\n"
-   << "║  Bridge    : " << cfg.bridgeHost << ":" << cfg.bridgePort << "\n"
+   << "║  TickPoll  : " << cfg.tickPollMs << " ms\n"
    << R"(╚══════════════════════════════════════════════════╝
 )";
 }
@@ -117,8 +116,7 @@ int main(int argc, char* argv[]) {
     engine.start();
 
     std::cout << "[TOP4EA] Moteur démarré — Ctrl+C pour arrêter\n";
-    std::cout << "[TOP4EA] En attente de connexion MT4 Bridge sur port "
-              << cfg.bridgePort << "...\n";
+    std::cout << "[TOP4EA] Connexion MetaApi en cours...\n";
 
     while (g_running.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

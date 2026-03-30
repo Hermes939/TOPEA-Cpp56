@@ -170,11 +170,12 @@ struct Config {
     //     EURUSD 5-digit broker : 1.00  (100000 × 0.00001 = 1$/lot/pt)
     double      tickValue           = 0.10;
 
-    // Connexion MT4 bridge
-    std::string bridgeHost      = "127.0.0.1";
-    uint16_t    bridgePort      = 9000;
-    int         reconnectMs     = 1000;
-    int         pingIntervalMs  = 2000;
+    // ─── Connexion MetaApi ───────────────────────────────────
+    // token et accountId lus depuis METAAPI_TOKEN / METAAPI_ACCOUNT_ID
+    // region lue depuis METAAPI_REGION (défaut : new-york)
+    int         tickPollMs      = 200;   // fréquence polling tick (ms)
+    int         statePollMs     = 2000;  // fréquence polling compte+ordres (ms)
+    int         reconnectMs     = 1000;  // délai de reconnexion (ms)
 };
 
 // ─── Résultat d'une opération de trading ────────────────────
