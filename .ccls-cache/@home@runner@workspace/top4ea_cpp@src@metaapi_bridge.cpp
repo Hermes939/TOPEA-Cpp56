@@ -86,27 +86,32 @@ void MetaApiBridge::tickLoop() {
         std::this_thread::sleep_for(Ms(cfg_.tickPollMs));
         if (!running_.load()) break;
 
+        // Endpoint correct MetaApi v1 : /price?symbol=XXX
         std::string resp = httpGet(
             "/users/current/accounts/" + accountId_ +
-            "/symbols/" + cfg_.symbol + "/currentPrice");
+            "/price?symbol=" + cfg_.symbol);
 
         if (resp.empty()) {
-            if (connected_.exchange(false)) {
-                std::cerr << "[MetaApi] Perte de connexion (tick)\n";
-                if (connectCb_) connectCb_(false);
-            }
+            // Essayer fallback URL si vide
+            resp = httpGet(
+                "/users/current/accounts/" + accountId_ +
+                "/symbols/" + cfg_.symbol + "/currentPrice");
+        }
+
+        if (resp.empty()) {
+            // Perte réelle de connectivité (erreur réseau curl)
+            // Ne pas marquer disconnected sur simple 404 — le compte répond
             std::this_thread::sleep_for(Ms(cfg_.reconnectMs));
             continue;
         }
 
-        if (!connected_.load()) {
-            connected_.store(true);
-            if (connectCb_) connectCb_(true);
-            std::cout << "[MetaApi] Reconnexion réussie\n";
-        }
-
         Tick t = parseTick(resp);
         if (t.bid > 0.0 && t.ask > 0.0) {
+            if (!connected_.load()) {
+                connected_.store(true);
+                if (connectCb_) connectCb_(true);
+                std::cout << "[MetaApi] Ticks reçus — moteur actif\n";
+            }
             if (tickCb_) tickCb_(t);
         }
     }

@@ -86,14 +86,20 @@ private:
     void tickLoop();
     void stateLoop();
 
-    // Appels REST
+    // ─── Socket.IO EIO4 long-polling ─────────────────────────
+    std::string              sioGet (const std::string& sid, int timeoutSec = 35);
+    bool                     sioPost(const std::string& sid, const std::string& body);
+    std::vector<std::string> parseEIOPackets(const std::string& payload);
+    std::string              sioRequest(const std::string& jsonBody);
+    void                     processSocketIOPacket(const std::string& pkt);
+    void                     processMetaApiEvent(const std::string& event,
+                                                 const std::string& data);
+
+    // ─── Appels REST (trades, compte, positions) ──────────────
     std::string httpGet (const std::string& path);
     std::string httpPost(const std::string& path, const std::string& body);
 
-    // Construction URL
-    std::string url(const std::string& path) const;
-
-    // Parsing JSON (sans lib externe)
+    // ─── Parsing JSON (sans lib externe) ─────────────────────
     static std::string jsonGet (const std::string& json, const std::string& key);
     static double      jsonGetD(const std::string& json, const std::string& key);
     static int         jsonGetI(const std::string& json, const std::string& key);
@@ -101,17 +107,17 @@ private:
     static std::string jsonGetNested(const std::string& json,
                                      const std::string& key);
 
-    // Parseurs
-    static Tick            parseTick   (const std::string& json);
-    static OrderInfo       parsePosition(const std::string& json);
+    // ─── Parseurs JSON → types métier ────────────────────────
+    static Tick            parseTick        (const std::string& json);
+    static OrderInfo       parsePosition    (const std::string& json);
     static OrderInfo       parsePendingOrder(const std::string& json);
-    static AccountSnapshot parseAccount(const std::string& json);
-    static BridgeResponse  parseTradeResult(const std::string& json);
+    static AccountSnapshot parseAccount     (const std::string& json);
+    static BridgeResponse  parseTradeResult (const std::string& json);
 
-    // Sérialisation commande → JSON MetaApi
+    // ─── Sérialisation commande → JSON MetaApi ───────────────
     std::string cmdToJson(const TradeCmd& cmd) const;
 
-    // Extraction d'un tableau JSON d'objets [{...},{...}]
+    // ─── Extraction tableau JSON [{...},{...}] ────────────────
     static std::vector<std::string> parseJsonArray(const std::string& json);
 
     Config      cfg_;
