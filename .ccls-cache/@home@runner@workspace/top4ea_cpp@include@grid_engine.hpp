@@ -35,23 +35,25 @@ public:
     void pushOHLC(double o, double h, double l, double c) noexcept;
 
     // ─── Calcul des niveaux ──────────────────────────────────
-    // Calcule le niveau cible SELLSTOP adaptatif
-    // recovDepth : niveau de recovery côté SELL (pour gap expansion)
-    // gapFactor  : facteur asymétrique (1.0 = neutre, >1 = plus large)
+    // Calcule le niveau cible SELLSTOP — ancrage géométrique pur
+    // anchorPrice : origine de la grille (gridOrigin_), jamais le prix courant
+    // recovDepth  : profondeur recovery SS → SS placé à anchorPrice - (depth+1)*GridGap
+    // gapFactor   : facteur asymétrique (1.0 = neutre, >1 = stop plus éloigné)
     [[nodiscard]] StopPlacement computeSellStop(
         int    currentTicket,
         double currentLevel,
-        double minDist,
+        double anchorPrice,
         int    recovDepth = 0,
         double gapFactor  = 1.0) const noexcept;
 
-    // Calcule le niveau cible BUYSTOP adaptatif
-    // recovDepth : niveau de recovery côté BUY (pour gap expansion)
-    // gapFactor  : facteur asymétrique (1.0 = neutre, >1 = plus large)
+    // Calcule le niveau cible BUYSTOP — ancrage géométrique pur
+    // anchorPrice : origine de la grille (gridOrigin_), jamais le prix courant
+    // recovDepth  : profondeur recovery BS → BS placé à anchorPrice + (depth+1)*GridGap
+    // gapFactor   : facteur asymétrique (1.0 = neutre, >1 = stop plus éloigné)
     [[nodiscard]] StopPlacement computeBuyStop(
         int    currentTicket,
         double currentLevel,
-        double minDist,
+        double anchorPrice,
         int    recovDepth = 0,
         double gapFactor  = 1.0) const noexcept;
 

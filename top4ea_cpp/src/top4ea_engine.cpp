@@ -134,43 +134,50 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
         if (dailyTargetReached_) return;
     }
 
-    // 2. Vérification basket P&L à CHAQUE tick sur ordres cachés (< 1µs)
+    // 2. Détection géométrique pure — CHAQUE tick, aucune gate temporelle
+    //    Le prix franchit un niveau de grille → recovery déclenché instantanément
+    //    C'est la seule source de vérité pour les déclenchements.
+    detectGeometricTriggers(tick);
+
+    // 3. Vérification basket P&L à CHAQUE tick sur ordres cachés (< 1µs)
     //    ─ Avant la gate 1 seconde pour ne rater aucune opportunité ≤50ms ─
     {
         std::vector<OrderInfo> cached;
         { std::lock_guard lk(ordersMu_); cached = orders_; }
         double pnl = basketProfit(cached);
-        if (!cached.empty() && basketMon_->update(pnl, cached)) {
-            if (!basketClosing_.exchange(true)) {
-                log(">>> BASKET TARGET ATTEINT P&L=" + std::to_string(pnl) + " [tick]");
-                closeBasketAtomic();
-                basketClosing_.store(false);
+        if (!cached.empty()) {
+            int totalRecov = recovery_->sellCount() + recovery_->buyCount();
+            if (basketMon_->update(pnl, cached, totalRecov)) {
+                if (!basketClosing_.exchange(true)) {
+                    log(">>> BASKET TARGET ATTEINT P&L=" + std::to_string(pnl) + " [tick]");
+                    closeBasketAtomic();
+                    basketClosing_.store(false);
+                }
+                return;
             }
-            return;
         }
     }
 
-    // 3. Anti-doublon par seconde (logique grille + recovery)
+    // 4. Gate HTTP : polling ordres + gestion grille 1×/seconde max
+    //    (limite API broker — ne concerne PAS les déclenchements recovery)
     auto now = Clock::now();
     using Sec = std::chrono::seconds;
     if (std::chrono::duration_cast<Sec>(now - lastAction_).count() == 0) return;
     lastAction_ = now;
 
-    // 4. Récupérer ordres frais (HTTP polling, 1×/seconde max)
+    // 5. Récupérer ordres frais (HTTP polling, 1×/seconde max)
     auto orders = fetchOrders();
-    // Synchroniser le cache
     { std::lock_guard lk(ordersMu_); orders_ = orders; }
 
-    // 5. Init ou restore
+    // 6. Init ou restore
     if (state_.load() == EAState::Init) {
         initOrRestore();
     }
 
-    // 6. Cohérence tickets
+    // 7. Cohérence tickets (fallback sync — s'assure que les tickets
+    //    correspondent à des ordres réels côté broker, sans déclencher recovery)
     checkConsistency(orders);
-
-    // 7. Déclenchements stops
-    handleTriggers(orders);
+    syncTriggersFallback(orders);
 
     // 8. Analyse intelligence profonde (1×/seconde — données fraîches)
     {
@@ -185,13 +192,11 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
                                          atrPts, ssR, bsR);
         { std::lock_guard lk(intelMu_); lastIntel_ = analysis; }
 
-        // Signal de hedge : log si exposition fortement déséquilibrée
         if (analysis.needsHedge) {
             log("[INTEL] ⚠ HEDGE DELTA: delta=" + std::to_string(analysis.netDelta)
                 + " lots | pression=" + std::to_string(analysis.hedgePressure * 100.0)
                 + "% | régime=" + IntelligenceEngine::regimeName(analysis.regime));
         }
-        // Alerte risque élevé
         if (analysis.riskScore >= 70.0) {
             log("[INTEL] ⚠ RISQUE " + std::to_string((int)analysis.riskScore)
                 + "/100 | DD=" + std::to_string(analysis.drawdownPct) + "%"
@@ -199,7 +204,7 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
         }
     }
 
-    // 9. Trail grille (utilise lastIntel_ pour les facteurs adaptatifs)
+    // 9. Placement des stops géométriques (utilise gridOrigin_ + lastIntel_)
     trailGrid();
 }
 
@@ -215,8 +220,11 @@ void TOP4EA_Engine::initOrRestore() {
     if (hasMkt || hasStop) {
         restoreState(orders);
     } else {
+        // Établir l'ancre géométrique sur le prix mid courant
+        Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
+        gridOrigin_ = (t.bid + t.ask) * 0.5;
         state_.store(EAState::GridActive);
-        log("Grille initialisée — aucun ordre existant");
+        log("Grille initialisée — origin=" + std::to_string(gridOrigin_));
     }
 }
 
@@ -224,25 +232,88 @@ void TOP4EA_Engine::restoreState(const std::vector<OrderInfo>& orders) {
     int ssT = -1, bsT = -1;
     double ssLvl = 0, bsLvl = 0;
     int sellCnt = 0, buyCnt = 0;
+    double sumPrice = 0.0;
+    int    mktCount = 0;
 
     for (const auto& o : orders) {
         if (o.type == OrderType::SellStop) { ssT = o.ticket; ssLvl = o.openPrice; }
         if (o.type == OrderType::BuyStop)  { bsT = o.ticket; bsLvl = o.openPrice; }
-        if (o.type == OrderType::Sell)     ++sellCnt;
-        if (o.type == OrderType::Buy)      ++buyCnt;
+        if (o.type == OrderType::Sell)     { ++sellCnt; sumPrice += o.openPrice; ++mktCount; }
+        if (o.type == OrderType::Buy)      { ++buyCnt;  sumPrice += o.openPrice; ++mktCount; }
     }
     ssTicket_.store(ssT);  ssLevel_ = ssLvl;
     bsTicket_.store(bsT);  bsLevel_ = bsLvl;
     recovery_->restoreFromOrders(sellCnt, buyCnt);
+
+    // Restaurer l'ancre géométrique depuis le prix moyen des ordres ouverts
+    // Si aucun ordre : utiliser le prix mid courant
+    if (mktCount > 0) {
+        gridOrigin_ = sumPrice / mktCount;
+    } else {
+        Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
+        gridOrigin_ = (t.bid + t.ask) * 0.5;
+    }
+
     state_.store(EAState::GridActive);
     log("État restauré SS=" + std::to_string(ssLvl)
         + " BS=" + std::to_string(bsLvl)
         + " sellR=" + std::to_string(sellCnt)
-        + " buyR=" + std::to_string(buyCnt));
+        + " buyR=" + std::to_string(buyCnt)
+        + " origin=" + std::to_string(gridOrigin_));
 }
 
 // ────────────────────────────────────────────────────────────
-//  Cohérence tickets
+//  Détection géométrique pure — appelée à CHAQUE tick
+//  Principe institutionnel : le prix franchit un niveau de grille
+//  défini mathématiquement → recovery déclenché immédiatement.
+//  Aucune dépendance au polling HTTP ni à une gate temporelle.
+// ────────────────────────────────────────────────────────────
+void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
+    int ss = ssTicket_.load();
+    int bs = bsTicket_.load();
+    int gap = grid_->effectiveGridGap();
+
+    // ── SellStop : bid franchit ssLevel_ à la baisse ─────────
+    // Le broker a déjà exécuté l'ordre → on met à jour l'état interne
+    // immédiatement sans attendre le polling HTTP.
+    if (ss > 0 && ssLevel_ > 0.0 && tick.bid <= ssLevel_) {
+        log("[GEO] SS déclenché @ bid=" + std::to_string(tick.bid)
+            + " ≤ level=" + std::to_string(ssLevel_)
+            + " [géométrie pure]");
+        double triggeredAt = ssLevel_;
+        ssTicket_.store(-1);  // empêche tout re-déclenchement sur le tick suivant
+        ssLevel_ = 0.0;       // sera recalculé géométriquement par trailGrid()
+
+        auto res = recovery_->onSellStopTriggered(triggeredAt, gap);
+        if (res.action == TriggerResult::Action::NewRecovery)
+            state_.store(EAState::Recovery);
+        else if (res.action == TriggerResult::Action::CloseOneSide)
+            closeOneSide(0);
+        // Si Blocked par CascadeGuard : état recovery inchangé,
+        // trailGrid() recréera le SS au même niveau géométrique
+    }
+
+    // ── BuyStop : ask franchit bsLevel_ à la hausse ──────────
+    if (bs > 0 && bsLevel_ > 0.0 && tick.ask >= bsLevel_) {
+        log("[GEO] BS déclenché @ ask=" + std::to_string(tick.ask)
+            + " ≥ level=" + std::to_string(bsLevel_)
+            + " [géométrie pure]");
+        double triggeredAt = bsLevel_;
+        bsTicket_.store(-1);
+        bsLevel_ = 0.0;
+
+        auto res = recovery_->onBuyStopTriggered(triggeredAt, gap);
+        if (res.action == TriggerResult::Action::NewRecovery)
+            state_.store(EAState::Recovery);
+        else if (res.action == TriggerResult::Action::CloseOneSide)
+            closeOneSide(1);
+    }
+}
+
+// ────────────────────────────────────────────────────────────
+//  Cohérence tickets — vérification fallback 1×/10s
+//  S'assure uniquement que les tickets internes existent bien
+//  côté broker. Ne déclenche PAS de recovery (rôle de detectGeometricTriggers).
 // ────────────────────────────────────────────────────────────
 void TOP4EA_Engine::checkConsistency(const std::vector<OrderInfo>& orders) {
     static TimePoint lastCheck = Clock::now();
@@ -254,42 +325,38 @@ void TOP4EA_Engine::checkConsistency(const std::vector<OrderInfo>& orders) {
     int bs = bsTicket_.load();
     bool ssOk = ticketStillPending(ss, orders);
     bool bsOk = ticketStillPending(bs, orders);
-    if (!ssOk && ss > 0) { ssTicket_.store(-1); ssLevel_ = 0; }
-    if (!bsOk && bs > 0) { bsTicket_.store(-1); bsLevel_ = 0; }
+    if (!ssOk && ss > 0) { ssTicket_.store(-1); ssLevel_ = 0.0; }
+    if (!bsOk && bs > 0) { bsTicket_.store(-1); bsLevel_ = 0.0; }
 }
 
 // ────────────────────────────────────────────────────────────
-//  Déclenchements stops
+//  Sync fallback — détecte les ordres disparus sans crossing prix
+//  (ex: suppression manuelle, expiration) — ne double-fire jamais
+//  avec detectGeometricTriggers car ssTicket_ = -1 si déjà traité
 // ────────────────────────────────────────────────────────────
-void TOP4EA_Engine::handleTriggers(const std::vector<OrderInfo>& orders) {
+void TOP4EA_Engine::syncTriggersFallback(const std::vector<OrderInfo>& orders) {
     int ss = ssTicket_.load();
     int bs = bsTicket_.load();
-
-    Tick tick;
-    { std::lock_guard lk(tickMu_); tick = lastTick_; }
     int gap = grid_->effectiveGridGap();
 
-    // SS déclenché — prix a franchi ssLevel_ à la baisse
-    // On passe ssLevel_ (prix exact du stop) et le gridGap courant
+    // SS disparu sans crossing géométrique détecté (ex: suppression manuelle)
     if (ss > 0 && !ticketStillPending(ss, orders)) {
-        auto res = recovery_->onSellStopTriggered(ssLevel_, gap);
+        log("[SYNC] SS ticket=" + std::to_string(ss)
+            + " disparu sans crossing prix — sync fallback");
         ssTicket_.store(-1);
-        if (res.action == TriggerResult::Action::NewRecovery)
-            state_.store(EAState::Recovery);
-        else if (res.action == TriggerResult::Action::CloseOneSide)
-            closeOneSide(0);
-        // Si Blocked : pas de recovery, la grille est simplement recréée
+        ssLevel_ = 0.0;
+        // On ne déclenche PAS de recovery : la disparition sans crossing
+        // est probablement une suppression manuelle ou erreur broker
     }
 
-    // BS déclenché — prix a franchi bsLevel_ à la hausse
+    // BS disparu sans crossing géométrique détecté
     if (bs > 0 && !ticketStillPending(bs, orders)) {
-        auto res = recovery_->onBuyStopTriggered(bsLevel_, gap);
+        log("[SYNC] BS ticket=" + std::to_string(bs)
+            + " disparu sans crossing prix — sync fallback");
         bsTicket_.store(-1);
-        if (res.action == TriggerResult::Action::NewRecovery)
-            state_.store(EAState::Recovery);
-        else if (res.action == TriggerResult::Action::CloseOneSide)
-            closeOneSide(1);
+        bsLevel_ = 0.0;
     }
+    (void)gap;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -346,27 +413,29 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
                                    int recovDepth, double gapFactor,
                                    bool trailFrozen) {
     int ss = ssTicket_.load();
-    // Paramètres [3] et [4] transmis au grid engine
-    auto pl = grid_->computeSellStop(ss, ssLevel_, 0.0, recovDepth, gapFactor);
+
+    // Ancrage géométrique pur : passe gridOrigin_ comme référence fixe
+    // Le niveau est toujours à origin - (depth+1) × GridGap × factor
+    auto pl = grid_->computeSellStop(ss, ssLevel_, gridOrigin_, recovDepth, gapFactor);
 
     if (pl.needsCreate) {
-        // Création toujours permise, même en trail gelé (on ne peut pas rester sans stop)
         log("SS absent → création @ " + std::to_string(pl.targetPrice)
-            + " [recov=" + std::to_string(recovDepth)
+            + " [origin=" + std::to_string(gridOrigin_)
+            + " recov=" + std::to_string(recovDepth)
             + " gap×" + std::to_string(gapFactor) + "]");
         TradeCmd cmd = makeSellStop(lot, pl.targetPrice, comment);
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             ssTicket_.store(res.ticket);
             ssLevel_ = pl.targetPrice;
-            log("SS créé ticket=" + std::to_string(res.ticket));
+            log("SS créé ticket=" + std::to_string(res.ticket)
+                + " @ " + std::to_string(ssLevel_));
         }
     } else if (pl.needsModify && ss > 0 && !trailFrozen) {
-        // [2] Si trail figé → pas de modification, seulement création
-        // Garde : SellStop doit rester sous le bid courant
+        // Modification uniquement si le gap ATR a changé le niveau géométrique
         double curBid = grid_->bid();
         if (pl.targetPrice >= curBid) {
-            log("[Guard] SS: cible " + std::to_string(pl.targetPrice)
+            log("[Guard] SS: niveau géom. " + std::to_string(pl.targetPrice)
                 + " >= bid " + std::to_string(curBid) + " — ignoré");
             return;
         }
@@ -378,8 +447,8 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             ssLevel_ = pl.targetPrice;
-            log("SS modifié → " + std::to_string(pl.targetPrice)
-                + " [step=" + std::to_string(pl.delta / cfg_.point) + "pts]");
+            log("SS niveau mis à jour → " + std::to_string(pl.targetPrice)
+                + " [delta=" + std::to_string(pl.delta / cfg_.point) + "pts / ATR]");
         }
     }
 }
@@ -388,24 +457,28 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
                                   int recovDepth, double gapFactor,
                                   bool trailFrozen) {
     int bs = bsTicket_.load();
-    auto pl = grid_->computeBuyStop(bs, bsLevel_, 0.0, recovDepth, gapFactor);
+
+    // Ancrage géométrique pur : passe gridOrigin_ comme référence fixe
+    // Le niveau est toujours à origin + (depth+1) × GridGap × factor
+    auto pl = grid_->computeBuyStop(bs, bsLevel_, gridOrigin_, recovDepth, gapFactor);
 
     if (pl.needsCreate) {
         log("BS absent → création @ " + std::to_string(pl.targetPrice)
-            + " [recov=" + std::to_string(recovDepth)
+            + " [origin=" + std::to_string(gridOrigin_)
+            + " recov=" + std::to_string(recovDepth)
             + " gap×" + std::to_string(gapFactor) + "]");
         TradeCmd cmd = makeBuyStop(lot, pl.targetPrice, comment);
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             bsTicket_.store(res.ticket);
             bsLevel_ = pl.targetPrice;
-            log("BS créé ticket=" + std::to_string(res.ticket));
+            log("BS créé ticket=" + std::to_string(res.ticket)
+                + " @ " + std::to_string(bsLevel_));
         }
     } else if (pl.needsModify && bs > 0 && !trailFrozen) {
-        // Garde : BuyStop doit rester au-dessus de l'ask courant
         double curAsk = grid_->ask();
         if (pl.targetPrice <= curAsk) {
-            log("[Guard] BS: cible " + std::to_string(pl.targetPrice)
+            log("[Guard] BS: niveau géom. " + std::to_string(pl.targetPrice)
                 + " <= ask " + std::to_string(curAsk) + " — ignoré");
             return;
         }
@@ -417,8 +490,8 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             bsLevel_ = pl.targetPrice;
-            log("BS modifié → " + std::to_string(pl.targetPrice)
-                + " [step=" + std::to_string(pl.delta / cfg_.point) + "pts]");
+            log("BS niveau mis à jour → " + std::to_string(pl.targetPrice)
+                + " [delta=" + std::to_string(pl.delta / cfg_.point) + "pts / ATR]");
         }
     }
 }
@@ -518,11 +591,19 @@ void TOP4EA_Engine::closeBasketAtomic() {
 
     // Reset complet
     ssTicket_.store(-1); bsTicket_.store(-1);
-    ssLevel_ = 0; bsLevel_ = 0;
+    ssLevel_ = 0.0; bsLevel_ = 0.0;
     recovery_->reset();
     basketMon_->reset();
+
+    // Réétablir l'ancre géométrique sur le nouveau prix mid
+    // La prochaine grille part d'un niveau propre, ancré au marché actuel
+    {
+        Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
+        gridOrigin_ = (t.bid + t.ask) * 0.5;
+        log("=== BASKET FERMÉ en " + std::to_string(res.elapsed.count()) + "ms"
+            + " | nouvelle origin=" + std::to_string(gridOrigin_) + " ===");
+    }
     state_.store(EAState::Init);
-    log("=== BASKET FERMÉ en " + std::to_string(res.elapsed.count()) + "ms ===");
 }
 
 void TOP4EA_Engine::closeOneSide(int sideType) {

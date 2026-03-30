@@ -49,9 +49,13 @@ public:
     explicit BasketMonitor(const Config& cfg);
 
     // Mis à jour à chaque tick avec le P&L courant du basket
+    // recoveryDepth : total SS+BS recovery levels ouverts
+    //   → en deep recovery, le target requis augmente proportionnellement
+    //   → évite de fermer trop tôt quand la grille est sous tension
     // Renvoie true si le seuil de fermeture est atteint
     bool update(double currentPnL,
-                const std::vector<OrderInfo>& orders) noexcept;
+                const std::vector<OrderInfo>& orders,
+                int recoveryDepth = 0) noexcept;
 
     // Forcer la vérification (thread-safe)
     [[nodiscard]] bool shouldClose() const noexcept { return close_.load(); }

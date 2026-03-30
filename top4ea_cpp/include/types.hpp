@@ -170,6 +170,13 @@ struct Config {
     //     EURUSD 5-digit broker : 1.00  (100000 × 0.00001 = 1$/lot/pt)
     double      tickValue           = 0.10;
 
+    // ─── Basket fermeture contextualisée (profondeur recovery) ──
+    // A partir de ce nombre de niveaux combinés SS+BS, le target
+    // requis est augmenté de basketRecoveryBonus par niveau supplémentaire
+    // Ex: threshold=5, bonus=0.05 → au niveau 7 : target × (1 + 2×0.05) = +10%
+    int         basketRecoveryThreshold = 5;
+    double      basketRecoveryBonus     = 0.05;
+
     // ─── Connexion MetaApi ───────────────────────────────────
     // token et accountId lus depuis METAAPI_TOKEN / METAAPI_ACCOUNT_ID
     // region lue depuis METAAPI_REGION (défaut : new-york)

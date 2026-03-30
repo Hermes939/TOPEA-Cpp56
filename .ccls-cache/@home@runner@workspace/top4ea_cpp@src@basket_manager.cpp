@@ -18,22 +18,36 @@ BasketMonitor::BasketMonitor(const Config& cfg)
     : cfg_(cfg), vel_(cfg.velocityAlpha) {}
 
 bool BasketMonitor::update(double currentPnL,
-                           const std::vector<OrderInfo>& orders) noexcept {
+                           const std::vector<OrderInfo>& orders,
+                           int recoveryDepth) noexcept {
     lastPnL_.store(currentPnL);
     orderCount_.store((int)orders.size());
     vel_.update(currentPnL);
 
-    // Fermeture immédiate si target atteint
-    if (currentPnL >= cfg_.basketTarget) {
+    // ── Target contextualisé selon profondeur de recovery ────
+    // En deep recovery, on exige un P&L plus élevé avant de fermer.
+    // Raison : fermer trop tôt en deep recovery laisse souvent une
+    // position reouverte immédiatement dans un contexte dégradé.
+    // Formule : target × (1 + max(0, depth - threshold) × bonus)
+    double adjustedTarget = cfg_.basketTarget;
+    if (recoveryDepth > cfg_.basketRecoveryThreshold) {
+        int extraLevels = recoveryDepth - cfg_.basketRecoveryThreshold;
+        double mult = 1.0 + extraLevels * cfg_.basketRecoveryBonus;
+        mult = std::min(mult, 2.0);  // plafond à 2× le target de base
+        adjustedTarget = cfg_.basketTarget * mult;
+    }
+
+    // Fermeture immédiate si target contextualisé atteint
+    if (currentPnL >= adjustedTarget) {
         close_.store(true);
         return true;
     }
 
     // Fermeture prédictive (vélocité positive vers target)
     if (cfg_.usePnlVelocity && !orders.empty()) {
-        double triggerLevel = cfg_.basketTarget * cfg_.velocityTrigger;
+        double triggerLevel = adjustedTarget * cfg_.velocityTrigger;
         if (currentPnL >= triggerLevel &&
-            vel_.willReachTarget(cfg_.basketTarget, currentPnL, 5)) {
+            vel_.willReachTarget(adjustedTarget, currentPnL, 5)) {
             close_.store(true);
             return true;
         }

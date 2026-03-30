@@ -75,7 +75,14 @@ private:
     void resetDailyIfNeeded();
     void initOrRestore();
     void restoreState(const std::vector<OrderInfo>& orders);
-    void handleTriggers(const std::vector<OrderInfo>& orders);
+
+    // Détection géométrique pure — appelée à CHAQUE tick, sans gate temporelle
+    // Le prix franchit un niveau de grille → recovery déclenché immédiatement
+    void detectGeometricTriggers(const Tick& tick);
+
+    // Synchronisation fallback — vérifie cohérence tickets avec les ordres réels
+    void syncTriggersFallback(const std::vector<OrderInfo>& orders);
+
     void trailGrid();
 
     void ensureSellStop(double lot, const std::string& comment,
@@ -132,12 +139,16 @@ private:
 
     std::atomic<int> ssTicket_ { -1 };
     std::atomic<int> bsTicket_ { -1 };
-    double  ssLevel_  = 0.0;
-    double  bsLevel_  = 0.0;
+    double  ssLevel_     = 0.0;
+    double  bsLevel_     = 0.0;
+
+    // ── Ancrage géométrique de la grille ─────────────────────
+    // Établi une seule fois au démarrage (ou après basket close)
+    // Tous les SS/BS sont placés à origin ± n×GridGap — jamais depuis le prix courant
+    double  gridOrigin_  = 0.0;
 
     std::atomic<int> orderCounter_ { 0 };
 
-    TimePoint lastTrigger_ = Clock::now();
     TimePoint lastAction_  = Clock::now();
 
     double    dailyStartBalance_  = 0.0;
