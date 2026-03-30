@@ -44,6 +44,10 @@ public:
     // Envoi direct d'une commande trade
     [[nodiscard]] BridgeResponse sendTrade(const TradeCmd& cmd);
 
+    // Fermeture globale de tous les ordres (urgence / fin session)
+    // Parallèle : stops supprimés + positions fermées simultanément
+    void closeAllOrders();
+
     // Getters compte
     [[nodiscard]] double getBalance    () const noexcept;
     [[nodiscard]] double getEquity     () const noexcept;
@@ -146,8 +150,9 @@ private:
     mutable std::mutex     ordersMu_;
     std::vector<OrderInfo> orders_;
 
-    std::atomic<int> totalPairs_   { 0 };
-    std::atomic<int> totalSingles_ { 0 };
+    std::atomic<int>  totalPairs_    { 0 };
+    std::atomic<int>  totalSingles_  { 0 };
+    std::atomic<bool> basketClosing_ { false };  // garde anti-double close
 };
 
 } // namespace top4ea

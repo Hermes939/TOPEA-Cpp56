@@ -721,4 +721,52 @@ void TOP4EA_Engine::log(const std::string& msg) const {
               << msg << "\n";
 }
 
+// ============================================================
+//  API DLL publique
+// ============================================================
+
+bool TOP4EA_Engine::isConnected() const noexcept {
+    return bridge_ && bridge_->isConnected();
+}
+
+void TOP4EA_Engine::injectTick(const Tick& t) {
+    onTick(t);
+}
+
+BridgeResponse TOP4EA_Engine::sendTrade(const TradeCmd& cmd) {
+    if (!bridge_) {
+        BridgeResponse r;
+        r.success = false;
+        r.error   = -1;
+        r.msg     = "Bridge non initialisé";
+        return r;
+    }
+    return bridge_->sendCommand(cmd);
+}
+
+double TOP4EA_Engine::getBalance() const noexcept {
+    std::lock_guard lk(accMu_);
+    return account_.balance;
+}
+
+double TOP4EA_Engine::getEquity() const noexcept {
+    std::lock_guard lk(accMu_);
+    return account_.equity;
+}
+
+double TOP4EA_Engine::getFreeMargin() const noexcept {
+    std::lock_guard lk(accMu_);
+    return account_.freeMargin;
+}
+
+double TOP4EA_Engine::getDailyPnL() const noexcept {
+    std::lock_guard lk(accMu_);
+    return account_.balance - dailyStartBalance_;
+}
+
+int TOP4EA_Engine::getOrderCount() const noexcept {
+    std::lock_guard lk(ordersMu_);
+    return static_cast<int>(orders_.size());
+}
+
 } // namespace top4ea

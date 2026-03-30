@@ -1,11 +1,13 @@
 // ============================================================
 //  TOP4EA — basket_manager.cpp
-//  Pipeline fermeture basket 4 phases
+//  Pipeline fermeture basket 4 phases — cible ≤50ms
+//  V3 : fermeture parallèle Phase2, safety net sans sleep long
 // ============================================================
 #include "../include/basket_manager.hpp"
 #include <algorithm>
 #include <iostream>
 #include <thread>
+#include <future>
 
 namespace top4ea {
 
@@ -152,43 +154,54 @@ int BasketCloser::phase2_singles(const std::vector<OrderInfo>& buys,
     for (int s = 0; s < (int)sells.size(); ++s)
         if (!sellUsed[s]) singles.push_back(sells[s]);
 
-    // Trier par P&L ascendant (losers first)
+    if (singles.empty()) return 0;
+
+    // Trier par P&L ascendant (losers first) — stoppe le saignement en priorité
     sortByPnLAsc(singles);
 
-    int interval = refreshInterval(zone);
-    int count    = 0;
+    // Refresh unique avant lancement parallèle
+    currentTick_ = refresh_();
+    int nS = (int)singles.size();
 
-    for (int k = 0; k < (int)singles.size(); ++k) {
-        if (k % interval == 0) {
-            currentTick_ = refresh_();
-        }
+    // ── Fermeture PARALLÈLE (cible ≤50ms) ───────────────────
+    // Zone A (≤4 ordres) : toujours parallèle
+    // Zone B/C (5+)      : parallèle aussi — les futures attendent toutes
+    std::vector<std::future<bool>> futures;
+    futures.reserve(nS);
+
+    for (int k = 0; k < nS; ++k) {
         const auto& o = singles[k];
         double price = (o.type == OrderType::Buy)
                        ? currentTick_.bid
                        : currentTick_.ask;
-        bool ok = closeOrder_(o.ticket, o.lots, price, cfg_.slippage);
+        int    ticket  = o.ticket;
+        double lots    = o.lots;
+        int    slip    = cfg_.slippage;
+        futures.push_back(std::async(std::launch::async,
+            [this, ticket, lots, price, slip]() -> bool {
+                return closeOrder_(ticket, lots, price, slip);
+            }));
+    }
+
+    int count = 0;
+    for (int k = 0; k < nS; ++k) {
+        bool ok = futures[k].get();
         if (ok) ++count;
-        std::cout << "[Single] #" << k+1 << "/" << singles.size()
-                  << " ticket=" << o.ticket
-                  << " lot=" << o.lots
-                  << " pnl=" << o.profit
-                  << " ok=" << ok << "\n";
+        std::cout << "[Single] #" << k+1 << "/" << nS
+                  << " ticket=" << singles[k].ticket
+                  << " lot="    << singles[k].lots
+                  << " pnl="    << singles[k].profit
+                  << " ok="     << ok << "\n";
     }
     return count;
 }
 
 int BasketCloser::phase3_safetyNet() {
-    std::this_thread::sleep_for(Ms(200));
-    int residual = 0;
-
-    for (int attempt = 0; attempt < 3; ++attempt) {
-        residual = 0;
-        currentTick_ = refresh_();
-        // Le caller doit re-scanner les ordres restants
-        // Ici on retourne 0 (architecture inject → le moteur supérieur gère)
-        break;
-    }
-    return residual;
+    // Court délai de propagation réseau (≤10ms vs 200ms précédent)
+    std::this_thread::sleep_for(Ms(10));
+    // L'architecture inject délègue le re-scan au moteur supérieur
+    // qui re-fetche les ordres résiduels via requestOrders()
+    return 0;
 }
 
 void BasketCloser::sortByLotDesc(std::vector<OrderInfo>& v) {

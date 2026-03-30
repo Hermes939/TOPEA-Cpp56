@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <thread>
+#include <future>
 #include <ctime>
 
 namespace top4ea {
@@ -124,22 +125,32 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
     checkDailyTarget();
     if (dailyTargetReached_) return;
 
-    // 2. Anti-doublon par seconde
+    // 2. Vérification basket P&L à CHAQUE tick sur ordres cachés (< 1µs)
+    //    ─ Avant la gate 1 seconde pour ne rater aucune opportunité ≤50ms ─
+    {
+        std::vector<OrderInfo> cached;
+        { std::lock_guard lk(ordersMu_); cached = orders_; }
+        double pnl = basketProfit(cached);
+        if (!cached.empty() && basketMon_->update(pnl, cached)) {
+            if (!basketClosing_.exchange(true)) {
+                log(">>> BASKET TARGET ATTEINT P&L=" + std::to_string(pnl) + " [tick]");
+                closeBasketAtomic();
+                basketClosing_.store(false);
+            }
+            return;
+        }
+    }
+
+    // 3. Anti-doublon par seconde (logique grille + recovery)
     auto now = Clock::now();
     using Sec = std::chrono::seconds;
     if (std::chrono::duration_cast<Sec>(now - lastAction_).count() == 0) return;
     lastAction_ = now;
 
-    // 3. Récupérer ordres frais
+    // 4. Récupérer ordres frais (HTTP polling, 1×/seconde max)
     auto orders = fetchOrders();
-
-    // 4. Fermeture basket si P&L atteint
-    double pnl = basketProfit(orders);
-    if (!orders.empty() && basketMon_->update(pnl, orders)) {
-        log(">>> BASKET TARGET ATTEINT P&L=" + std::to_string(pnl));
-        closeBasketAtomic();
-        return;
-    }
+    // Synchroniser le cache
+    { std::lock_guard lk(ordersMu_); orders_ = orders; }
 
     // 5. Init ou restore
     if (state_.load() == EAState::Init) {
@@ -491,6 +502,60 @@ void TOP4EA_Engine::closeOneSide(int sideType) {
     if (sideType == 0) recovery_->resetBuy();
     else               recovery_->resetSell();
     log("Côté " + std::string(sideType==0?"BUY":"SELL") + " fermé (MaxRecovery)");
+}
+
+// ────────────────────────────────────────────────────────────
+//  Fermeture GLOBALE — stops + positions en parallèle
+//  Utilisée par TOP4EA_CloseAll() et fin de session manuelle
+// ────────────────────────────────────────────────────────────
+void TOP4EA_Engine::closeAllOrders() {
+    auto t0 = Clock::now();
+    state_.store(EAState::Closing);
+    log(">>> CLOSE ALL — fermeture globale démarrée");
+
+    auto orders = fetchOrders();
+    Tick tick;
+    { std::lock_guard lk(tickMu_); tick = lastTick_; }
+
+    // Phase 0 — purge stops pendants en parallèle
+    std::vector<std::future<void>> stopFuts;
+    for (const auto& o : orders) {
+        if (o.type == OrderType::SellStop || o.type == OrderType::BuyStop) {
+            int tkt = o.ticket;
+            stopFuts.push_back(std::async(std::launch::async,
+                [this, tkt]() { bridge_->sendCommand(makeDelete(tkt)); }));
+        }
+    }
+    for (auto& f : stopFuts) f.get();
+    ssTicket_.store(-1); bsTicket_.store(-1);
+    ssLevel_ = 0; bsLevel_ = 0;
+
+    // Phase 1 — fermeture positions marché en parallèle
+    std::vector<std::future<bool>> closeFuts;
+    for (const auto& o : orders) {
+        if (o.type != OrderType::Buy && o.type != OrderType::Sell) continue;
+        double price = (o.type == OrderType::Buy) ? tick.bid : tick.ask;
+        TradeCmd cmd = makeClose(o, price);
+        closeFuts.push_back(std::async(std::launch::async,
+            [this, cmd]() mutable -> bool {
+                auto res = bridge_->sendCommand(cmd, 2000);
+                return res.success;
+            }));
+    }
+
+    int closed = 0;
+    for (int k = 0; k < (int)closeFuts.size(); ++k) {
+        if (closeFuts[k].get()) ++closed;
+    }
+
+    recovery_->reset();
+    basketMon_->reset();
+    state_.store(EAState::Init);
+
+    auto elapsed = std::chrono::duration_cast<Ms>(Clock::now() - t0);
+    log(">>> CLOSE ALL terminé en " + std::to_string(elapsed.count())
+        + "ms | fermés=" + std::to_string(closed)
+        + "/" + std::to_string(closeFuts.size()));
 }
 
 // ────────────────────────────────────────────────────────────

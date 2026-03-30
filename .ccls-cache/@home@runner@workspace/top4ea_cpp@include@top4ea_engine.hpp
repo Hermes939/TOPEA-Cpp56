@@ -1,8 +1,8 @@
 #pragma once
 // ============================================================
-//  TOP4EA — top4ea_engine.hpp
+//  TOP4EA — top4ea_engine.hpp  C++20
 //  Moteur principal — orchestre grille, recovery, basket
-//  Machine à états centrale C++20
+//  Machine à états centrale
 // ============================================================
 #include "types.hpp"
 #include "metaapi_bridge.hpp"
@@ -31,11 +31,27 @@ public:
     explicit TOP4EA_Engine(Config cfg);
     ~TOP4EA_Engine();
 
-    // Démarrage / arrêt
+    // ─── Cycle de vie ────────────────────────────────────────
     void start();
     void stop();
 
-    // État pour le dashboard
+    // ─── API DLL publique ────────────────────────────────────
+    [[nodiscard]] bool   isConnected() const noexcept;
+
+    // Injection de tick en mode DLL (MT4 → DLL sans MetaApi)
+    void injectTick(const Tick& t);
+
+    // Envoi direct d'une commande trade
+    [[nodiscard]] BridgeResponse sendTrade(const TradeCmd& cmd);
+
+    // Getters compte
+    [[nodiscard]] double getBalance    () const noexcept;
+    [[nodiscard]] double getEquity     () const noexcept;
+    [[nodiscard]] double getFreeMargin () const noexcept;
+    [[nodiscard]] double getDailyPnL   () const noexcept;
+    [[nodiscard]] int    getOrderCount () const noexcept;
+
+    // ─── Dashboard / état ────────────────────────────────────
     [[nodiscard]] std::string dashboard() const;
     [[nodiscard]] EAState     state()    const noexcept { return state_.load(); }
 
@@ -47,24 +63,14 @@ private:
     void onError  (int code, const std::string& msg);
     void onConnect(bool connected);
 
-    // ─── Logique principale (appelée sur chaque tick) ───────
+    // ─── Logique principale ──────────────────────────────────
     void processTick(const Tick& tick);
-
-    // ─── Surveillance basket ─────────────────────────────────
     void checkBasket();
-
-    // ─── Objectif journalier ────────────────────────────────
     void checkDailyTarget();
     void resetDailyIfNeeded();
-
-    // ─── Initialisation / restauration ──────────────────────
     void initOrRestore();
     void restoreState(const std::vector<OrderInfo>& orders);
-
-    // ─── Gestion des déclenchements stops ───────────────────
     void handleTriggers(const std::vector<OrderInfo>& orders);
-
-    // ─── Trail de grille ────────────────────────────────────
     void trailGrid();
 
     void ensureSellStop(double lot, const std::string& comment,
@@ -72,97 +78,76 @@ private:
     void ensureBuyStop (double lot, const std::string& comment,
                         int recovDepth, double gapFactor, bool trailFrozen);
 
-    // ─── Fermetures ─────────────────────────────────────────
     void closeBasketAtomic();
     void closeOneSide(int sideType);
-
-    // ─── Cohérence tickets ──────────────────────────────────
     void checkConsistency(const std::vector<OrderInfo>& orders);
 
-    // ─── Requêtes MT4 ───────────────────────────────────────
     [[nodiscard]] std::vector<OrderInfo> fetchOrders();
-    [[nodiscard]] double                 basketProfit(
-                        const std::vector<OrderInfo>& orders) const noexcept;
-    [[nodiscard]] int                    countMarketOrders(
-                        const std::vector<OrderInfo>& orders) const noexcept;
-    [[nodiscard]] bool                   ticketStillPending(
-                        int ticket,
-                        const std::vector<OrderInfo>& orders) const noexcept;
+    [[nodiscard]] double basketProfit(
+        const std::vector<OrderInfo>& orders) const noexcept;
+    [[nodiscard]] int    countMarketOrders(
+        const std::vector<OrderInfo>& orders) const noexcept;
+    [[nodiscard]] bool   ticketStillPending(
+        int ticket, const std::vector<OrderInfo>& orders) const noexcept;
 
-    // ─── Fabrication TradeCmd ────────────────────────────────
     TradeCmd makeSellStop(double lot, double price, const std::string& comment);
     TradeCmd makeBuyStop (double lot, double price, const std::string& comment);
     TradeCmd makeClose   (const OrderInfo& ord, double price);
     TradeCmd makeCloseBy (int buyTicket, int sellTicket);
     TradeCmd makeDelete  (int ticket);
 
-    // ─── Sélection du lot (SRH / CPPI / Kelly) ──────────────
-    // drawdownUSD : max(0, -BasketProfit) — utilisé par SRH
-    // equity/bal  : utilisés par CPPI
     [[nodiscard]] double selectLot(int recovCount,
                                    double drawdownUSD,
                                    double equity,
                                    double balance,
                                    double gapPoints) const noexcept;
 
-    // ─── Target VABT dynamique ───────────────────────────────
     [[nodiscard]] double effectiveTarget(
         const std::vector<OrderInfo>& orders) const noexcept;
 
-    // ─── Total lots des ordres de marché ─────────────────────
     [[nodiscard]] double totalLots(
         const std::vector<OrderInfo>& orders) const noexcept;
 
-    // ─── Log ─────────────────────────────────────────────────
     void log(const std::string& msg) const;
 
     // ─── Membres ─────────────────────────────────────────────
-    Config                     cfg_;
-    std::unique_ptr<MetaApiBridge> bridge_;
-    std::unique_ptr<GridEngine>    grid_;
-    std::unique_ptr<BasketMonitor> basketMon_;
+    Config                          cfg_;
+    std::unique_ptr<MetaApiBridge>  bridge_;
+    std::unique_ptr<GridEngine>     grid_;
+    std::unique_ptr<BasketMonitor>  basketMon_;
     std::unique_ptr<RecoveryEngine> recovery_;
 
     std::atomic<EAState> state_ { EAState::Init };
     mutable std::mutex   mu_;
 
-    // Tickets des stops pendants
     std::atomic<int> ssTicket_ { -1 };
     std::atomic<int> bsTicket_ { -1 };
     double  ssLevel_  = 0.0;
     double  bsLevel_  = 0.0;
 
-    // Compteur d'ordres
     std::atomic<int> orderCounter_ { 0 };
 
-    // Anti-cascade
     TimePoint lastTrigger_ = Clock::now();
     TimePoint lastAction_  = Clock::now();
 
-    // Objectif journalier
     double    dailyStartBalance_  = 0.0;
     TimePoint dailyResetTime_     = Clock::now();
     bool      dailyTargetReached_ = false;
 
-    // Snapshot compte courant
-    mutable std::mutex  accMu_;
-    AccountSnapshot     account_;
+    mutable std::mutex accMu_;
+    AccountSnapshot    account_;
 
-    // Tick courant
     mutable std::mutex tickMu_;
     Tick               lastTick_;
 
-    // Thread dashboard
-    std::jthread dashThread_;
+    std::jthread      dashThread_;
     std::atomic<bool> running_ { false };
 
-    // Cache ordres (rafraîchi par callback onOrder)
-    mutable std::mutex ordersMu_;
+    mutable std::mutex     ordersMu_;
     std::vector<OrderInfo> orders_;
 
-    // Statistiques
-    std::atomic<int>    totalPairs_   { 0 };
-    std::atomic<int>    totalSingles_ { 0 };
+    std::atomic<int> totalPairs_   { 0 };
+    std::atomic<int> totalSingles_ { 0 };
 };
 
 } // namespace top4ea
