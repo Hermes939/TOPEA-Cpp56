@@ -93,3 +93,6 @@ args = "cd top4ea_cpp && make all && ./build/top4ea top4ea.conf"
 
 [workflows.workflow.metadata]
 outputType = "console"
+
+[deployment]
+deploymentTarget = "cloudrun"
