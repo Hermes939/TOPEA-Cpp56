@@ -363,11 +363,18 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
         }
     } else if (pl.needsModify && ss > 0 && !trailFrozen) {
         // [2] Si trail figé → pas de modification, seulement création
+        // Garde : SellStop doit rester sous le bid courant
+        double curBid = grid_->bid();
+        if (pl.targetPrice >= curBid) {
+            log("[Guard] SS: cible " + std::to_string(pl.targetPrice)
+                + " >= bid " + std::to_string(curBid) + " — ignoré");
+            return;
+        }
         TradeCmd cmd;
         cmd.op     = TradeCmd::Op::ModifyOrder;
         cmd.ticket = ss;
         cmd.price  = pl.targetPrice;
-        cmd.sl     = 0; cmd.tp = 0;
+        cmd.sl     = 0.0; cmd.tp = 0.0;
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             ssLevel_ = pl.targetPrice;
@@ -395,11 +402,18 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
             log("BS créé ticket=" + std::to_string(res.ticket));
         }
     } else if (pl.needsModify && bs > 0 && !trailFrozen) {
+        // Garde : BuyStop doit rester au-dessus de l'ask courant
+        double curAsk = grid_->ask();
+        if (pl.targetPrice <= curAsk) {
+            log("[Guard] BS: cible " + std::to_string(pl.targetPrice)
+                + " <= ask " + std::to_string(curAsk) + " — ignoré");
+            return;
+        }
         TradeCmd cmd;
         cmd.op     = TradeCmd::Op::ModifyOrder;
         cmd.ticket = bs;
         cmd.price  = pl.targetPrice;
-        cmd.sl     = 0; cmd.tp = 0;
+        cmd.sl     = 0.0; cmd.tp = 0.0;
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             bsLevel_ = pl.targetPrice;

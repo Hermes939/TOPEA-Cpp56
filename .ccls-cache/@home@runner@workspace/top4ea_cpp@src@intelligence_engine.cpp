@@ -36,10 +36,10 @@ namespace top4ea {
 // ────────────────────────────────────────────────────────────
 //  Construction
 // ────────────────────────────────────────────────────────────
-IntelligenceEngine::IntelligenceEngine(const Config& cfg)
-    : cfg_(cfg)
-    , ouEst_(cfg.ouWindowSize > 0 ? cfg.ouWindowSize : 200,
-             cfg.ouMinTheta   > 0 ? cfg.ouMinTheta   : 0.05)
+IntelligenceEngine::IntelligenceEngine(Config cfg)
+    : cfg_(std::move(cfg))
+    , ouEst_(cfg_.ouWindowSize > 0 ? cfg_.ouWindowSize : 200,
+             cfg_.ouMinTheta   > 0 ? cfg_.ouMinTheta   : 0.05)
     , volReg_(100)
 {}
 
@@ -231,20 +231,24 @@ double IntelligenceEngine::computeRiskScore(
 {
     int maxR = std::max(1, cfg_.maxRecovery);
 
-    // Axe 1 — Recovery depth (40 pts max)
-    double recovScore = std::min(1.0, (double)std::max(ssR, bsR) / maxR) * 40.0;
+    // Axe 1 — Recovery depth (35 pts max)
+    double recovScore = std::min(1.0, (double)std::max(ssR, bsR) / maxR) * 35.0;
 
-    // Axe 2 — Marge (35 pts max)
+    // Axe 2 — Marge (30 pts max)
     // marginLevel = equity/margin*100 ; < 150% = danger
     double marginScore = 0.0;
     if (marginLevel > 0.0 && marginLevel < 500.0) {
-        marginScore = std::max(0.0, (500.0 - marginLevel) / 500.0) * 35.0;
+        marginScore = std::max(0.0, (500.0 - marginLevel) / 500.0) * 30.0;
     }
 
-    // Axe 3 — Delta imbalance (25 pts max)
-    double deltaScore = std::clamp(hedgePressure, 0.0, 1.0) * 25.0;
+    // Axe 3 — Delta imbalance (20 pts max)
+    double deltaScore = std::clamp(hedgePressure, 0.0, 1.0) * 20.0;
 
-    return std::min(100.0, recovScore + marginScore + deltaScore);
+    // Axe 4 — Drawdown en % du capital (15 pts max)
+    // Drawdown > 20% de capital → score plein
+    double ddScore = std::min(1.0, drawdownPct / 20.0) * 15.0;
+
+    return std::min(100.0, recovScore + marginScore + deltaScore + ddScore);
 }
 
 // ────────────────────────────────────────────────────────────
