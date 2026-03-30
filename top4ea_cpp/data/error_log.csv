@@ -1,0 +1,1 @@
+timestamp,error_type,severity,atr_pts,atr_mult_used,gap_used,gap_optimal,rho1,regime,net_delta,hedge_pressure,recov_depth,lot_used,pnl_result,target_expected,drawdown_pct,delta_atr,delta_kelly,delta_gap_exp,delta_trail_asym,delta_vel_trig

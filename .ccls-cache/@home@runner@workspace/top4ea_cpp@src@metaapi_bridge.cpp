@@ -78,8 +78,14 @@ void MetaApiBridge::start() {
 
 void MetaApiBridge::stop() {
     running_.store(false);
-    if (tickThread_.joinable())  tickThread_.request_stop();
-    if (stateThread_.joinable()) stateThread_.request_stop();
+    if (tickThread_.joinable()) {
+        tickThread_.request_stop();
+        tickThread_.join();
+    }
+    if (stateThread_.joinable()) {
+        stateThread_.request_stop();
+        stateThread_.join();
+    }
     connected_.store(false);
 }
 
