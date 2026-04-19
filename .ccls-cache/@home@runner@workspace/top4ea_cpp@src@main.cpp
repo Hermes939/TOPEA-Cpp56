@@ -11,6 +11,7 @@
 #include <string>
 #include <thread>
 #include <chrono>
+#include <cmath>
 
 // ─── Signal handler pour arrêt propre ───────────────────────
 static std::atomic<bool> g_running { true };
@@ -80,7 +81,10 @@ top4ea::Config loadConfig(const std::string& path) {
             std::cerr << "[Config] Erreur parsing: " << key << "=" << val << "\n";
         }
     }
-    std::cout << "[Config] Chargé depuis '" << path << "'\n";
+    cfg.point = std::pow(10.0, -(double)cfg.digits);
+    std::cout << "[Config] Chargé depuis '" << path
+              << "' | digits=" << cfg.digits
+              << " point=" << cfg.point << "\n";
     return cfg;
 }
 

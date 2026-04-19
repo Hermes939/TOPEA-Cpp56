@@ -20,11 +20,12 @@ namespace top4ea {
 TOP4EA_Engine::TOP4EA_Engine(Config cfg)
     : cfg_(std::move(cfg))
 {
-    bridge_    = std::make_unique<MetaApiBridge>(cfg_);
-    grid_      = std::make_unique<GridEngine>(cfg_);
-    basketMon_ = std::make_unique<BasketMonitor>(cfg_);
-    recovery_  = std::make_unique<RecoveryEngine>(cfg_);
-    intel_     = std::make_unique<IntelligenceEngine>(cfg_);
+    bridge_      = std::make_unique<MetaApiBridge>(cfg_);
+    grid_        = std::make_unique<GridEngine>(cfg_);
+    basketMon_   = std::make_unique<BasketMonitor>(cfg_);
+    recovery_    = std::make_unique<RecoveryEngine>(cfg_);
+    intel_       = std::make_unique<IntelligenceEngine>(cfg_);
+    marketIntel_ = std::make_unique<MarketIntelligence>();
 
     // Callbacks bridge
     bridge_->onTick   ([this](const Tick& t)            { onTick(t);    });
@@ -134,6 +135,14 @@ void TOP4EA_Engine::onConnect(bool connected) {
 // ────────────────────────────────────────────────────────────
 void TOP4EA_Engine::processTick(const Tick& tick) {
     if (!bridge_->isConnected()) return;
+
+    // 0. Visual AI — mise à jour iniMTA + décision marché temps réel
+    //    Appelé avant toute logique de grille pour nourrir l'orchestrateur
+    marketIntel_->update(tick, cfg_.point);
+    {
+        VisualDecision vd = marketIntel_->analyze();
+        orchestrator_.applyDecision(vd);
+    }
 
     // 1. Objectif journalier
     resetDailyIfNeeded();
@@ -443,6 +452,11 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
             ssLevel_ = pl.targetPrice;
             log("SS créé ticket=" + std::to_string(res.ticket)
                 + " @ " + std::to_string(ssLevel_));
+            // Enregistrement sous-agent L(sellCount)
+            orchestrator_.armSlot(
+                recovery_->sellCount(),
+                res.ticket, pl.targetPrice, lot,
+                bsTicket_.load(), bsLevel_, 0.0);
         }
     } else if (pl.needsModify && ss > 0 && !trailFrozen) {
         // Modification uniquement si le gap ATR a changé le niveau géométrique
@@ -487,6 +501,11 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
             bsLevel_ = pl.targetPrice;
             log("BS créé ticket=" + std::to_string(res.ticket)
                 + " @ " + std::to_string(bsLevel_));
+            // Enregistrement sous-agent L(buyCount)
+            orchestrator_.armSlot(
+                recovery_->buyCount(),
+                ssTicket_.load(), ssLevel_, 0.0,
+                res.ticket, pl.targetPrice, lot);
         }
     } else if (pl.needsModify && bs > 0 && !trailFrozen) {
         double curAsk = grid_->ask();
@@ -968,6 +987,37 @@ std::string TOP4EA_Engine::dashboard() const {
             oss << "\n";
             oss << "║  Vélocité  : " << std::setprecision(3) << ia.pnlVelocity << " $/tick"
                 << "  CloseProb=" << std::setprecision(1) << ia.closeProbPct << "%\n";
+        }
+    }
+    // ─── Panneau VISUAL AI + SOUS-AGENTS ─────────────────────
+    {
+        VisualDecision vd = marketIntel_->analyze();
+        oss << "╠═══════ VISUAL AI — MULTI-AGENTS ═══╣\n";
+        oss << "║  Session : " << MarketIntelligence::sessionName(vd.session)
+            << "   Struct: " << MarketIntelligence::structureName(vd.structure) << "\n";
+        oss << "║  Décision: " << MarketIntelligence::decisionName(vd.decision)
+            << " [" << std::setprecision(0) << vd.confidence << "%]\n";
+        if (!vd.reasoning.empty() && vd.reasoning.size() < 60)
+            oss << "║  " << vd.reasoning.substr(0, 58) << "\n";
+        oss << std::setprecision(1);
+        oss << "║  iniMTA M5  ATR=" << vd.m5.atr
+            << "  RSI=" << vd.m5.rsi
+            << "  BB" << (vd.m5.bbNarrow()?"[SQZ]":"[OK]") << "\n";
+        oss << "║  iniMTA H1  ATR=" << vd.h1.atr
+            << "  MACD=" << std::setprecision(4) << vd.h1.macdHist
+            << (vd.h1.macdBullish()?" ↑":" ↓") << "\n";
+        // Slots actifs
+        auto snap = orchestrator_.snapshot();
+        int activeN = 0;
+        for (const auto& s : snap) if (s.isActive()) ++activeN;
+        oss << std::setprecision(2);
+        oss << "║  Sous-agents actifs : " << activeN << " / " << AgentOrchestrator::MAX_SLOTS << "\n";
+        for (const auto& s : snap) {
+            if (!s.isActive()) continue;
+            oss << "║   " << std::left << std::setw(3) << s.label()
+                << "[" << s.stateLabel() << "] Trail:" << s.trailLabel()
+                << " SS#" << s.ssTicket << " BS#" << s.bsTicket
+                << " P&L:" << (s.openPnl>=0?"+":"") << s.openPnl << "$\n";
         }
     }
     oss << "╚═══════════════════════════════════╝";

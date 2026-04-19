@@ -8,6 +8,7 @@
 //  Ticks   : REST polling /symbols/{sym}/currentPrice
 //  Ordres  : REST polling /positions + /orders
 //  Trades  : REST POST /trade
+//  Specs   : REST /symbols/{sym} — auto-adaptation broker
 // ============================================================
 #include "types.hpp"
 #include <functional>
@@ -17,8 +18,85 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <cmath>
+#include <sstream>
+#include <iomanip>
 
 namespace top4ea {
+
+// ============================================================
+//  SymbolSpec — Spécifications complètes du symbole broker
+//  Détectées dynamiquement via MetaApi /symbols/{sym}
+//  Utilisées pour adapter digits, point, tickValue à N'IMPORTE
+//  quel broker (Exness 3d, IC Markets 2d, FXTM 2d, etc.)
+// ============================================================
+struct SymbolSpec {
+    // ── Identification ──────────────────────────────────────
+    std::string symbol        = {};
+    std::string description   = {};
+    std::string brokerName    = {};    // nom du broker (si disponible)
+    std::string baseCurrency  = {};    // "XAU" pour l'or
+    std::string quoteCurrency = {};    // "USD"
+
+    // ── Précision prix ───────────────────────────────────────
+    int    digits             = 0;     // décimales : 2 → XAUUSDm IC/FXTM
+                                       //             3 → XAUUSDm Exness
+                                       //             5 → EURUSD 5-digit
+    double point              = 0.0;   // 1 point = pow(10, -digits)
+
+    // ── Valeur du tick ───────────────────────────────────────
+    // Critique pour sizing SRH, CPPI, VABT
+    // Or : contractSize=100oz × point
+    //   2d : 100 × 0.01 = 1.00 $ / lot / point (pour mini lot = 0.10 $/lot/pt)
+    //   3d : 100 × 0.001 = 0.10 $ / lot / point
+    double tickValue          = 0.0;   // $ par lot par point
+    double tickSize           = 0.0;   // incrément minimum de prix (= point)
+
+    // ── Contrat ──────────────────────────────────────────────
+    double contractSize       = 0.0;   // oz pour XAU (100), unités pour forex
+    double marginRate         = 0.0;   // marge requise / lot (fraction)
+
+    // ── Volumes ──────────────────────────────────────────────
+    double volumeMin          = 0.01;
+    double volumeMax          = 100.0;
+    double volumeStep         = 0.01;
+
+    // ── Distances minimales ──────────────────────────────────
+    double stopLevelPoints    = 0.0;   // distance min SL/TP en points
+    double freezeLevelPoints  = 0.0;   // freeze level
+
+    // ── Spread ───────────────────────────────────────────────
+    double spreadPoints       = 0.0;   // spread courant en points
+
+    // ── État détection ───────────────────────────────────────
+    bool   detected           = false; // true si données reçues du broker
+
+    // ── Rapport lisible ─────────────────────────────────────
+    [[nodiscard]] std::string report() const {
+        if (!detected) return "BrokerSpec: non détecté — config fichier";
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(digits > 0 ? digits : 2);
+        oss << "BrokerSpec [" << symbol << "]"
+            << "  digits=" << digits
+            << "  point="  << point
+            << "  tickVal=" << tickValue << "$/lot/pt"
+            << "  contract=" << (int)contractSize
+            << "  vol[" << volumeMin << "/" << volumeMax << "/" << volumeStep << "]"
+            << "  stopLvl=" << (int)stopLevelPoints << "pts";
+        return oss.str();
+    }
+
+    // ── ATR grid min/max adaptatifs ──────────────────────────
+    // Les valeurs en points de la config (200/1000) sont définies
+    // pour un broker 2-digit. On rescale si le broker diffère.
+    [[nodiscard]] int rescalePoints(int configPoints, int refDigits = 2) const {
+        if (!detected || digits == refDigits || digits == 0) return configPoints;
+        // Exemple : configPoints=500 pts @ 2-digit = 5.00$ de déplacement
+        // Pour 3-digit : 500 pts @ 3-digit = 0.500$ → besoin de 5000 pts
+        double scale = std::pow(10.0, digits - refDigits);
+        return (int)std::round(configPoints * scale);
+    }
+};
 
 using TickCallback    = std::function<void(const Tick&)>;
 using OrderCallback   = std::function<void(const OrderInfo&)>;
@@ -79,6 +157,18 @@ public:
     [[nodiscard]] std::vector<OrderInfo>         requestOrders (int timeoutMs = 3000);
     [[nodiscard]] std::optional<AccountSnapshot> requestAccount(int timeoutMs = 3000);
 
+    // ── Auto-détection broker (appelable AVANT start()) ──────
+    // Interroge /symbols/{symbol} pour obtenir :
+    //   digits, point, tickValue, contractSize, volume limits, stopLevel
+    // Retourne un SymbolSpec avec detected=true si succès.
+    // Retourne detected=false si le broker ne répond pas (weekend, etc.)
+    // → Dans ce cas le moteur conserve les valeurs du fichier config.
+    [[nodiscard]] SymbolSpec requestSymbolSpec(const std::string& symbol,
+                                               int timeoutMs = 8000);
+
+    // ── Met à jour la config interne (digits → precision JSON) ─
+    void updateConfig(const Config& cfg) noexcept { cfg_ = cfg; }
+
 private:
     void tickLoop();
     void stateLoop();
@@ -97,6 +187,8 @@ private:
     static OrderInfo       parsePendingOrder(const std::string& json);
     static AccountSnapshot parseAccount     (const std::string& json);
     static BridgeResponse  parseTradeResult (const std::string& json);
+    static SymbolSpec      parseSymbolSpec  (const std::string& json,
+                                             const std::string& symbol);
 
     std::string cmdToJson(const TradeCmd& cmd) const;
 

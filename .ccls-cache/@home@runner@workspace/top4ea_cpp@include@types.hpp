@@ -168,7 +168,17 @@ struct Config {
     //     Requis pour SRH, CPPI et VABT
     //     XAUUSD 5-digit broker : 0.10  (100oz × 0.001 = 0.1$/lot/pt)
     //     EURUSD 5-digit broker : 1.00  (100000 × 0.00001 = 1$/lot/pt)
+    //     Mis à jour automatiquement lors de la détection broker
     double      tickValue           = 0.10;
+
+    // ─── Spécifications broker auto-détectées ────────────────
+    //     Remplies par detectAndApplyBrokerSpec() au démarrage
+    //     → utilisées pour sizing, validation, SL/TP placement
+    double      volumeMin           = 0.01;   // lot min broker
+    double      volumeMax           = 100.0;  // lot max broker
+    double      volumeStep          = 0.01;   // incrément lot broker
+    double      stopLevelPoints     = 0.0;    // distance min SL/TP en points
+    double      contractSize        = 100.0;  // taille contrat (100oz pour XAU)
 
     // ─── Basket fermeture contextualisée (profondeur recovery) ──
     // A partir de ce nombre de niveaux combinés SS+BS, le target

@@ -10,6 +10,8 @@
 #include "basket_manager.hpp"
 #include "recovery_engine.hpp"
 #include "intelligence_engine.hpp"
+#include "market_intelligence.hpp"
+#include "agent_orchestrator.hpp"
 #include <memory>
 #include <atomic>
 #include <mutex>
@@ -68,6 +70,16 @@ private:
     void onError  (int code, const std::string& msg);
     void onConnect(bool connected);
 
+    // ─── Auto-détection broker ───────────────────────────────
+    // Interroge MetaApi avant le démarrage des threads de polling.
+    // Si la détection réussit → applique digits/point/tickValue à cfg_
+    //   et recrée tous les sous-systèmes avec la config corrigée.
+    // Si elle échoue (weekend, hors-ligne) → conserve config fichier + warning.
+    // Appelé dans start() avant bridge_->start() (HTTP synchrone brut).
+    void detectAndApplyBrokerSpec();
+    void applySymbolSpec(const SymbolSpec& spec);
+    void rebuildSubsystems();                  // recrée grid/basket/recovery/intel
+
     // ─── Logique principale ──────────────────────────────────
     void processTick(const Tick& tick);
     void checkBasket();
@@ -124,11 +136,16 @@ private:
 
     // ─── Membres ─────────────────────────────────────────────
     Config                              cfg_;
+    SymbolSpec                          symbolSpec_;   // specs broker détectées
     std::unique_ptr<MetaApiBridge>      bridge_;
     std::unique_ptr<GridEngine>         grid_;
     std::unique_ptr<BasketMonitor>      basketMon_;
     std::unique_ptr<RecoveryEngine>     recovery_;
     std::unique_ptr<IntelligenceEngine> intel_;
+
+    // ─── Multi-Agent Layer ───────────────────────────────────
+    std::unique_ptr<MarketIntelligence> marketIntel_;
+    AgentOrchestrator                   orchestrator_;
 
     // Cache de la dernière analyse (pour dashboard)
     mutable std::mutex                  intelMu_;

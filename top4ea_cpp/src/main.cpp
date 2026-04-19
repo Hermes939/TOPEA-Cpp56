@@ -81,10 +81,17 @@ top4ea::Config loadConfig(const std::string& path) {
             std::cerr << "[Config] Erreur parsing: " << key << "=" << val << "\n";
         }
     }
-    cfg.point = std::pow(10.0, -(double)cfg.digits);
-    std::cout << "[Config] Chargé depuis '" << path
-              << "' | digits=" << cfg.digits
-              << " point=" << cfg.point << "\n";
+    // digits=0 → auto-détection broker au démarrage (recommandé)
+    // digits>0 → surcharge manuelle (override broker)
+    if (cfg.digits > 0) {
+        cfg.point = std::pow(10.0, -(double)cfg.digits);
+        std::cout << "[Config] digits=" << cfg.digits
+                  << " (surcharge manuelle) point=" << cfg.point << "\n";
+    } else {
+        // Conserver le point par défaut du Config (sera écrasé par la détection)
+        std::cout << "[Config] digits=0 → auto-détection broker activée\n";
+    }
+    std::cout << "[Config] Chargé depuis '" << path << "'\n";
     return cfg;
 }
 
@@ -92,17 +99,18 @@ top4ea::Config loadConfig(const std::string& path) {
 void printBanner(const top4ea::Config& cfg) {
     std::cout << R"(
 ╔══════════════════════════════════════════════════╗
-║           TOP4EA  C++20  v1.0                    ║
+║        TOP4EA  C++20  v3.0  — INSTITUTIONNEL     ║
 ║   Grid Recovery EA — Connexion MetaApi MT4       ║
 ╠══════════════════════════════════════════════════╣
 )" << "║  Symbole   : " << cfg.symbol       << "\n"
+   << "║  Digits    : " << (cfg.digits==0 ? "0 (AUTO-DÉTECTION BROKER)" :
+                             std::to_string(cfg.digits) + " (surcharge manuelle)") << "\n"
    << "║  BaseLot   : " << cfg.baseLot      << "\n"
    << "║  LotMult   : " << cfg.lotMultiplier<< "\n"
-   << "║  GridGap   : " << cfg.gridGap      << " pts\n"
+   << "║  GridGap   : " << cfg.gridGap      << " pts (sera rescalé si broker 3-digit)\n"
    << "║  ATRGrid   : " << (cfg.useAtrGrid?"ON":"OFF") << "\n"
    << "║  Target    : " << cfg.basketTarget << " $\n"
    << "║  MaxRecov  : " << cfg.maxRecovery  << "\n"
-   << "║  Daily%    : " << cfg.dailyTargetPct << "%\n"
    << "║  TickPoll  : " << cfg.tickPollMs << " ms\n"
    << R"(╚══════════════════════════════════════════════════╝
 )";

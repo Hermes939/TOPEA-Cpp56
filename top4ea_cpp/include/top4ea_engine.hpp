@@ -70,6 +70,16 @@ private:
     void onError  (int code, const std::string& msg);
     void onConnect(bool connected);
 
+    // ─── Auto-détection broker ───────────────────────────────
+    // Interroge MetaApi avant le démarrage des threads de polling.
+    // Si la détection réussit → applique digits/point/tickValue à cfg_
+    //   et recrée tous les sous-systèmes avec la config corrigée.
+    // Si elle échoue (weekend, hors-ligne) → conserve config fichier + warning.
+    // Appelé dans start() avant bridge_->start() (HTTP synchrone brut).
+    void detectAndApplyBrokerSpec();
+    void applySymbolSpec(const SymbolSpec& spec);
+    void rebuildSubsystems();                  // recrée grid/basket/recovery/intel
+
     // ─── Logique principale ──────────────────────────────────
     void processTick(const Tick& tick);
     void checkBasket();
@@ -126,6 +136,7 @@ private:
 
     // ─── Membres ─────────────────────────────────────────────
     Config                              cfg_;
+    SymbolSpec                          symbolSpec_;   // specs broker détectées
     std::unique_ptr<MetaApiBridge>      bridge_;
     std::unique_ptr<GridEngine>         grid_;
     std::unique_ptr<BasketMonitor>      basketMon_;

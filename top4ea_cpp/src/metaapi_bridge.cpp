@@ -234,6 +234,167 @@ std::optional<AccountSnapshot> MetaApiBridge::requestAccount(int /*timeoutMs*/) 
     return acc;
 }
 
+// ============================================================
+//  requestSymbolSpec — Auto-détection spécifications broker
+//  Endpoint : GET /users/current/accounts/{id}/symbols/{sym}
+//  Peut être appelé AVANT start() (appel synchrone HTTP brut)
+//
+//  Champs extraits :
+//    digits, point, tickValue, tickSize, contractSize,
+//    volumeMin, volumeMax, volumeStep, stopsLevel, spread
+//
+//  Fallback intelligent :
+//    Si digits absent mais tickSize présent → digits=round(-log10(tickSize))
+//    Si tickValue absent → estimé depuis contractSize et point
+//    Si tout échoue → detected=false, moteur utilise config fichier
+// ============================================================
+SymbolSpec MetaApiBridge::requestSymbolSpec(const std::string& symbol,
+                                             int /*timeoutMs*/) {
+    SymbolSpec spec;
+    spec.symbol   = symbol;
+    spec.detected = false;
+
+    if (token_.empty() || accountId_.empty()) {
+        std::cerr << "[BrokerSpec] Tokens manquants — impossible de détecter "
+                     "les specs\n";
+        return spec;
+    }
+
+    std::string path = "/users/current/accounts/" + accountId_
+                     + "/symbols/" + symbol;
+    std::cout << "[BrokerSpec] Interrogation broker → " << path << "\n";
+
+    std::string resp = httpGet(path);
+    if (resp.empty()) {
+        std::cerr << "[BrokerSpec] Pas de réponse broker (weekend/offline?)"
+                     " — config fichier conservée\n";
+        return spec;
+    }
+
+    spec = parseSymbolSpec(resp, symbol);
+
+    if (spec.detected) {
+        std::cout << "[BrokerSpec] " << spec.report() << "\n";
+    } else {
+        std::cerr << "[BrokerSpec] Données insuffisantes dans la réponse"
+                     " — config fichier conservée\n";
+    }
+    return spec;
+}
+
+// ────────────────────────────────────────────────────────────
+//  parseSymbolSpec — extraction JSON MetaApi symbol spec
+//
+//  MetaApi retourne un objet JSON avec les champs suivants
+//  (noms documentés v5 MetaApi REST) :
+//    "digits", "point", "tickValue", "tickSize",
+//    "contractSize", "volumeMin", "volumeMax", "volumeStep",
+//    "stopsLevel", "freezeLevel", "spread",
+//    "description", "baseCurrency", "quoteCurrency"
+// ────────────────────────────────────────────────────────────
+SymbolSpec MetaApiBridge::parseSymbolSpec(const std::string& json,
+                                           const std::string& sym) {
+    SymbolSpec s;
+    s.symbol = sym;
+
+    // ── Précision ────────────────────────────────────────────
+    int rawDigits = jsonGetI(json, "digits");
+
+    // tickSize est souvent plus fiable (ex: "0.001" → 3 digits)
+    double tickSize = jsonGetD(json, "tickSize");
+    if (tickSize <= 0.0) tickSize = jsonGetD(json, "tickvalue"); // fallback
+    if (tickSize <= 0.0) tickSize = jsonGetD(json, "tick_size");
+
+    if (rawDigits > 0) {
+        s.digits   = rawDigits;
+        s.point    = std::pow(10.0, -rawDigits);
+    } else if (tickSize > 0.0) {
+        // Déduire digits depuis tickSize
+        double log10ts = -std::log10(tickSize);
+        s.digits   = std::max(1, (int)std::round(log10ts));
+        s.point    = std::pow(10.0, -s.digits);
+        std::cout << "[BrokerSpec] digits déduit depuis tickSize="
+                  << tickSize << " → " << s.digits << "\n";
+    } else {
+        // Impossible de déterminer — ne pas marquer detected
+        std::cerr << "[BrokerSpec] digits/tickSize absents du JSON\n";
+        return s;
+    }
+    s.tickSize = (tickSize > 0.0) ? tickSize : s.point;
+
+    // ── Point (surcharge si fourni directement) ──────────────
+    double rawPoint = jsonGetD(json, "point");
+    if (rawPoint > 0.0) s.point = rawPoint;
+
+    // ── Tick value ───────────────────────────────────────────
+    // Cas nominal : MetaApi fournit tickValue directement
+    double tv = jsonGetD(json, "tickValue");
+    if (tv <= 0.0) tv = jsonGetD(json, "tick_value");
+
+    // Cas alternatif : calculer depuis contractSize × point
+    // Pour XAU/USD : 1 lot = 100oz → tickValue = 100 × point $
+    double cs = jsonGetD(json, "contractSize");
+    if (cs <= 0.0) cs = jsonGetD(json, "contract_size");
+
+    if (tv > 0.0) {
+        s.tickValue    = tv;
+        s.contractSize = (cs > 0.0) ? cs : 100.0;
+    } else if (cs > 0.0) {
+        s.tickValue    = cs * s.point;
+        s.contractSize = cs;
+        std::cout << "[BrokerSpec] tickValue calculé: "
+                  << cs << " × " << s.point << " = " << s.tickValue << "\n";
+    } else {
+        // Dernier recours : or standard 100oz
+        s.contractSize = 100.0;
+        s.tickValue    = 100.0 * s.point;
+        std::cout << "[BrokerSpec] tickValue estimé (100oz standard): "
+                  << s.tickValue << "\n";
+    }
+
+    // ── Volumes ──────────────────────────────────────────────
+    double vmin  = jsonGetD(json, "volumeMin");
+    double vmax  = jsonGetD(json, "volumeMax");
+    double vstep = jsonGetD(json, "volumeStep");
+    if (vmin  <= 0.0) vmin  = jsonGetD(json, "minVolume");
+    if (vmax  <= 0.0) vmax  = jsonGetD(json, "maxVolume");
+    if (vstep <= 0.0) vstep = jsonGetD(json, "volumeIncrement");
+
+    s.volumeMin  = (vmin  > 0.0) ? vmin  : 0.01;
+    s.volumeMax  = (vmax  > 0.0) ? vmax  : 100.0;
+    s.volumeStep = (vstep > 0.0) ? vstep : 0.01;
+
+    // ── Distances minimales ──────────────────────────────────
+    double sl = jsonGetD(json, "stopsLevel");
+    if (sl <= 0.0) sl = jsonGetD(json, "stopLevel");
+    if (sl <= 0.0) sl = jsonGetD(json, "stops_level");
+    s.stopLevelPoints  = sl;
+
+    double fl = jsonGetD(json, "freezeLevel");
+    if (fl <= 0.0) fl = jsonGetD(json, "freeze_level");
+    s.freezeLevelPoints = fl;
+
+    // ── Spread ───────────────────────────────────────────────
+    double sp = jsonGetD(json, "spread");
+    s.spreadPoints = sp;
+
+    // ── Description & identifiants ───────────────────────────
+    s.description   = jsonGet(json, "description");
+    s.baseCurrency  = jsonGet(json, "baseCurrency");
+    s.quoteCurrency = jsonGet(json, "quoteCurrency");
+
+    // Broker name parfois dans le JSON de spec
+    std::string bn = jsonGet(json, "brokerName");
+    if (bn.empty()) bn = jsonGet(json, "broker");
+    s.brokerName = bn;
+
+    // ── Validation finale ────────────────────────────────────
+    if (s.digits > 0 && s.point > 0.0 && s.tickValue > 0.0) {
+        s.detected = true;
+    }
+    return s;
+}
+
 // ────────────────────────────────────────────────────────────
 //  HTTP GET via libcurl
 // ────────────────────────────────────────────────────────────
@@ -316,10 +477,34 @@ std::string MetaApiBridge::httpPost(const std::string& path,
 
 // ────────────────────────────────────────────────────────────
 //  Sérialisation commande → JSON MetaApi
+//
+//  POINT CRITIQUE : la précision des prix doit correspondre
+//  exactement au nombre de décimales du broker.
+//  Ancienne version : setprecision(2) hardcodé → CASSÉ pour
+//  Exness XAUUSD 3 digits (prix tronqué = rejet broker).
+//  Nouvelle version : cfg_.digits détecté dynamiquement.
+//    Exness 3d → setprecision(3)  ex: 1.923
+//    IC Markets 2d → setprecision(2)  ex: 1923.45
+//    Forex 5d → setprecision(5)  ex: 1.23456
 // ────────────────────────────────────────────────────────────
 std::string MetaApiBridge::cmdToJson(const TradeCmd& cmd) const {
+    // Précision prix = digits broker (défaut sécurisé : 5 si non détecté)
+    int pricePrecision = (cfg_.digits > 0) ? cfg_.digits : 5;
+
     std::ostringstream oss;
-    oss << std::fixed << std::setprecision(5);
+    oss << std::fixed;
+
+    // Lot toujours à 2 décimales (standard MT4/MT5)
+    auto priceFmt = [&](double price) -> std::string {
+        std::ostringstream tmp;
+        tmp << std::fixed << std::setprecision(pricePrecision) << price;
+        return tmp.str();
+    };
+    auto lotFmt = [&](double lots) -> std::string {
+        std::ostringstream tmp;
+        tmp << std::fixed << std::setprecision(2) << lots;
+        return tmp.str();
+    };
 
     auto actionType = [&]() -> std::string {
         if (cmd.op == TradeCmd::Op::DeletePending) return "ORDER_CANCEL";
@@ -341,14 +526,14 @@ std::string MetaApiBridge::cmdToJson(const TradeCmd& cmd) const {
 
     if (cmd.op == TradeCmd::Op::MarketOrder) {
         std::string sym = cmd.symbol.empty() ? cfg_.symbol : cmd.symbol;
-        oss << ",\"symbol\":\""   << sym          << "\"";
-        oss << ",\"volume\":"     << cmd.lots;
+        oss << ",\"symbol\":\""   << sym              << "\"";
+        oss << ",\"volume\":"     << lotFmt(cmd.lots);
         if (cmd.price > 0.0)
-            oss << ",\"openPrice\":" << std::fixed << std::setprecision(2) << cmd.price << std::defaultfloat;
+            oss << ",\"openPrice\":" << priceFmt(cmd.price);
         if (cmd.sl > 0.0)
-            oss << ",\"stopLoss\":"   << cmd.sl;
+            oss << ",\"stopLoss\":"   << priceFmt(cmd.sl);
         if (cmd.tp > 0.0)
-            oss << ",\"takeProfit\":" << cmd.tp;
+            oss << ",\"takeProfit\":" << priceFmt(cmd.tp);
         oss << ",\"comment\":\""  << cmd.comment << "\"";
         oss << ",\"magic\":"      << cmd.magic;
         oss << ",\"slippage\":"   << cmd.slippage;
@@ -359,13 +544,14 @@ std::string MetaApiBridge::cmdToJson(const TradeCmd& cmd) const {
         oss << ",\"orderId\":\"" << cmd.ticket << "\"";
     } else if (cmd.op == TradeCmd::Op::ModifyOrder) {
         // Ordres pending (SellStop / BuyStop) → orderId + openPrice obligatoire
+        // Précision broker correcte — CRITIQUE pour les ordres Exness 3-digit
         oss << ",\"orderId\":\"" << cmd.ticket << "\"";
         if (cmd.price > 0.0)
-            oss << ",\"openPrice\":" << std::fixed << std::setprecision(2) << cmd.price << std::defaultfloat;
+            oss << ",\"openPrice\":" << priceFmt(cmd.price);
         if (cmd.sl > 0.0)
-            oss << ",\"stopLoss\":"   << std::fixed << std::setprecision(2) << cmd.sl;
+            oss << ",\"stopLoss\":"   << priceFmt(cmd.sl);
         if (cmd.tp > 0.0)
-            oss << ",\"takeProfit\":" << std::fixed << std::setprecision(2) << cmd.tp;
+            oss << ",\"takeProfit\":" << priceFmt(cmd.tp);
     }
 
     oss << "}";
