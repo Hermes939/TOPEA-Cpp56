@@ -26,6 +26,9 @@ DLL_SRCS  := $(SRCDIR)/metaapi_bridge.cpp       \
              $(SRCDIR)/institutional_delta.cpp   \
              $(SRCDIR)/error_memory.cpp          \
              $(SRCDIR)/math_calibrator.cpp       \
+             $(SRCDIR)/market_intelligence.cpp   \
+             $(SRCDIR)/grid_slot_agent.cpp       \
+             $(SRCDIR)/agent_orchestrator.cpp    \
              $(SRCDIR)/top4ea_engine.cpp         \
              $(SRCDIR)/top4ea_dll.cpp
 

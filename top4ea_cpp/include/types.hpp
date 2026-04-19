@@ -194,4 +194,62 @@ struct TradeResult {
     std::string msg  = {};
 };
 
+// ============================================================
+//  MULTI-AGENT — Enums étendus
+// ============================================================
+
+// ─── Décision du Visual AI (assistante marché temps réel) ───
+enum class MarketDecision : uint8_t {
+    CONTINUE = 0,       // Activité normale — rien à modifier
+    TRAIL_AGGRESSIVE,   // Trailing serré — réactivité maximale
+    TRAIL_NATURAL,      // Trailing paramètres normaux
+    TRAIL_FREEZE,       // Geler les stops — zone TP proche
+    ADD_ORDER,          // Ouvrir position supplémentaire
+    REMOVE_TRAIL,       // Supprimer le trailing stop
+    NO_TRADE,           // Aucun nouveau trade
+    OBSERVE,            // Observer niveau/structure sans agir
+    LOCK_WAIT,          // Verrouiller — oscillation serrée/piège
+    STOP_ORDERS,        // Stopper tous les ordres
+};
+
+// ─── Mode trail appliqué par chaque sous-agent ──────────────
+enum class TrailMode : uint8_t {
+    NATURAL = 0,        // Trail normal (step_pct conf)
+    AGGRESSIVE,         // Trail serré (×0.5 du step normal)
+    FROZEN,             // Trail figé — stops immobiles
+    REMOVED,            // Trail supprimé — stop au prix actuel
+};
+
+// ─── État d'un slot de grille (sous-agent niveau Ln) ────────
+enum class SlotState : uint8_t {
+    IDLE = 0,           // Niveau libre
+    ARMED,              // SS + BS placés, attente déclenchement
+    TRIGGERED_SS,       // SellStop déclenché
+    TRIGGERED_BS,       // BuyStop déclenché
+    DUAL_ACTIVE,        // SS et BS tous les deux actifs
+    CLOSING,            // Fermeture en cours
+};
+
+// ─── Structure de marché détectée par le Visual AI ──────────
+enum class MarketStructure : uint8_t {
+    UNKNOWN = 0,
+    BULLISH_TREND,      // HH + HL confirmés
+    BEARISH_TREND,      // LH + LL confirmés
+    RANGE_TIGHT,        // Oscillation serrée < 0.5×ATR
+    RANGE_WIDE,         // Range large propice au grid
+    BREAKOUT_UP,        // Cassure haussière en cours
+    BREAKOUT_DOWN,      // Cassure baissière en cours
+    TRAP_BULL,          // Faux cassure haussière (piège)
+    TRAP_BEAR,          // Faux cassure baissière (piège)
+};
+
+// ─── Session de trading ──────────────────────────────────────
+enum class TradingSession : uint8_t {
+    CLOSED = 0,         // Week-end / hors marché
+    TOKYO,              // 00:00–09:00 UTC   (liquidité faible)
+    LONDON,             // 08:00–17:00 UTC   (liquidité élevée)
+    NEW_YORK,           // 13:00–22:00 UTC   (liquidité élevée)
+    OVERLAP_LN,         // 13:00–17:00 UTC   (pic de liquidité)
+};
+
 } // namespace top4ea

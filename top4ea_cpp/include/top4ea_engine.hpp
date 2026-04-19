@@ -10,6 +10,8 @@
 #include "basket_manager.hpp"
 #include "recovery_engine.hpp"
 #include "intelligence_engine.hpp"
+#include "market_intelligence.hpp"
+#include "agent_orchestrator.hpp"
 #include <memory>
 #include <atomic>
 #include <mutex>
@@ -129,6 +131,10 @@ private:
     std::unique_ptr<BasketMonitor>      basketMon_;
     std::unique_ptr<RecoveryEngine>     recovery_;
     std::unique_ptr<IntelligenceEngine> intel_;
+
+    // ─── Multi-Agent Layer ───────────────────────────────────
+    std::unique_ptr<MarketIntelligence> marketIntel_;
+    AgentOrchestrator                   orchestrator_;
 
     // Cache de la dernière analyse (pour dashboard)
     mutable std::mutex                  intelMu_;
