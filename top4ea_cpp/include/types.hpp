@@ -188,8 +188,10 @@ struct Config {
 
     // [D] Target VABT dynamique (Risk Parity / Bridgewater)
     //     target = ATR × vabtCoeff × totalLots × tickValue
-    bool        useVABT             = false;
-    double      vabtCoeff           = 0.15;  // coefficient de calibration
+    //     CORRECTION : activé par défaut — le target doit être proportionnel
+    //     aux lots engagés, pas fixe à $7 quelle que soit l'exposition.
+    bool        useVABT             = true;
+    double      vabtCoeff           = 0.40;  // était 0.15 — calibré pour XAUUSDm
 
     // [E] Rolling Kelly dynamique (extension de Thorp 1969)
     //     Recalcule f* sur les N derniers cycles réels fermés

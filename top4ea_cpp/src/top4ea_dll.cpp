@@ -103,6 +103,9 @@ static top4ea::Config loadConfig(const char* path) {
             else if (key=="wave_enabled")   cfg.waveEnabled   = (val=="true"||val=="1");
             else if (key=="wave1_target")   cfg.wave1Target   = std::stod(val);
             else if (key=="wave2_target")   cfg.wave2Target   = std::stod(val);
+            // VABT — Target dynamique proportionnel à l'exposition (Risk Parity)
+            else if (key=="use_vabt")       cfg.useVABT       = (val=="true"||val=="1");
+            else if (key=="vabt_coeff")     cfg.vabtCoeff     = std::stod(val);
             else if (key=="tick_poll_ms")     cfg.tickPollMs        = std::stoi(val);
             else if (key=="state_poll_ms")    cfg.statePollMs       = std::stoi(val);
             else if (key=="reconnect_ms")     cfg.reconnectMs       = std::stoi(val);

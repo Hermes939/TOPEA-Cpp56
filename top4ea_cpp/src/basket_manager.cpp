@@ -29,11 +29,20 @@ bool BasketMonitor::update(double currentPnL,
     // Raison : fermer trop tôt en deep recovery laisse souvent une
     // position reouverte immédiatement dans un contexte dégradé.
     // Formule : target × (1 + max(0, depth - threshold) × bonus)
+    //
+    // CORRECTION MATHÉMATIQUE :
+    //   Ancien code : mult = min(mult, 2.0)  → plafond arbitraire à 2×
+    //   Problème    : au recovery L5 (depth=5, threshold=5, extraLevels=0),
+    //                 mult=1.0 et adjustedTarget=$7. Mais le drawdown réel à L5
+    //                 peut dépasser $168. Le plafond 2× ($14) était 12× trop petit.
+    //   Correction  : plafond porté à 8× pour rester cohérent avec l'exposition réelle.
+    //                 Avec basket_target=$10 et mult max=8 : target max = $80
+    //                 ce qui correspond à ~1 grid gap de mouvement favorable à plein lot.
     double adjustedTarget = cfg_.basketTarget;
     if (recoveryDepth > cfg_.basketRecoveryThreshold) {
         int extraLevels = recoveryDepth - cfg_.basketRecoveryThreshold;
         double mult = 1.0 + extraLevels * cfg_.basketRecoveryBonus;
-        mult = std::min(mult, 2.0);  // plafond à 2× le target de base
+        mult = std::min(mult, 8.0);  // plafond à 8× (était 2×) pour couvrir deep recovery
         adjustedTarget = cfg_.basketTarget * mult;
     }
 

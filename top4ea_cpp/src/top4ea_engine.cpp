@@ -160,15 +160,25 @@ void TOP4EA_Engine::applySymbolSpec(const SymbolSpec& spec) {
     // On rescale pour conserver la même amplitude en $ du prix réel.
     if (oldDigits > 0 && spec.digits != oldDigits) {
         double scale = std::pow(10.0, (double)(spec.digits - oldDigits));
-        cfg_.gridGap    = (int)std::round((double)cfg_.gridGap * scale);
-        cfg_.atrGridMin = cfg_.atrGridMin * scale;  // double
-        cfg_.atrGridMax = cfg_.atrGridMax * scale;  // double
+        cfg_.gridGap         = (int)std::round((double)cfg_.gridGap * scale);
+        cfg_.atrGridMin      = cfg_.atrGridMin * scale;
+        cfg_.atrGridMax      = cfg_.atrGridMax * scale;
+        // ── CORRECTION : rescale VL pts en cohérence avec gridGap ──
+        // vlActivationPts et vlTrailPts sont définis en "points" référencés
+        // au broker 2-digit (point=0.01). Si le broker utilise un nombre de
+        // décimales différent, on rescale pour conserver la même amplitude prix.
+        cfg_.vlActivationPts = (int)std::round((double)cfg_.vlActivationPts * scale);
+        cfg_.vlTrailPts      = (int)std::round((double)cfg_.vlTrailPts * scale);
+        // Rescale aussi trail_fixed_dist_pts et cascade_dispatch_pips
+        cfg_.trailFixedDistPts = (int)std::round((double)cfg_.trailFixedDistPts * scale);
         log("[BrokerSpec] Rescale grille ×" + std::to_string(scale)
             + " (digits " + std::to_string(oldDigits)
             + "→" + std::to_string(spec.digits)
             + ") gridGap=" + std::to_string(cfg_.gridGap)
             + " atrMin=" + std::to_string(cfg_.atrGridMin)
-            + " atrMax=" + std::to_string(cfg_.atrGridMax));
+            + " atrMax=" + std::to_string(cfg_.atrGridMax)
+            + " vlAct=" + std::to_string(cfg_.vlActivationPts)
+            + " vlTrail=" + std::to_string(cfg_.vlTrailPts));
     }
 
     // ── Sync bridge JSON (précision prix dans cmdToJson) ─────
@@ -1104,9 +1114,19 @@ void TOP4EA_Engine::closeWavePartial(int wave) {
         return;
     }
 
-    // Trier par lots croissants (fermer les plus petits en premier)
+    // CORRECTION MATHÉMATIQUE — tri par P&L ascendant (losers en premier)
+    // Ancien code : tri par lots croissants → fermait les plus petites positions sans
+    //   considérer si elles étaient en profit ou en perte.
+    // Problème    : pouvait fermer des positions gagnantes avant les perdantes,
+    //   laissant le panier exposé aux plus grosses pertes.
+    // Correction  : fermer d'abord les losers pour réduire le risque global tout en
+    //   conservant les positions gagnantes qui peuvent continuer à progresser vers le target.
+    // Mathématique : si cyclePnL = +$8 (déclenche Wave1), fermer les losers en priorité
+    //   préserve le gain net car les winners restent ouverts.
     std::sort(mktOrders.begin(), mktOrders.end(),
-              [](const OrderInfo& a, const OrderInfo& b){ return a.lots < b.lots; });
+              [](const OrderInfo& a, const OrderInfo& b){
+                  return (a.profit + a.swap + a.commission) < (b.profit + b.swap + b.commission);
+              });
 
     int total = (int)mktOrders.size();
     int toClose = 0;
@@ -1737,7 +1757,13 @@ std::string TOP4EA_Engine::dashboard() const {
         oss << "  [+réalisé=" << std::setprecision(2) << cycleRealizedPnL_
             << " → cycle=" << (cyclePnlDash>=0?"+":"") << cyclePnlDash << "$]";
     oss << "\n";
-    oss << "║  Target    : " << cfg_.basketTarget << " $\n";
+    {
+        double dynTarget = effectiveTarget(orders);
+        oss << "║  Target    : " << dynTarget << " $";
+        if (cfg_.useVABT && dynTarget != cfg_.basketTarget)
+            oss << "  [VABT base=" << cfg_.basketTarget << "]";
+        oss << "\n";
+    }
     oss << "║  Vélocité  : " << basketMon_->velocity() << " $/tick\n";
     oss << "╠═══════════════════════════════════╣\n";
     // Affichage du mode trail : fixe ou adaptatif

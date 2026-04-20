@@ -483,7 +483,11 @@ private:
     if (atrPoints <= 0.0 || totalLots <= 0.0 || tickValue <= 0.0)
         return baseTarget;
     double dyn = atrPoints * vabtCoeff * totalLots * tickValue;
-    return std::clamp(dyn, baseTarget * 0.50, baseTarget * 3.0);
+    // CORRECTION : ancien plafond 3× ($21 max avec baseTarget=$7) insuffisant en deep recovery.
+    // Avec 1.10 lots, ATR=2400, vabtCoeff=0.40 : dyn = 2400×0.40×1.10×0.10 = $105.6
+    // Plafond relevé à 10× baseTarget pour permettre des targets réalistes au niveau de l'exposition.
+    // Plancher maintenu à 0.50× pour ne pas fermer trop tôt en basse volatilité.
+    return std::clamp(dyn, baseTarget * 0.50, baseTarget * 10.0);
 }
 
 } // namespace top4ea::math
