@@ -41,11 +41,12 @@ enum class OrderType : int {
 
 // ─── États internes de la machine ───────────────────────────
 enum class EAState : uint8_t {
-    Init        = 0,
-    GridActive  = 1,
-    Recovery    = 2,
-    Closing     = 3,
-    DailyPause  = 4
+    Init              = 0,
+    GridActive        = 1,
+    Recovery          = 2,
+    Closing           = 3,
+    DailyPause        = 4,
+    MaxRecoveryHold   = 5   // maxRecovery atteint — positions gelées, attente retournement
 };
 
 // ─── Régime de volatilité (calcul ATR) ──────────────────────
@@ -105,7 +106,8 @@ struct Config {
     double      lotMultiplier   = 1.15;   // multiplicateur min (recovery 1)
     double      lotMultiplierMax = 1.66;  // multiplicateur max (recovery maxN)
     int         gridGap         = 500;          // points – valeur initiale
-    double      basketTarget    = 7.0;          // $ fixe
+    double      basketTarget    = 7.0;          // $ fixe profit target
+    double      basketMaxLoss   = -300.0;       // $ seuil d'urgence si maxRecoveryHold (négatif)
     int         maxRecovery     = 20;
 
     // Garde cascade professionnel (3 conditions de qualité marché)

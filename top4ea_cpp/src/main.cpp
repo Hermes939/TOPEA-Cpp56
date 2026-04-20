@@ -54,6 +54,7 @@ top4ea::Config loadConfig(const std::string& path) {
             else if (key == "lot_multiplier_max") cfg.lotMultiplierMax = std::stod(val);
             else if (key == "grid_gap")         cfg.gridGap          = std::stoi(val);
             else if (key == "basket_target")    cfg.basketTarget     = std::stod(val);
+            else if (key == "basket_max_loss") cfg.basketMaxLoss    = std::stod(val);
             else if (key == "cascade_price_dispatch_pct")  cfg.cascadePriceDispatchPct  = std::stod(val);
             else if (key == "cascade_price_dispatch_pips") cfg.cascadePriceDispatchPips = std::stoi(val);
             else if (key == "cascade_spread_max_mult")    cfg.cascadeSpreadMaxMult    = std::stod(val);
@@ -130,6 +131,7 @@ void printBanner(const top4ea::Config& cfg) {
    << "║  GridGap   : " << cfg.gridGap      << " pts (sera rescalé si broker 3-digit)\n"
    << "║  ATRGrid   : " << (cfg.useAtrGrid?"ON":"OFF") << "\n"
    << "║  Target    : " << cfg.basketTarget << " $\n"
+   << "║  MaxLoss   : " << cfg.basketMaxLoss << " $ (urgence MaxRecoveryHold)\n"
    << "║  MaxRecov  : " << cfg.maxRecovery  << "\n"
    << "║  TickPoll  : " << cfg.tickPollMs << " ms\n"
    << R"(╚══════════════════════════════════════════════════╝

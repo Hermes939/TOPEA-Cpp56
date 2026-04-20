@@ -300,6 +300,40 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
         return;  // Laisser closeBasketAtomic() finir son travail ou attendre reset
     }
 
+    // ── MaxRecoveryHold — surveillance continue du panier ────────────
+    // Positions ouvertes conservées après épuisement de la Martingale.
+    // Le basketMon gère la sortie en profit. On surveille ici le seuil
+    // d'urgence pour limiter le drawdown si le marché continue contre nous.
+    if (state_.load() == EAState::MaxRecoveryHold) {
+        // Surveillance basket : fermeture normale si le marché revient en profit
+        {
+            std::vector<OrderInfo> cached;
+            { std::lock_guard lk(ordersMu_); cached = orders_; }
+            double pnl      = basketProfit(cached);
+            double cyclePnl = cycleRealizedPnL_ + pnl;
+            int    totalRec = recovery_->sellCount() + recovery_->buyCount();
+            // Tester le target basket (même logique que la section 3 normale)
+            if (!cached.empty() && basketMon_->update(cyclePnl, cached, totalRec)) {
+                if (!basketClosing_.exchange(true)) {
+                    closingStart_ = Clock::now();
+                    log(">>> [MaxRecoveryHold] BASKET TARGET atteint après hold — fermeture en profit"
+                        " cyclePnL=" + std::to_string(cyclePnl) + "$");
+                    closeBasketAtomic();
+                    basketClosing_.store(false);
+                }
+                return;
+            }
+            // Surveillance du seuil d'urgence (basket_max_loss)
+            if (cfg_.basketMaxLoss < 0.0 && pnl <= cfg_.basketMaxLoss) {
+                log("[MaxRecoveryHold] SEUIL D'URGENCE atteint : P&L="
+                    + std::to_string(pnl) + "$ <= "
+                    + std::to_string(cfg_.basketMaxLoss) + "$ — sortie forcée");
+                emergencyCloseAll(pnl);
+            }
+        }
+        return;  // Aucun trail, aucun nouvel ordre en mode hold
+    }
+
     // 0. Visual AI — mise à jour iniMTA + décision marché temps réel
     //    Appelé avant toute logique de grille pour nourrir l'orchestrateur
     {
@@ -727,6 +761,11 @@ void TOP4EA_Engine::syncTriggersFallback(const std::vector<OrderInfo>& orders) {
 //  Trail de grille — 4 axes adaptatifs
 // ────────────────────────────────────────────────────────────
 void TOP4EA_Engine::trailGrid() {
+    // ── MaxRecoveryHold : aucun nouvel ordre autorisé ────────────
+    // processTick() retourne avant d'appeler trailGrid() en mode hold,
+    // mais cette garde protège contre les appels directs (géométrique, fallback).
+    if (state_.load() == EAState::MaxRecoveryHold) return;
+
     int    ssR   = recovery_->sellCount();
     int    bsR   = recovery_->buyCount();
     double ssLot = recovery_->sellLot();
@@ -1279,31 +1318,65 @@ void TOP4EA_Engine::closeBasketAtomic() {
 }
 
 void TOP4EA_Engine::closeOneSide(int sideType) {
-    // ── maxRecovery atteint → RESET COMPLET DU CYCLE ───────────────
-    // Ancienne logique : fermer un seul côté → l'autre compteur reste à max
-    // → boucle infinie (CloseOneSide appelé en boucle à chaque nouveau tick).
+    // ── MaxRecovery atteint → MODE HOLD INSTITUTIONNEL ─────────────
     //
-    // Nouvelle logique :
-    //   1. Annuler TOUS les stops pendants (SS + BS)
-    //   2. Fermer TOUTES les positions marché (BUY + SELL) à prix marché
-    //   3. Réinitialiser les DEUX compteurs recovery + VL
-    //   4. Replacer l'ancre grid sur le prix courant
-    //   5. Remettre l'état à Init → nouveau cycle propre
+    // Vision institutionnelle : on ne sort PAS perdant automatiquement.
+    //   1. Annuler les stops pendants SS/BS (plus aucun nouveau niveau ouvert)
+    //   2. Réinitialiser les DEUX compteurs (évite la boucle CloseOneSide)
+    //   3. CONSERVER toutes les positions marché ouvertes
+    //   4. Basculer en état MaxRecoveryHold
     //
-    // Ce comportement est identique à basketClosedCallback (sortie TP atteint)
-    // mais déclenché par épuisement de la Martingale plutôt que par le profit.
+    // En état MaxRecoveryHold :
+    //   - trailGrid() est bloqué (aucun nouvel ordre)
+    //   - basketMon continue de surveiller les positions existantes
+    //   - Si le marché revient → basket atteint le target → fermeture en PROFIT
+    //   - Si basket_max_loss est atteint → sortie d'urgence (drawdown limité)
+    //
+    // basketClosedCallback() réinitialise l'état à Init quand c'est terminé.
+
+    if (state_.load() == EAState::MaxRecoveryHold) return; // déjà en hold
 
     std::string side = (sideType == 0) ? "SELL" : "BUY";
-    log("=== MAX RECOVERY — côté " + side + " épuisé — RESET CYCLE COMPLET ===");
+    log("=== MAX RECOVERY côté " + side
+        + " — MODE HOLD ACTIVÉ (positions conservées, attente retournement) ===");
 
-    // ── [1] Annuler les ordres stops pendants ─────────────────────
+    // ── [1] Annuler les ordres stops pendants (plus de nouvelles positions) ─
     int ss = ssTicket_.load();
     int bs = bsTicket_.load();
     if (ss > 0) { bridge_->sendCommand(makeDelete(ss)); ssTicket_.store(-1); }
     if (bs > 0) { bridge_->sendCommand(makeDelete(bs)); bsTicket_.store(-1); }
     ssLevel_ = 0.0; bsLevel_ = 0.0;
 
-    // ── [2] Fermer TOUTES les positions (BUY + SELL) ──────────────
+    // ── [2] Reset des compteurs recovery (évite boucle CloseOneSide) ──────
+    // Les positions marché restent ouvertes — seuls les compteurs sont remis à 0
+    // pour que les prochains appels à checkAndIncrement ne retournent plus CloseOneSide.
+    recovery_->reset();
+
+    // ── [3] État MaxRecoveryHold ───────────────────────────────────
+    // trailGrid() est désactivé dans cet état. basketMon surveille le retournement.
+    state_.store(EAState::MaxRecoveryHold);
+    log("[MaxRecovery HOLD] Positions ouvertes conservées"
+        " | Attente retournement → target=" + std::to_string(cfg_.basketTarget)
+        + "$ | Urgence si P&L < " + std::to_string(cfg_.basketMaxLoss) + "$");
+}
+
+// ────────────────────────────────────────────────────────────
+//  emergencyCloseAll — sortie forcée si basket_max_loss atteint
+//  Appelé depuis processTick() quand en MaxRecoveryHold.
+// ────────────────────────────────────────────────────────────
+void TOP4EA_Engine::emergencyCloseAll(double currentPnL) {
+    log("=== URGENCE MaxRecoveryHold : P&L=" + std::to_string(currentPnL)
+        + "$ < seuil=" + std::to_string(cfg_.basketMaxLoss)
+        + "$ — FERMETURE TOTALE au marché ===");
+
+    // Annuler stops résiduels
+    int ss = ssTicket_.load();
+    int bs = bsTicket_.load();
+    if (ss > 0) { bridge_->sendCommand(makeDelete(ss)); ssTicket_.store(-1); }
+    if (bs > 0) { bridge_->sendCommand(makeDelete(bs)); bsTicket_.store(-1); }
+    ssLevel_ = 0.0; bsLevel_ = 0.0;
+
+    // Fermer toutes les positions au marché
     auto orders = fetchOrders();
     Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
     int closed = 0;
@@ -1314,23 +1387,19 @@ void TOP4EA_Engine::closeOneSide(int sideType) {
             if (r.success) ++closed;
         }
     }
-    log("[MaxRecovery] " + std::to_string(closed) + " position(s) fermée(s) @ marché");
+    log("[Urgence] " + std::to_string(closed) + " position(s) fermée(s) @ marché");
 
-    // ── [3] Reset TOTAL des deux compteurs ───────────────────────
-    recovery_->reset();       // resetBuy() + resetSell() + CascadeGuard
-    vlMgr_.reset();           // niveaux VL
-    basketMon_->reset();      // surveillance panier
+    // Reset complet + nouveau cycle
+    vlMgr_.reset();
+    basketMon_->reset();
     waveState_.store(0);
     cycleRealizedPnL_ = 0.0;
-
-    // ── [4] Vider le cache d'ordres (évite fausse relance) ────────
     { std::lock_guard lk(ordersMu_); orders_.clear(); }
-
-    // ── [5] Nouvelle ancre grid + état Init ───────────────────────
     gridOrigin_ = (t.bid + t.ask) * 0.5;
     state_.store(EAState::Init);
-    log("=== Nouveau cycle — origin=" + std::to_string(gridOrigin_)
-        + " | SS=0/5 BS=0/5 | prêt pour nouvelle grille ===");
+    log("=== Nouveau cycle après urgence — origin=" + std::to_string(gridOrigin_)
+        + " | SS=0/" + std::to_string(cfg_.maxRecovery)
+        + " BS=0/" + std::to_string(cfg_.maxRecovery) + " ===");
 }
 
 // ────────────────────────────────────────────────────────────
@@ -1745,11 +1814,12 @@ std::string TOP4EA_Engine::dashboard() const {
 
     auto stateStr = [this]() -> std::string {
         switch(state_.load()) {
-            case EAState::Init:       return "INIT";
-            case EAState::GridActive: return "ACTIF";
-            case EAState::Recovery:   return "RECOVERY";
-            case EAState::Closing:    return "CLOSING";
-            case EAState::DailyPause: return "PAUSE_DAILY";
+            case EAState::Init:             return "INIT";
+            case EAState::GridActive:       return "ACTIF";
+            case EAState::Recovery:         return "RECOVERY";
+            case EAState::Closing:          return "CLOSING";
+            case EAState::DailyPause:       return "PAUSE_DAILY";
+            case EAState::MaxRecoveryHold:  return "MAX_HOLD [ATTENTE]";
         }
         return "?";
     }();

@@ -62,6 +62,7 @@ static top4ea::Config loadConfig(const char* path) {
             else if (key=="lot_multiplier_max") cfg.lotMultiplierMax  = std::stod(val);
             else if (key=="grid_gap")         cfg.gridGap           = std::stoi(val);
             else if (key=="basket_target")    cfg.basketTarget      = std::stod(val);
+            else if (key=="basket_max_loss")  cfg.basketMaxLoss     = std::stod(val);
             else if (key=="max_recovery")     cfg.maxRecovery       = std::stoi(val);
             else if (key=="magic")            cfg.magic             = std::stoi(val);
             else if (key=="slippage")         cfg.slippage          = std::stoi(val);

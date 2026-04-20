@@ -83,7 +83,6 @@ private:
 
     // ─── Logique principale ──────────────────────────────────
     void processTick(const Tick& tick);
-    void checkBasket();
     void checkDailyTarget();
     void resetDailyIfNeeded();
     void initOrRestore();
@@ -106,6 +105,7 @@ private:
     void closeBasketAtomic();
     void closeWavePartial(int wave);  // wave 0=Wave1(50%) wave 1=Wave2(30%)
     void closeOneSide(int sideType);
+    void emergencyCloseAll(double currentPnL); // urgence MaxRecoveryHold si basket_max_loss atteint
 
     // ─── Verrouillage Profit Trailing (V-SS / V-BS) ─────────
     // Met à jour les ordres V-BS et V-SS sur le broker
