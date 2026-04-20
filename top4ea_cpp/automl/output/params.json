@@ -1,0 +1,11 @@
+{
+  "atr_mult": 0.2023,
+  "kelly_frac": 0.3434,
+  "gap_expansion": 0.01,
+  "trail_asym": 0.0592,
+  "vel_trigger": 0.6006,
+  "cppi_mult": 5.9582,
+  "vabt_coeff": 0.0575,
+  "ou_theta": 0.0104,
+  "timestamp": 1776668525
+}

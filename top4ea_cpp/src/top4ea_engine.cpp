@@ -12,6 +12,8 @@
 #include <future>
 #include <ctime>
 #include <cmath>
+#include <fstream>
+#include <filesystem>
 
 namespace top4ea {
 
@@ -1506,6 +1508,84 @@ std::string TOP4EA_Engine::dashboard() const {
                 << " P&L:" << (s.openPnl>=0?"+":"") << s.openPnl << "$\n";
         }
     }
+
+    // ─── Panneau DEEP LEARNING / AUTO-CALIBRATION ─────────────
+    {
+        oss << "╠═══════ DEEP LEARNING — AUTO-CALIB ═╣\n";
+
+        // Lire le statut du serveur AutoML (status.json)
+        std::string mlState   = "hors-ligne";
+        int         mlCycles  = 0;
+        double      mlValLoss = 0.0;
+        bool        mlHasModel = std::filesystem::exists("automl/checkpoints/top4ea_model.pt");
+
+        {
+            std::ifstream sf("automl/output/status.json");
+            if (sf) {
+                std::string sc((std::istreambuf_iterator<char>(sf)),
+                                std::istreambuf_iterator<char>());
+                auto extractStr = [&](const std::string& key) -> std::string {
+                    auto p = sc.find("\"" + key + "\"");
+                    if (p == std::string::npos) return "";
+                    auto c = sc.find(':', p);
+                    if (c == std::string::npos) return "";
+                    auto q1 = sc.find('"', c);
+                    if (q1 == std::string::npos) return "";
+                    auto q2 = sc.find('"', q1 + 1);
+                    if (q2 == std::string::npos) return "";
+                    return sc.substr(q1 + 1, q2 - q1 - 1);
+                };
+                auto extractDbl = [&](const std::string& key) -> double {
+                    auto p = sc.find("\"" + key + "\"");
+                    if (p == std::string::npos) return 0.0;
+                    auto c = sc.find(':', p);
+                    if (c == std::string::npos) return 0.0;
+                    try { return std::stod(sc.substr(c + 1)); }
+                    catch (...) { return 0.0; }
+                };
+                auto extractInt = [&](const std::string& key) -> int {
+                    auto p = sc.find("\"" + key + "\"");
+                    if (p == std::string::npos) return 0;
+                    auto c = sc.find(':', p);
+                    if (c == std::string::npos) return 0;
+                    try { return std::stoi(sc.substr(c + 1)); }
+                    catch (...) { return 0; }
+                };
+                mlState   = extractStr("state");
+                mlCycles  = extractInt("n_cycles");
+                mlValLoss = extractDbl("best_val_loss");
+            }
+        }
+
+        // Icône état
+        std::string stateIcon;
+        if      (mlState == "training")  stateIcon = "[TRAIN]   ";
+        else if (mlState == "idle")      stateIcon = "✓ PRET    ";
+        else if (mlState == "watching")  stateIcon = "~ OBSERVE ";
+        else if (mlState == "error")     stateIcon = "✗ ERREUR  ";
+        else                             stateIcon = "- OFFLINE ";
+
+        oss << "║  AutoML    : " << stateIcon
+            << "  Cycles=" << mlCycles << "\n";
+        oss << "║  Modèle    : " << (mlHasModel ? "✓ chargé" : "○ non entraîné");
+        if (mlHasModel && mlValLoss > 0.0)
+            oss << "  loss=" << std::fixed << std::setprecision(5) << mlValLoss;
+        oss << "\n";
+
+        // Paramètres θ calibrés (depuis lastIntel_)
+        {
+            std::lock_guard lk(intelMu_);
+            const auto& p = lastIntel_.calibratedParams;
+            oss << std::fixed << std::setprecision(3);
+            oss << "║  θ Adam t=" << p.t_adam
+                << "  atr=" << p.atrMultiplier
+                << "  kelly=" << p.kellyMaxFraction << "\n";
+            oss << "║  θ gap=" << p.gapExpansionFactor
+                << "  asym=" << p.trailAsymmetryFactor
+                << "  vel=" << p.velocityTrigger << "\n";
+        }
+    }
+
     oss << "╚═══════════════════════════════════╝";
     return oss.str();
 }

@@ -3,9 +3,11 @@ compile = "make -s"
 run = "./main"
 entrypoint = "main.cpp"
 hidden = ["main", "**/*.o", "**/*.d", ".ccls-cache", "Makefile"]
+modules = ["python-3.11"]
 
 [nix]
 channel = "stable-24_05"
+packages = ["glibcLocales"]
 
 [gitHubImport]
 requiredFiles = [".replit", "replit.nix", ".ccls-cache"]
@@ -83,6 +85,10 @@ author = "agent"
 task = "workflow.run"
 args = "TOP4EA C++20 Engine"
 
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "TOP4EA AutoML DeepLearning"
+
 [[workflows.workflow]]
 name = "TOP4EA C++20 Engine"
 author = "agent"
@@ -93,6 +99,17 @@ outputType = "console"
 [[workflows.workflow.tasks]]
 task = "shell.exec"
 args = "cd top4ea_cpp && make clean && make all && ./build/top4ea top4ea.conf"
+
+[[workflows.workflow]]
+name = "TOP4EA AutoML DeepLearning"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "cd top4ea_cpp && python3 ../automl/automl_server.py --mode watch"
+
+[workflows.workflow.metadata]
+outputType = "console"
 
 [deployment]
 deploymentTarget = "cloudrun"

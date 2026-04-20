@@ -168,16 +168,18 @@ CalibrationResult MathCalibrator::calibrate(const ErrorMemory& memory) noexcept 
 bool MathCalibrator::loadFromAutoML() noexcept {
     if (!std::filesystem::exists(automlJsonPath_)) return false;
 
-    // Vérifier que le fichier est récent (< AUTOML_RELOAD_SEC secondes)
-    auto now      = SysClock::now();
-    auto fileTime = SysClock::from_time_t(
-        std::filesystem::last_write_time(automlJsonPath_)
-            .time_since_epoch().count() / 1000000000LL);
+    // Convertir l'horodatage du fichier vers system_clock (C++20)
+    auto now     = SysClock::now();
+    auto fwt     = std::filesystem::last_write_time(automlJsonPath_);
+    auto fileTime = std::chrono::clock_cast<SysClock>(fwt);
 
-    // Comparer avec la dernière lecture
+    // Ne pas relire si pas assez de temps écoulé depuis la dernière lecture
     auto sinceLastRead = std::chrono::duration_cast<std::chrono::seconds>(
         now - lastAutoMLRead_).count();
     if (sinceLastRead < AUTOML_RELOAD_SEC) return false;
+
+    // Ne recharger que si le fichier a été modifié depuis la dernière lecture
+    if (fileTime <= lastAutoMLRead_) return false;
 
     auto opt = parseAutoMLJson(automlJsonPath_);
     if (!opt.has_value()) return false;
@@ -400,27 +402,19 @@ void MathCalibrator::saveState(const std::string& path) const noexcept {
     f << "}\n";
 }
 
-bool MathCalibrator::loadState(const std::string& path) noexcept {
-    if (!std::filesystem::exists(path)) return false;
-    auto opt = parseAutoMLJson(path);
-    if (!opt.has_value()) return false;
-
-    std::lock_guard lk(mu_);
-    auto& loaded = opt.value();
-    params_.atrMultiplier       = loaded.atrMultiplier;
-    params_.kellyMaxFraction    = loaded.kellyMaxFraction;
-    params_.gapExpansionFactor  = loaded.gapExpansionFactor;
-    params_.trailAsymmetryFactor= loaded.trailAsymmetryFactor;
-    params_.velocityTrigger     = loaded.velocityTrigger;
-    params_.cppiMultiplier      = loaded.cppiMultiplier;
-    params_.vabtCoeff           = loaded.vabtCoeff;
-    params_.ouMinTheta          = loaded.ouMinTheta;
-
-    // Lecture des moments Adam depuis le JSON
+// ────────────────────────────────────────────────────────────
+//  Parsing JSON état complet (paramètres + moments Adam)
+//  Utilisé pour charger l'état sauvegardé par saveState()
+// ────────────────────────────────────────────────────────────
+bool MathCalibrator::parseStateJson(const std::string& path,
+                                     CalibrableParams& out) const noexcept {
     std::ifstream f(path);
-    if (!f) return true;
+    if (!f) return false;
+
     std::string content((std::istreambuf_iterator<char>(f)),
                           std::istreambuf_iterator<char>());
+
+    bool anyFound = false;
 
     auto extractInt = [&](const std::string& key, int& val) {
         auto pos = content.find("\"" + key + "\"");
@@ -430,6 +424,7 @@ bool MathCalibrator::loadState(const std::string& path) noexcept {
         try {
             size_t end;
             val = std::stoi(content.substr(colon + 1), &end);
+            anyFound = true;
         } catch (...) {}
     };
     auto extractDouble = [&](const std::string& key, double& val) {
@@ -440,21 +435,44 @@ bool MathCalibrator::loadState(const std::string& path) noexcept {
         try {
             size_t end;
             val = std::stod(content.substr(colon + 1), &end);
+            anyFound = true;
         } catch (...) {}
     };
 
-    extractInt   ("adam_t",  params_.t_adam);
-    extractDouble("m_atr",   params_.m_atr);
-    extractDouble("v_atr",   params_.v_atr);
-    extractDouble("m_kelly", params_.m_kelly);
-    extractDouble("v_kelly", params_.v_kelly);
-    extractDouble("m_gap",   params_.m_gap);
-    extractDouble("v_gap",   params_.v_gap);
-    extractDouble("m_asym",  params_.m_asym);
-    extractDouble("v_asym",  params_.v_asym);
-    extractDouble("m_vel",   params_.m_vel);
-    extractDouble("v_vel",   params_.v_vel);
+    // Paramètres de trading
+    extractDouble("atr_mult",      out.atrMultiplier);
+    extractDouble("kelly_frac",    out.kellyMaxFraction);
+    extractDouble("gap_expansion", out.gapExpansionFactor);
+    extractDouble("trail_asym",    out.trailAsymmetryFactor);
+    extractDouble("vel_trigger",   out.velocityTrigger);
+    extractDouble("cppi_mult",     out.cppiMultiplier);
+    extractDouble("vabt_coeff",    out.vabtCoeff);
+    extractDouble("ou_theta",      out.ouMinTheta);
 
+    // Moments Adam (état de l'optimiseur)
+    extractInt   ("adam_t",  out.t_adam);
+    extractDouble("m_atr",   out.m_atr);
+    extractDouble("v_atr",   out.v_atr);
+    extractDouble("m_kelly", out.m_kelly);
+    extractDouble("v_kelly", out.v_kelly);
+    extractDouble("m_gap",   out.m_gap);
+    extractDouble("v_gap",   out.v_gap);
+    extractDouble("m_asym",  out.m_asym);
+    extractDouble("v_asym",  out.v_asym);
+    extractDouble("m_vel",   out.m_vel);
+    extractDouble("v_vel",   out.v_vel);
+
+    return anyFound;
+}
+
+bool MathCalibrator::loadState(const std::string& path) noexcept {
+    if (!std::filesystem::exists(path)) return false;
+
+    CalibrableParams loaded = params_;  // partir des valeurs actuelles
+    if (!parseStateJson(path, loaded)) return false;
+
+    std::lock_guard lk(mu_);
+    params_ = loaded;
     validateParams(params_);
     return true;
 }

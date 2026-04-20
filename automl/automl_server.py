@@ -37,6 +37,10 @@ from pathlib import Path
 from typing import Optional
 from datetime import datetime
 
+# Ajouter le répertoire du script au PYTHONPATH pour les imports relatifs
+# (permet de lancer depuis n'importe quel répertoire courant)
+sys.path.insert(0, str(Path(__file__).parent))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
