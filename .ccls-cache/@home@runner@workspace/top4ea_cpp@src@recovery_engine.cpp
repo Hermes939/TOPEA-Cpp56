@@ -11,9 +11,10 @@ namespace top4ea {
 RecoveryEngine::RecoveryEngine(const Config& cfg)
     : cfg_(cfg)
     , guard_(CascadeGuard::Params{
-        .priceDispatchPct = cfg.cascadePriceDispatchPct,
-        .spreadMaxMult    = cfg.cascadeSpreadMaxMult,
-        .spreadEwmaAlpha  = cfg.cascadeSpreadEwmaAlpha
+        .priceDispatchPct  = cfg.cascadePriceDispatchPct,
+        .priceDispatchPips = cfg.cascadePriceDispatchPips,
+        .spreadMaxMult     = cfg.cascadeSpreadMaxMult,
+        .spreadEwmaAlpha   = cfg.cascadeSpreadEwmaAlpha
       })
     , rollingKelly_(cfg.kellyHistoryN, cfg.kellySafetyFactor)
 {}
