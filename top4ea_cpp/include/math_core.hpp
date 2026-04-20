@@ -152,6 +152,23 @@ private:
 }
 
 // ────────────────────────────────────────────────────────────
+//  Schedule de lots FIXE — Grille recovery XAUUSDm
+//  Spécification utilisateur :
+//    Niveau 1 (count=0) : 0.10 lot — entrée initiale
+//    Niveau 2 (count=1) : 0.10 lot — hedge opposé
+//    Niveau 3 (count=2) : 0.20 lot — renfort ×2
+//    Niveau 4 (count=3) : 0.30 lot — renfort ×3
+//    Niveau 5 (count=4) : 0.40 lot — renfort ×4
+//    count ≥ 5          : 0.40 lot — plafond
+// ────────────────────────────────────────────────────────────
+[[nodiscard]] inline double recovLotFixed(double baseLot, int count) noexcept {
+    static const std::array<double, 5> SCHEDULE = { 0.10, 0.10, 0.20, 0.30, 0.40 };
+    if (count < 0) return baseLot;
+    if (count >= (int)SCHEDULE.size()) return SCHEDULE.back();
+    return SCHEDULE[count];
+}
+
+// ────────────────────────────────────────────────────────────
 //  Vélocité P&L — EWMA sur les variations de profit
 //  Permet une fermeture prédictive : si on approche rapidement
 //  du target, on ferme avant le retournement

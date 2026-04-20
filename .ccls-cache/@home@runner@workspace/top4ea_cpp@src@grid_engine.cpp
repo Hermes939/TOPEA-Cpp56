@@ -114,12 +114,15 @@ StopPlacement GridEngine::computeSellStop(
 
     double bid = lastBid_.load(std::memory_order_relaxed);
 
-    // ── Ancrage flottant : toujours 1 demi-gap sous le bid courant ─
-    // Le GridGap est partagé symétriquement : halfGap côté SS + halfGap
-    // côté BS → 500 pts total entre les deux stops pour 2 décimales,
-    // 5000 pts pour 3 décimales (50 pts × 2 = 100 pts, etc.).
-    // La profondeur de récupération pilote le lot (Kelly), pas la position.
-    double step = halfGap() * gapFactor;   // demi-gap × facteur intel
+    // ── Calcul de la distance SS/bid ──────────────────────────
+    // Mode fixe (trailFixedDistPts > 0) : distance exacte en points
+    // Mode adaptatif (défaut)            : demi-gap × facteur intel
+    double step;
+    if (cfg_.trailFixedDistPts > 0) {
+        step = (double)cfg_.trailFixedDistPts * pointSize();
+    } else {
+        step = halfGap() * gapFactor;
+    }
     double target = math::normalize(bid - step, cfg_.digits);
 
     // Garde broker : respect du STOPLEVEL minimum
@@ -134,11 +137,18 @@ StopPlacement GridEngine::computeSellStop(
         sp.needsCreate = true;
     } else {
         sp.delta = target - currentLevel;
-        // ── RATCHET HAUT UNIQUEMENT + trail réactif ────────────
-        // Seuil = 10% du demi-gap (~25 pts pour gridGap=500).
-        // Le SS monte dès que le bid monte d'au moins 25 pts,
-        // maintenant en permanence une distance de 250 pts.
-        double minChange = halfGap() / 10.0;
+        // ── RATCHET HAUT + seuil de réactivité ─────────────────
+        // trailMinChangePts = 0  → réactif à chaque tick (1 point mini)
+        // trailMinChangePts > 0  → bouge seulement si delta > seuil
+        // Mode fixe              → seuil = 1 pt par défaut (quasi-continu)
+        double minChange;
+        if (cfg_.trailMinChangePts > 0) {
+            minChange = (double)cfg_.trailMinChangePts * pointSize();
+        } else if (cfg_.trailFixedDistPts > 0) {
+            minChange = pointSize();            // 1 point → trail quasi-continu
+        } else {
+            minChange = halfGap() / 10.0;      // comportement original
+        }
         sp.needsModify = (sp.delta > minChange);
     }
     return sp;
@@ -156,10 +166,15 @@ StopPlacement GridEngine::computeBuyStop(
 
     double ask = lastAsk_.load(std::memory_order_relaxed);
 
-    // ── Ancrage flottant : toujours 1 demi-gap au-dessus du ask courant ─
-    // Symétrique au SS : halfGap côté BS + halfGap côté SS = 1 GridGap
-    // total entre les deux stops.
-    double step = halfGap() * gapFactor;   // demi-gap × facteur intel
+    // ── Calcul de la distance BS/ask ──────────────────────────
+    // Mode fixe (trailFixedDistPts > 0) : distance exacte en points
+    // Mode adaptatif (défaut)            : demi-gap × facteur intel
+    double step;
+    if (cfg_.trailFixedDistPts > 0) {
+        step = (double)cfg_.trailFixedDistPts * pointSize();
+    } else {
+        step = halfGap() * gapFactor;
+    }
     double target = math::normalize(ask + step, cfg_.digits);
 
     // Garde broker : respect du STOPLEVEL minimum
@@ -174,10 +189,18 @@ StopPlacement GridEngine::computeBuyStop(
         sp.needsCreate = true;
     } else {
         sp.delta = currentLevel - target;
-        // ── RATCHET BAS UNIQUEMENT + trail réactif ─────────────
-        // Seuil = 10% du demi-gap (~25 pts pour gridGap=500).
-        // Le BS descend dès que le ask baisse d'au moins 25 pts.
-        double minChange = halfGap() / 10.0;
+        // ── RATCHET BAS + seuil de réactivité ──────────────────
+        // trailMinChangePts = 0  → réactif à chaque tick (1 point mini)
+        // trailMinChangePts > 0  → bouge seulement si delta > seuil
+        // Mode fixe              → seuil = 1 pt par défaut (quasi-continu)
+        double minChange;
+        if (cfg_.trailMinChangePts > 0) {
+            minChange = (double)cfg_.trailMinChangePts * pointSize();
+        } else if (cfg_.trailFixedDistPts > 0) {
+            minChange = pointSize();            // 1 point → trail quasi-continu
+        } else {
+            minChange = halfGap() / 10.0;      // comportement original
+        }
         sp.needsModify = (sp.delta > minChange);
     }
     return sp;

@@ -254,6 +254,33 @@ void TOP4EA_Engine::onConnect(bool connected) {
 void TOP4EA_Engine::processTick(const Tick& tick) {
     if (!bridge_->isConnected()) return;
 
+    // ── Anti-gel CLOSING ─────────────────────────────────────────
+    // Si l'état est CLOSING depuis plus de 30 secondes sans que basketClosing_
+    // soit actif, c'est un gel : les ordres ont déjà été fermés côté broker
+    // mais le moteur n'a pas reçu confirmation (réseau). Force reset → Init.
+    if (state_.load() == EAState::Closing) {
+        bool activeClose = basketClosing_.load();
+        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                           Clock::now() - closingStart_).count();
+        if (!activeClose || elapsed > 30) {
+            log("[WARN] État CLOSING gel détecté (elapsed=" + std::to_string(elapsed)
+                + "s, basketClosing=" + (activeClose ? "OUI" : "NON")
+                + ") — force reset Init + vidage cache");
+            ssTicket_.store(-1); bsTicket_.store(-1);
+            ssLevel_ = 0.0; bsLevel_ = 0.0;
+            recovery_->reset();
+            basketMon_->reset();
+            basketClosing_.store(false);
+            { std::lock_guard lk(ordersMu_); orders_.clear(); }
+            {
+                Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
+                gridOrigin_ = (t.bid + t.ask) * 0.5;
+            }
+            state_.store(EAState::Init);
+        }
+        return;  // Laisser closeBasketAtomic() finir son travail ou attendre reset
+    }
+
     // 0. Visual AI — mise à jour iniMTA + décision marché temps réel
     //    Appelé avant toute logique de grille pour nourrir l'orchestrateur
     {
@@ -296,9 +323,34 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
         { std::lock_guard lk(ordersMu_); cached = orders_; }
         double pnl = basketProfit(cached);
         if (!cached.empty()) {
+            // ── TP par vagues ──────────────────────────────────────
+            // Exécuté AVANT le target basket global pour capturer les profits intermédiaires
+            // Wave1 (50% des positions) → Wave2 (30% du restant) → trail reliquat
+            if (cfg_.waveEnabled && !basketClosing_.load()) {
+                int ws = waveState_.load();
+                if (ws == 0 && pnl >= cfg_.wave1Target) {
+                    // Wave 1 : fermer ~50% des positions marché
+                    if (waveState_.compare_exchange_strong(ws, 1)) {
+                        log(">>> WAVE1 P&L=" + std::to_string(pnl)
+                            + " (target=" + std::to_string(cfg_.wave1Target) + ") — fermeture 50%");
+                        closeWavePartial(0);  // 0 = Wave1 (50%)
+                    }
+                } else if (ws == 1 && pnl >= cfg_.wave2Target) {
+                    // Wave 2 : fermer ~30% du restant
+                    if (waveState_.compare_exchange_strong(ws, 2)) {
+                        log(">>> WAVE2 P&L=" + std::to_string(pnl)
+                            + " (target=" + std::to_string(cfg_.wave2Target) + ") — fermeture 30%");
+                        closeWavePartial(1);  // 1 = Wave2 (30%)
+                    }
+                }
+                // Wave 3 : le reliquat est géré par le trail Phase 3 (400 pips)
+                // qui se déclenche naturellement via trailGrid() quand pnl >= $25
+            }
+
             int totalRecov = recovery_->sellCount() + recovery_->buyCount();
             if (basketMon_->update(pnl, cached, totalRecov)) {
                 if (!basketClosing_.exchange(true)) {
+                    closingStart_ = Clock::now();  // horodatage pour timeout anti-gel
                     log(">>> BASKET TARGET ATTEINT P&L=" + std::to_string(pnl) + " [tick]");
                     closeBasketAtomic();
                     basketClosing_.store(false);
@@ -402,6 +454,23 @@ void TOP4EA_Engine::initOrRestore() {
         gridOrigin_ = (t.bid + t.ask) * 0.5;
         state_.store(EAState::GridActive);
         log("Grille initialisée — origin=" + std::to_string(gridOrigin_));
+    }
+
+    // ─── Réchauffement Visual AI (cold-start fix) ─────────────
+    // Pré-charge 30 bougies synthétiques dans M5/M15/M30 pour que
+    // l'ATR, RSI, MACD et DeepSeek soient opérationnels immédiatement
+    // sans attendre 13+ heures de barres réelles.
+    if (marketIntel_) {
+        Tick t0; { std::lock_guard lk(tickMu_); t0 = lastTick_; }
+        double mid = (t0.bid + t0.ask) * 0.5;
+        if (mid > 0.0) {
+            // ATR estimé = gridGap/2 pips × point ($12 pour gridGap=2400, point=0.01)
+            double atrEst = (double)(grid_->effectiveGridGap() / 2) * cfg_.point;
+            if (atrEst < 0.5) atrEst = 5.0; // garde minimum ($5 ≈ 500pts)
+            marketIntel_->warmUp(mid, atrEst, 30);
+            log("[WarmUp] Visual AI réchauffé — prix=" + std::to_string(mid)
+                + " ATRest=" + std::to_string(atrEst));
+        }
     }
 }
 
@@ -584,6 +653,56 @@ void TOP4EA_Engine::trailGrid() {
             double pnl  = basketProfit(ord);
             trailFrozen = (pnl >= cfg_.basketTarget * cfg_.trailFreezeZone && pnl > 0.0);
         }
+    }
+
+    // ── Trailing session-based + phases de profit ─────────────
+    // Spec : 1 pip = 0.01 prix (XAUUSDm digits=2) = 1 point
+    // Lot 0.10 → $0.10/pip → 10 pips = $1.00
+    //
+    //  Phase 0  (P&L < +$8)  : stops initiaux 800 pips — pas de trailing actif
+    //  Phase 1  ($8 – $15)   : trail session-based (TOKYO=450p LONDON=800p NY=1050p)
+    //  Phase 2  ($15 – $25)  : serrer à 600 pips
+    //  Phase 3  (P&L ≥ $25)  : serrer à 400 pips
+    //
+    // factor = desired_pips / halfGap  (halfGap = gridGap/2)
+    // Le trail freeze Intel reste actif pour protéger la zone TP finale.
+    if (!trailFrozen) {
+        std::vector<OrderInfo> ordCache;
+        { std::lock_guard lk(ordersMu_); ordCache = orders_; }
+        double pnl      = basketProfit(ordCache);
+        int    halfGap  = grid_->effectiveGridGap() / 2;
+        if (halfGap < 1) halfGap = 1;
+
+        static constexpr double TRAIL_ACTIVATE_PNL = 8.0;   // +$8  = +80 pips × 0.10
+        static constexpr double TRAIL_TIGHT1_PNL   = 15.0;  // +$15 = +150 pips → 600p
+        static constexpr double TRAIL_TIGHT2_PNL   = 25.0;  // +$25 = +250 pips → 400p
+
+        if (pnl >= TRAIL_TIGHT2_PNL) {
+            // Phase 3 — ultra-serré 400 pips
+            double f = 400.0 / halfGap;
+            ssGapFactor = f;
+            bsGapFactor = f;
+        } else if (pnl >= TRAIL_TIGHT1_PNL) {
+            // Phase 2 — serré 600 pips
+            double f = 600.0 / halfGap;
+            ssGapFactor = f;
+            bsGapFactor = f;
+        } else if (pnl >= TRAIL_ACTIVATE_PNL) {
+            // Phase 1 — session-based
+            TradingSession sess = MarketIntelligence::detectSession();
+            double pipDist = 800.0;  // défaut LONDON/CLOSED
+            switch (sess) {
+                case TradingSession::TOKYO:      pipDist = 450.0;  break;
+                case TradingSession::LONDON:     pipDist = 800.0;  break;
+                case TradingSession::NEW_YORK:   pipDist = 1050.0; break;
+                case TradingSession::OVERLAP_LN: pipDist = 1050.0; break; // overlap London-NY = forte volatilité → même distance que NY
+                default:                         pipDist = 800.0;  break;
+            }
+            double f = pipDist / halfGap;
+            ssGapFactor = f;
+            bsGapFactor = f;
+        }
+        // Phase 0 : facteurs Intel conservés sans modification (distance initiale)
     }
 
     // Log transition freeze
@@ -807,6 +926,72 @@ double TOP4EA_Engine::totalLots(
 // ────────────────────────────────────────────────────────────
 //  Fermetures
 // ────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────────────────
+//  closeWavePartial — TP progressif par vagues
+//  wave=0 : Wave1 → ferme les ~50% de lots les plus petits
+//  wave=1 : Wave2 → ferme les ~30% du restant (lots moyens)
+//  L'ordre de fermeture : les plus petits lots en premier (risque minimal),
+//  en conservant les gros lots pour le trailing final.
+// ────────────────────────────────────────────────────────────
+void TOP4EA_Engine::closeWavePartial(int wave) {
+    // Snapshot actuel des ordres
+    std::vector<OrderInfo> orders;
+    { std::lock_guard lk(ordersMu_); orders = orders_; }
+
+    // Séparer positions marché (Buy/Sell) des stops pendants
+    std::vector<OrderInfo> mktOrders;
+    mktOrders.reserve(orders.size());
+    for (const auto& o : orders) {
+        if (o.type == OrderType::Buy || o.type == OrderType::Sell)
+            mktOrders.push_back(o);
+    }
+
+    if (mktOrders.empty()) {
+        log("[Wave" + std::to_string(wave+1) + "] Aucune position marché à fermer");
+        return;
+    }
+
+    // Trier par lots croissants (fermer les plus petits en premier)
+    std::sort(mktOrders.begin(), mktOrders.end(),
+              [](const OrderInfo& a, const OrderInfo& b){ return a.lots < b.lots; });
+
+    int total = (int)mktOrders.size();
+    int toClose = 0;
+    if (wave == 0) {
+        // Wave 1 : fermer les 50% les plus petits (arrondi supérieur)
+        toClose = (total + 1) / 2;
+    } else {
+        // Wave 2 : fermer les 30% du restant (au moins 1 si >0)
+        toClose = std::max(1, (total * 3) / 10);
+    }
+
+    Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
+    int closed = 0;
+
+    for (int i = 0; i < toClose && i < (int)mktOrders.size(); ++i) {
+        const auto& o = mktOrders[i];
+        double price = (o.type == OrderType::Buy) ? t.bid : t.ask;
+        TradeCmd cmd = makeClose(o, price);
+        auto res     = bridge_->sendCommand(cmd, 2000);
+        if (res.success) {
+            ++closed;
+            log("[Wave" + std::to_string(wave+1) + "] Fermé #"
+                + std::to_string(o.ticket) + " " + std::to_string(o.lots) + "L"
+                + " @ " + std::to_string(price));
+        } else {
+            log("[Wave" + std::to_string(wave+1) + "] ECHEC fermeture #"
+                + std::to_string(o.ticket) + ": " + res.msg);
+        }
+    }
+
+    // Rafraîchir le cache d'ordres après fermeture partielle
+    auto fresh = fetchOrders();
+    { std::lock_guard lk(ordersMu_); orders_ = fresh; }
+
+    log("[Wave" + std::to_string(wave+1) + "] Terminé — " + std::to_string(closed)
+        + "/" + std::to_string(toClose) + " positions fermées sur " + std::to_string(total));
+}
+
 void TOP4EA_Engine::closeBasketAtomic() {
     state_.store(EAState::Closing);
     auto orders = fetchOrders();
@@ -885,6 +1070,13 @@ void TOP4EA_Engine::closeBasketAtomic() {
     ssLevel_ = 0.0; bsLevel_ = 0.0;
     recovery_->reset();
     basketMon_->reset();
+    waveState_.store(0);  // remettre à zéro le suivi des vagues pour le prochain cycle
+
+    // ── FIX CRITIQUE : vider le cache d'ordres immédiatement ────
+    // Sans ce vidage, le tick suivant lit le cache périmé (7 ordres, P&L=+10$),
+    // déclenche basketMon_->update() → true → nouvelle fermeture → boucle infinie.
+    // En vidant ici, le prochain tick ne voit plus d'ordres → pas de déclenchement.
+    { std::lock_guard lk(ordersMu_); orders_.clear(); }
 
     // Réétablir l'ancre géométrique sur le nouveau prix mid
     // La prochaine grille part d'un niveau propre, ancré au marché actuel
@@ -1273,10 +1465,10 @@ std::string TOP4EA_Engine::dashboard() const {
         // ── Couche DeepSeek LLM ───────────────────────────────
         if (!marketIntel_->hasDeepSeekKey()) {
             oss << "║  DeepSeek  : [clé API manquante — LLM désactivé]\n";
-        } else if (vd.m30.barCount < 26) {
-            // Pas encore assez de barres M30 pour un MACD valide
-            int hNeeded = 26 - vd.m30.barCount;
-            oss << "║  DeepSeek  : [collecte données M30 — encore ~"
+        } else if (vd.m30.barCount < 5) {
+            // Rare : warmUp() non encore exécuté (premier tick pas encore reçu)
+            int hNeeded = 5 - vd.m30.barCount;
+            oss << "║  DeepSeek  : [démarrage — encore ~"
                 << (hNeeded * 30) << "min]\n";
         } else if (vd.dsSignal.signal != DSSignal::UNKNOWN) {
             oss << std::setprecision(0);

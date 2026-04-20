@@ -103,6 +103,7 @@ private:
                         int recovDepth, double gapFactor, bool trailFrozen);
 
     void closeBasketAtomic();
+    void closeWavePartial(int wave);  // wave 0=Wave1(50%) wave 1=Wave2(30%)
     void closeOneSide(int sideType);
     void checkConsistency(const std::vector<OrderInfo>& orders);
 
@@ -187,6 +188,13 @@ private:
     std::atomic<int>  totalPairs_    { 0 };
     std::atomic<int>  totalSingles_  { 0 };
     std::atomic<bool> basketClosing_ { false };  // garde anti-double close
+
+    // Timeout anti-gel : si CLOSING > 30s sans retour → force reset
+    TimePoint         closingStart_  = Clock::now();
+
+    // ─── TP par vagues ───────────────────────────────────────
+    // 0 = aucune vague fermée | 1 = Wave1 faite (50%) | 2 = Wave2 faite (+30%)
+    std::atomic<int>  waveState_     { 0 };
 };
 
 } // namespace top4ea

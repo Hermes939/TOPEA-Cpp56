@@ -43,12 +43,18 @@ public:
     TriggerResult onSellStopTriggered(double triggerPrice, int gridGap) noexcept;
     TriggerResult onBuyStopTriggered (double triggerPrice, int gridGap) noexcept;
 
-    // ─── Lots recovery (Kelly-cappés) ───────────────────────
+    // ─── Lots recovery ──────────────────────────────────────
+    // useFixedLotSchedule=true  → schedule fixe [0.10, 0.10, 0.20, 0.30, 0.40]
+    // useFixedLotSchedule=false → géométrique baseLot × mult^n (Kelly-cappé)
     [[nodiscard]] double sellLot() const noexcept {
+        if (cfg_.useFixedLotSchedule)
+            return math::recovLotFixed(cfg_.baseLot, sellCount_.load());
         return math::recovLot(cfg_.baseLot, cfg_.lotMultiplier,
                               sellCount_.load(), cfg_.kellyMaxFraction);
     }
     [[nodiscard]] double buyLot() const noexcept {
+        if (cfg_.useFixedLotSchedule)
+            return math::recovLotFixed(cfg_.baseLot, buyCount_.load());
         return math::recovLot(cfg_.baseLot, cfg_.lotMultiplier,
                               buyCount_.load(), cfg_.kellyMaxFraction);
     }

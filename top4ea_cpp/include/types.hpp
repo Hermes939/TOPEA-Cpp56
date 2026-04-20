@@ -211,6 +211,21 @@ struct Config {
     double      stopLevelPoints     = 0.0;    // distance min SL/TP en points
     double      contractSize        = 100.0;  // taille contrat (100oz pour XAU)
 
+    // ─── Grille de recovery — schedule de lots fixe ─────────────
+    // true  : schedule prédéfini [0.10, 0.10, 0.20, 0.30, 0.40]
+    //         L1=entrée 0.10 | L2=hedge 0.10 | L3=renfort 0.20 | L4=0.30 | L5=0.40
+    // false : lot géométrique baseLot × lotMultiplier^n avec Kelly cap
+    bool        useFixedLotSchedule    = true;
+
+    // ─── TP par vagues (Wave TP) ─────────────────────────────────
+    // Fermeture partielle progressive au lieu d'un close tout-ou-rien
+    //   Wave 1 : P&L ≥ wave1Target → ferme 50% des positions
+    //   Wave 2 : P&L ≥ wave2Target → ferme 30% du restant
+    //   Wave 3 : trailing 400 pips sur le reliquat (20%)
+    bool        waveEnabled            = true;
+    double      wave1Target            = 3.50;  // $ seuil déclenchement vague 1
+    double      wave2Target            = 7.00;  // $ seuil déclenchement vague 2
+
     // ─── Basket fermeture contextualisée (profondeur recovery) ──
     // A partir de ce nombre de niveaux combinés SS+BS, le target
     // requis est augmenté de basketRecoveryBonus par niveau supplémentaire

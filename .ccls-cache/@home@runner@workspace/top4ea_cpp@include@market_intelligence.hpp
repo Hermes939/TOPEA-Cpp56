@@ -129,6 +129,18 @@ public:
         return deepseek_.hasApiKey();
     }
 
+    // ─── Réchauffement synthétique (cold-start fix) ───────────
+    // Pré-popule les déques de barres avec des bougies synthétiques
+    // basées sur le prix courant et l'ATR estimé (gridGap × point).
+    // Permet aux indicateurs (ATR/RSI/MACD/BB) de fonctionner
+    // dès le premier tick sans attendre des heures de données réelles.
+    // À appeler une seule fois au démarrage, avant le premier tick.
+    //
+    // @param price    prix mid actuel (ex: 4794.0)
+    // @param atrPrice ATR estimé en prix (ex: gridGap × point = 500 × 0.01 = 5.0)
+    // @param nBars    nombre de bougies synthétiques à générer (défaut 30)
+    void warmUp(double price, double atrPrice, int nBars = 30) noexcept;
+
     // ─── Convertisseurs texte ─────────────────────────────────
     static std::string decisionName (MarketDecision  d) noexcept;
     static std::string structureName(MarketStructure s) noexcept;
