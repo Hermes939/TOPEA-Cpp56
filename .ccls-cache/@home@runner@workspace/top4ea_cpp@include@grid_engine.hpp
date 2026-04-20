@@ -87,8 +87,10 @@ public:
     // Gap OU courant en points (0 si marché non mean-reverting)
     [[nodiscard]] int ouGridGap() const noexcept;
 
-private:
+    // Distance minimum broker (MODE_STOPLEVEL × Point)
     [[nodiscard]] double minDistPts() const noexcept;
+
+private:
     [[nodiscard]] double pointSize()  const noexcept;
 
     Config         cfg_;
