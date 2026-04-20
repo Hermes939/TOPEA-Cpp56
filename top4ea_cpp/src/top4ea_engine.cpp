@@ -1234,11 +1234,18 @@ std::string TOP4EA_Engine::dashboard() const {
         oss << "║  iniMTA M5  ATR=" << vd.m5.atr
             << "  RSI=" << vd.m5.rsi
             << "  BB" << (vd.m5.bbNarrow()?"[SQZ]":"[OK]") << "\n";
-        oss << "║  iniMTA H1  ATR=" << vd.h1.atr
-            << "  MACD=" << std::setprecision(4) << vd.h1.macdHist
-            << (vd.h1.macdBullish()?" ↑":" ↓") << "\n";
+        oss << "║  iniMTA M30 ATR=" << vd.m30.atr
+            << "  MACD=" << std::setprecision(4) << vd.m30.macdHist
+            << (vd.m30.macdBullish()?" ↑":" ↓") << "\n";
         // ── Couche DeepSeek LLM ───────────────────────────────
-        if (vd.dsSignal.signal != DSSignal::UNKNOWN) {
+        if (!marketIntel_->hasDeepSeekKey()) {
+            oss << "║  DeepSeek  : [clé API manquante — LLM désactivé]\n";
+        } else if (vd.m30.barCount < 26) {
+            // Pas encore assez de barres M30 pour un MACD valide
+            int hNeeded = 26 - vd.m30.barCount;
+            oss << "║  DeepSeek  : [collecte données M30 — encore ~"
+                << (hNeeded * 30) << "min]\n";
+        } else if (vd.dsSignal.signal != DSSignal::UNKNOWN) {
             oss << std::setprecision(0);
             oss << "║  DeepSeek  : " << vd.dsSignal.signalName()
                 << " [" << (int)vd.dsSignal.confidence << "%]"
@@ -1249,7 +1256,7 @@ std::string TOP4EA_Engine::dashboard() const {
                 oss << "║   " << ds_r << "\n";
             }
         } else {
-            oss << "║  DeepSeek  : en attente...\n";
+            oss << "║  DeepSeek  : en attente réponse API...\n";
         }
         // Slots actifs
         auto snap = orchestrator_.snapshot();

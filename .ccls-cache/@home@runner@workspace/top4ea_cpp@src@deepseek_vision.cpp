@@ -185,7 +185,6 @@ DeepSeekSignal DeepSeekVision::parseResponse(const std::string& json) {
     sig.rawResponse = json;
 
     if (json.empty()) {
-        ++const_cast<std::atomic<int>&>(sig.confidence); // no-op
         return sig;
     }
 

@@ -111,6 +111,11 @@ public:
     [[nodiscard]] MarketDecision decision()  const noexcept;
     [[nodiscard]] std::string    reasoning() const;
 
+    // ─── Vérifie si la clé API DeepSeek est configurée ───────
+    [[nodiscard]] bool hasDeepSeekKey() const noexcept {
+        return deepseek_.hasApiKey();
+    }
+
     // ─── Convertisseurs texte ─────────────────────────────────
     static std::string decisionName (MarketDecision  d) noexcept;
     static std::string structureName(MarketStructure s) noexcept;
@@ -166,8 +171,9 @@ private:
     std::chrono::system_clock::time_point
         m1Start_, m5Start_, m15Start_, h1Start_;
 
-    // Spread EWMA (pour spreadRatio)
-    double spreadEwma_ = 0.0;
+    // Spread courant et EWMA (pour spreadRatio)
+    double spreadEwma_    = 0.0;
+    double curSpread_     = 0.0;  // spread du dernier tick
 
     // Cache décision courante (thread-safe)
     mutable std::mutex   mu_;

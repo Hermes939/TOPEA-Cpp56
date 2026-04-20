@@ -155,10 +155,10 @@ std::string DeepSeekVision::buildPrompt(const DSMarketContext& ctx) {
         << " BBwidth=" << ctx.m5BbWidth
         << "% mom=" << (ctx.m5Momentum * 100.0) << "%) | ";
 
-    oss << "H1(ATR=" << ctx.h1Atr
-        << " RSI=" << ctx.h1Rsi
-        << " MACD=" << ctx.h1Macd
-        << " MACDhist=" << ctx.h1MacdHist
+    oss << "M30(ATR=" << ctx.m30Atr
+        << " RSI=" << ctx.m30Rsi
+        << " MACD=" << ctx.m30Macd
+        << " MACDhist=" << ctx.m30MacdHist
         << ") | ";
 
     oss << "BasketPnL=" << ctx.basketPnl
