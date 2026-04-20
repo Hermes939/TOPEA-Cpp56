@@ -306,12 +306,16 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
         // Contexte panier pour prompt DeepSeek — lire cache sans fetch réseau
         std::vector<OrderInfo> cached;
         { std::lock_guard lk(ordersMu_); cached = orders_; }
-        double bPnl = basketProfit(cached);
-        int    nMkt = (int)std::count_if(cached.begin(), cached.end(),
-            [](const OrderInfo& o){
-                return o.type == OrderType::Buy || o.type == OrderType::Sell;
-            });
-        marketIntel_->update(tick, cfg_.point, bPnl, nMkt);
+        double bPnl  = basketProfit(cached);
+        double bsLots = 0.0, ssLots = 0.0;
+        int    nMkt  = 0;
+        for (const auto& o : cached) {
+            if (o.type == OrderType::Buy)  { bsLots += o.lots; ++nMkt; }
+            if (o.type == OrderType::Sell) { ssLots += o.lots; ++nMkt; }
+        }
+        bool inRecov = (state_.load() == EAState::Recovery);
+        marketIntel_->update(tick, cfg_.point, bPnl, nMkt,
+                             bsLots, ssLots, inRecov);
     }
     {
         VisualDecision vd = marketIntel_->analyze();
@@ -612,12 +616,13 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
                 " count=" + std::to_string(recovery_->sellCount()));
         }
 
-        if (!vdNow.allowRecovery) {
+        if (!vdNow.allowRecovery || !vdNow.allowSSRecovery) {
             // Visual AI bloque le nouveau SS recovery (sécurité directionnelle)
             // Le compteur est déjà incrémenté → lot correct au prochain SS
-            log("[AUDIT] Nouveau SS recovery bloqué par Visual AI"
+            log("[AUDIT] Nouveau SS recovery BLOQUÉ par Visual AI"
                 " score=" + std::to_string((int)vdNow.recoveryScore)
                 + " raison=" + vdNow.recoveryReason
+                + vdNow.ssBlockReason
                 + " | Martingale count=" + std::to_string(recovery_->sellCount()));
         } else {
             if (res.action == TriggerResult::Action::NewRecovery)
@@ -649,10 +654,11 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
                 " count=" + std::to_string(recovery_->buyCount()));
         }
 
-        if (!vdNow.allowRecovery) {
-            log("[AUDIT] Nouveau BS recovery bloqué par Visual AI"
+        if (!vdNow.allowRecovery || !vdNow.allowBSRecovery) {
+            log("[AUDIT] Nouveau BS recovery BLOQUÉ par Visual AI"
                 " score=" + std::to_string((int)vdNow.recoveryScore)
                 + " raison=" + vdNow.recoveryReason
+                + vdNow.bsBlockReason
                 + " | Martingale count=" + std::to_string(recovery_->buyCount()));
         } else {
             if (res.action == TriggerResult::Action::NewRecovery)
@@ -1909,11 +1915,18 @@ std::string TOP4EA_Engine::dashboard() const {
         } else {
             oss << "║  DeepSeek  : en attente réponse API...\n";
         }
-        // ── Audit Recovery ────────────────────────────────────
+        // ── Audit Recovery — directionnel ────────────────────
         oss << std::setprecision(0);
         oss << "║  Recovery  : "
             << (vd.allowRecovery ? "✓ AUTORISÉ" : "✗ BLOQUÉ  ")
             << "  score=" << (int)vd.recoveryScore << "/100\n";
+        // Ligne directionnelle BS / SS
+        oss << "║   BS:"  << (vd.allowBSRecovery ? "✓" : "✗BLOQUÉ")
+            << "  SS:"    << (vd.allowSSRecovery ? "✓" : "✗BLOQUÉ") << "\n";
+        if (!vd.bsBlockReason.empty())
+            oss << "║   " << vd.bsBlockReason.substr(0, 56) << "\n";
+        if (!vd.ssBlockReason.empty())
+            oss << "║   " << vd.ssBlockReason.substr(0, 56) << "\n";
         if (!vd.recoveryReason.empty()) {
             std::string rr = vd.recoveryReason.substr(0, 58);
             oss << "║   " << rr << "\n";

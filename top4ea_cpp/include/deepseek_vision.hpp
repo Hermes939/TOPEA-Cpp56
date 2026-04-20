@@ -84,9 +84,15 @@ struct DSMarketContext {
     double m30MacdHist = 0.0;
 
     // Context basket
-    double basketPnl  = 0.0;
-    int    openOrders = 0;
+    double basketPnl   = 0.0;
+    int    openOrders  = 0;
     double spreadRatio = 1.0;
+
+    // Balance de lots BS vs SS — critique pour recovery directionnel
+    double bsLots  = 0.0;   // total lots côté Buy  (positions haussières)
+    double ssLots  = 0.0;   // total lots côté Sell (positions baissières)
+    double netDelta = 0.0;  // bsLots - ssLots  (>0 = surexposé BS)
+    bool   inRecovery = false; // vrai si le basket est en mode recovery
 };
 
 // ============================================================
@@ -112,11 +118,11 @@ public:
     [[nodiscard]] int callCount()  const noexcept { return callCount_.load();  }
     [[nodiscard]] int errorCount() const noexcept { return errorCount_.load(); }
 
-    // TTL du cache en secondes (défaut 30s)
-    static constexpr int CACHE_TTL_SEC = 30;
+    // TTL du cache en secondes — 90s pour éviter [stale] entre 2 appels espacés
+    static constexpr int CACHE_TTL_SEC = 90;
 
     // Intervalle minimum entre deux appels API (évite le spam)
-    static constexpr int MIN_CALL_INTERVAL_SEC = 15;
+    static constexpr int MIN_CALL_INTERVAL_SEC = 20;
 
 private:
     // ─── HTTP synchrone (appelé depuis le thread dédié) ───────

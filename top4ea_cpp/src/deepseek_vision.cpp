@@ -162,7 +162,26 @@ std::string DeepSeekVision::buildPrompt(const DSMarketContext& ctx) {
         << ") | ";
 
     oss << "BasketPnL=" << ctx.basketPnl
-        << "$ ordresMkt=" << ctx.openOrders;
+        << "$ ordresMkt=" << ctx.openOrders
+        << " | LotBalance: BS=" << ctx.bsLots
+        << " SS=" << ctx.ssLots
+        << " delta=" << (ctx.netDelta >= 0 ? "+" : "") << ctx.netDelta
+        << (ctx.inRecovery ? " [RECOVERY]" : "");
+
+    // Instruction explicite sur la balance : aider le LLM à orienter la recovery
+    if (ctx.inRecovery) {
+        if (ctx.netDelta > 0.05) {
+            oss << " | IMPORTANT: BS surexpose de " << ctx.netDelta
+                << " lots vs SS. Si tu vois une tendance baissiere, "
+                   "le signal SELL_BIAS aidera a reduire l'exposition BS.";
+        } else if (ctx.netDelta < -0.05) {
+            oss << " | IMPORTANT: SS surexpose de " << (-ctx.netDelta)
+                << " lots vs BS. Si tu vois une tendance haussiere, "
+                   "le signal BUY_BIAS aidera a reduire l'exposition SS.";
+        } else {
+            oss << " | Balance BS/SS quasi neutre - orienter selon la structure.";
+        }
+    }
 
     // Échapper les caractères spéciaux JSON dans la chaîne
     std::string raw = oss.str();

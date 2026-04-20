@@ -147,7 +147,9 @@ void MarketIntelligence::warmUp(double price, double atrPrice, int nBars) noexce
 //  update — appelé à chaque tick
 // ============================================================
 void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
-                                 double basketPnl, int openOrders) noexcept {
+                                 double basketPnl, int openOrders,
+                                 double bsLots, double ssLots,
+                                 bool inRecovery) noexcept {
     if (tick.bid <= 0.0 || tick.ask <= 0.0) return;
 
     // Spread courant + EWMA
@@ -158,6 +160,9 @@ void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
     // Cache contexte panier (thread-safe : écrit avant pushTick/closeBars)
     basketPnlCache_  = basketPnl;
     openOrdersCache_ = openOrders;
+    bsLotsCache_     = bsLots;
+    ssLotsCache_     = ssLots;
+    inRecoveryCache_ = inRecovery;
 
     pushTick(tick);
     closeBars(tick);
@@ -214,6 +219,10 @@ void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
         ctx.m30MacdHist = im30.macdHist;
         ctx.basketPnl   = basketPnl;
         ctx.openOrders  = openOrders;
+        ctx.bsLots      = bsLots;
+        ctx.ssLots      = ssLots;
+        ctx.netDelta    = bsLots - ssLots;
+        ctx.inRecovery  = inRecovery;
 
         try { deepseek_.requestAnalysis(ctx); }
         catch (...) { /* thread non-créé — pas critique */ }
@@ -740,7 +749,15 @@ VisualDecision MarketIntelligence::analyze() const {
                        : 1.0;
 
     double bPnl; int nOrd;
-    { std::lock_guard lk(mu_); bPnl = basketPnlCache_; nOrd = openOrdersCache_; }
+    double bsLotsCached, ssLotsCached; bool inRecoveryCached;
+    {
+        std::lock_guard lk(mu_);
+        bPnl            = basketPnlCache_;
+        nOrd            = openOrdersCache_;
+        bsLotsCached    = bsLotsCache_;
+        ssLotsCached    = ssLotsCache_;
+        inRecoveryCached = inRecoveryCache_;
+    }
 
     VisualDecision vd = computeDecision(indM1, indM5, indM15, indM30,
                                         st, ses, spreadRatio, bPnl, nOrd);
@@ -792,6 +809,69 @@ VisualDecision MarketIntelligence::analyze() const {
                 vd.confidence = (vd.confidence + ds.confidence) * 0.5;
                 vd.dsOverride = true;
             }
+        }
+    }
+
+    // ── Bloc directionnel recovery (CRITIQUE) ────────────────
+    // Calcul des flags allowBSRecovery / allowSSRecovery
+    // en combinant : balance de lots, signal DeepSeek, structure, RSI.
+    //
+    // Règle centrale : ne pas ajouter d'ordres recovery dans la direction
+    // qui va à l'encontre de la tendance ET qui est déjà surexposée.
+    // ──────────────────────────────────────────────────────────
+    {
+        DeepSeekSignal ds2 = deepseek_.getLastSignal();
+        double netDelta = bsLotsCached - ssLotsCached;
+
+        // ── Critères qui bloquent BS recovery (BUY Stop) ─────
+        // BS = position haussière → bloquer si marché baissier
+        bool bsBearStruct   = (st == MarketStructure::BEARISH_TREND);
+        bool bsRsiOverbought = (indM5.rsi >= 75.0 && indM30.rsi >= 65.0);
+        bool bsDsConfirm    = (ds2.fresh && ds2.signal == DSSignal::SELL_BIAS
+                               && ds2.confidence >= 55.0);
+        bool bsOverexposed  = (netDelta > 0.10); // BS > SS de 0.10 lots au moins
+
+        // Bloquer BS si 2+ signaux baissiers ET déjà surexposé BS
+        int bsBearScore = (int)bsBearStruct + (int)bsRsiOverbought
+                        + (int)bsDsConfirm + (int)bsOverexposed;
+        if (bsBearScore >= 2) {
+            vd.allowBSRecovery = false;
+            vd.bsBlockReason   = "[BS bloqué:";
+            if (bsBearStruct)    vd.bsBlockReason += " struct.Bear";
+            if (bsRsiOverbought) vd.bsBlockReason += " RSI↑overbought";
+            if (bsDsConfirm)     vd.bsBlockReason += " DS:SELL("
+                                 + std::to_string((int)ds2.confidence) + "%)";
+            if (bsOverexposed)   vd.bsBlockReason += " Δ=+"
+                                 + std::to_string((int)(netDelta * 100)) + "clots";
+            vd.bsBlockReason += "]";
+        }
+
+        // ── Critères qui bloquent SS recovery (SELL Stop) ────
+        // SS = position baissière → bloquer si marché haussier
+        bool ssBullStruct   = (st == MarketStructure::BULLISH_TREND);
+        bool ssRsiOversold  = (indM5.rsi <= 25.0 && indM30.rsi <= 35.0);
+        bool ssDsConfirm    = (ds2.fresh && ds2.signal == DSSignal::BUY_BIAS
+                               && ds2.confidence >= 55.0);
+        bool ssOverexposed  = (netDelta < -0.10); // SS > BS de 0.10 lots au moins
+
+        int ssBullScore = (int)ssBullStruct + (int)ssRsiOversold
+                        + (int)ssDsConfirm + (int)ssOverexposed;
+        if (ssBullScore >= 2) {
+            vd.allowSSRecovery = false;
+            vd.ssBlockReason   = "[SS bloqué:";
+            if (ssBullStruct)   vd.ssBlockReason += " struct.Bull";
+            if (ssRsiOversold)  vd.ssBlockReason += " RSI↓oversold";
+            if (ssDsConfirm)    vd.ssBlockReason += " DS:BUY("
+                                + std::to_string((int)ds2.confidence) + "%)";
+            if (ssOverexposed)  vd.ssBlockReason += " Δ="
+                                + std::to_string((int)(netDelta * 100)) + "clots";
+            vd.ssBlockReason += "]";
+        }
+
+        // allowRecovery = true seulement si AU MOINS une direction est libre
+        if (!vd.allowBSRecovery && !vd.allowSSRecovery) {
+            vd.allowRecovery = false;
+            vd.recoveryReason += " | Tous les sens bloqués directionnellement";
         }
     }
 

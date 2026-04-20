@@ -89,9 +89,18 @@ struct VisualDecision {
     // Chaque facteur contribue à recoveryScore (0–100).
     // allowRecovery = true  → le moteur PEUT déclencher un ordre recovery stop.
     // allowRecovery = false → le déclenchement est bloqué (mauvaises conditions).
-    bool   allowRecovery  = true;   // autorisation d'ajouter un ordre recovery
+    bool   allowRecovery  = true;   // autorisation globale recovery (les deux côtés)
     double recoveryScore  = 50.0;   // qualité multi-facteur du signal (0=non / 100=parfait)
     std::string recoveryReason;     // explication lisible du score
+
+    // ── Bloc directionnel (NOUVEAU) ───────────────────────────
+    // allowBSRecovery = false → bloquer les ordres BUY recovery (tendance baissière)
+    // allowSSRecovery = false → bloquer les ordres SELL recovery (tendance haussière)
+    // Ces flags affinent allowRecovery par direction de marché + balance de lots.
+    bool   allowBSRecovery = true;   // autorisation d'ajouter un BUY Stop recovery
+    bool   allowSSRecovery = true;   // autorisation d'ajouter un SELL Stop recovery
+    std::string bsBlockReason;       // raison du blocage BS (diagnostic)
+    std::string ssBlockReason;       // raison du blocage SS (diagnostic)
 
     // ── Couche DeepSeek LLM ───────────────────────────────────
     DeepSeekSignal  dsSignal;              // dernier signal LLM (UNKNOWN si inactif)
@@ -106,11 +115,14 @@ public:
     explicit MarketIntelligence() { resetPartials(); }
 
     // ─── Feed — appelé à chaque tick ─────────────────────────
-    // basketPnl / openOrders : contexte panier pour prompt DeepSeek
+    // basketPnl / openOrders / bsLots / ssLots : contexte panier pour DeepSeek
     void update(const Tick& tick,
                 double pointSize   = 0.01,
                 double basketPnl   = 0.0,
-                int    openOrders  = 0) noexcept;
+                int    openOrders  = 0,
+                double bsLots      = 0.0,
+                double ssLots      = 0.0,
+                bool   inRecovery  = false) noexcept;
 
     // ─── Analyse complète — thread-safe ──────────────────────
     [[nodiscard]] VisualDecision analyze() const;
@@ -205,6 +217,11 @@ private:
     // Cache contexte panier (mis à jour via update())
     double basketPnlCache_  = 0.0;
     int    openOrdersCache_ = 0;
+
+    // Cache balance de lots BS/SS (pour couche DeepSeek recovery)
+    double bsLotsCache_     = 0.0;
+    double ssLotsCache_     = 0.0;
+    bool   inRecoveryCache_ = false;
 
     // Cache décision courante (thread-safe)
     mutable std::mutex   mu_;
