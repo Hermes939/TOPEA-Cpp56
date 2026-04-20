@@ -722,14 +722,15 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
                 closeOneSide(1);
         }
 
-        // ── Fix #2 : Dual Trail — réinitialisation cycle après BS verrouillé ──
-        // Quand le BS se déclenche en mode verrou, le cycle SELL est terminé.
-        // On remet l'état AGGRESSIVE à zéro pour que le prochain cycle reparte
-        // en NATURAL avec un contexte propre (distances symétriques).
+        // ── Fix #2 : Dual Trail — fermeture SELL garantie + reset après BS verrouillé ──
+        // Quand le BS se déclenche en mode verrou, le profit garanti est atteint.
+        // On ferme explicitement le côté SELL pour appliquer la sémantique de verrou
+        // (pas de recovery normal — on encaisse le profit garanti et on reset le cycle).
         if (cfg_.trailModeAuto && vLockActive_) {
-            log("[DUAL-TRAIL] BS déclenché en mode VERROU — réinitialisation cycle → NATURAL"
-                " vLockPrice=" + std::to_string(vLockPrice_)
-                + " ssProfitCache=" + std::to_string((int)ssProfitPipsCache_) + "pts");
+            log("[DUAL-TRAIL] BS déclenché en mode VERROU @ " + std::to_string(triggeredAt)
+                + " — fermeture SELL garantie (profit=" + std::to_string(cfg_.bsOvershootPips)
+                + "pts min) → réinitialisation cycle → NATURAL");
+            closeSideAtVL(1);   // Ferme toutes les positions Sell avec profit verrouillé
             dualTrailMode_      = TrailMode::NATURAL;
             aggressiveBsTarget_ = 0.0;
             vLockActive_        = false;
@@ -1131,6 +1132,13 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
                             + " [ss_entry=" + std::to_string(ssAvgEntry)
                             + " -overshoot=" + std::to_string(cfg_.bsOvershootPips) + "pts"
                             + " profit_garanti=" + std::to_string(cfg_.bsOvershootPips) + "pts]");
+                        // ── Sync immédiat vers ProfitLockManager ─────────────
+                        // Forcer l'override du niveau V-BS dans le même tick que
+                        // l'activation du verrou, sans attendre updateProfitLockOrders.
+                        // Élimine la fenêtre de timing où vLockActive_=true mais
+                        // le niveau V-BS broker n'est pas encore synchronisé.
+                        if (cfg_.vlEnabled)
+                            vlMgr_.overrideBSForLock(lockLevel);
                     }
                 }
             }
