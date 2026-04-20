@@ -223,6 +223,13 @@ private:
     // ─── TP par vagues ───────────────────────────────────────
     // 0 = aucune vague fermée | 1 = Wave1 faite (50%) | 2 = Wave2 faite (+30%)
     std::atomic<int>  waveState_     { 0 };
+
+    // ─── Profit réalisé dans le cycle en cours ───────────────
+    // Quand V-SS ou V-BS verrouille et ferme un côté en cours de cycle,
+    // le profit encaissé est mémorisé ici.  Le test de target basket
+    // additionne : cycleRealizedPnL_ + basketProfit(ordres ouverts).
+    // Remis à 0 uniquement dans closeBasketAtomic() (fin de cycle complet).
+    double cycleRealizedPnL_ = 0.0;
 };
 
 } // namespace top4ea

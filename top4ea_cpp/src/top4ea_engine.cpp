@@ -330,37 +330,42 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
     {
         std::vector<OrderInfo> cached;
         { std::lock_guard lk(ordersMu_); cached = orders_; }
-        double pnl = basketProfit(cached);
+        double pnl      = basketProfit(cached);
+        // P&L total du cycle = profit flottant + profit déjà encaissé (VL partiels)
+        double cyclePnl = cycleRealizedPnL_ + pnl;
         if (!cached.empty()) {
             // ── TP par vagues ──────────────────────────────────────
             // Exécuté AVANT le target basket global pour capturer les profits intermédiaires
             // Wave1 (50% des positions) → Wave2 (30% du restant) → trail reliquat
             if (cfg_.waveEnabled && !basketClosing_.load()) {
                 int ws = waveState_.load();
-                if (ws == 0 && pnl >= cfg_.wave1Target) {
-                    // Wave 1 : fermer ~50% des positions marché
+                if (ws == 0 && cyclePnl >= cfg_.wave1Target) {
                     if (waveState_.compare_exchange_strong(ws, 1)) {
-                        log(">>> WAVE1 P&L=" + std::to_string(pnl)
-                            + " (target=" + std::to_string(cfg_.wave1Target) + ") — fermeture 50%");
-                        closeWavePartial(0);  // 0 = Wave1 (50%)
+                        log(">>> WAVE1 cyclePnL=" + std::to_string(cyclePnl)
+                            + " (réalisé=" + std::to_string(cycleRealizedPnL_)
+                            + " flottant=" + std::to_string(pnl)
+                            + " target=" + std::to_string(cfg_.wave1Target) + ") — fermeture 50%");
+                        closeWavePartial(0);
                     }
-                } else if (ws == 1 && pnl >= cfg_.wave2Target) {
-                    // Wave 2 : fermer ~30% du restant
+                } else if (ws == 1 && cyclePnl >= cfg_.wave2Target) {
                     if (waveState_.compare_exchange_strong(ws, 2)) {
-                        log(">>> WAVE2 P&L=" + std::to_string(pnl)
-                            + " (target=" + std::to_string(cfg_.wave2Target) + ") — fermeture 30%");
-                        closeWavePartial(1);  // 1 = Wave2 (30%)
+                        log(">>> WAVE2 cyclePnL=" + std::to_string(cyclePnl)
+                            + " (réalisé=" + std::to_string(cycleRealizedPnL_)
+                            + " flottant=" + std::to_string(pnl)
+                            + " target=" + std::to_string(cfg_.wave2Target) + ") — fermeture 30%");
+                        closeWavePartial(1);
                     }
                 }
-                // Wave 3 : le reliquat est géré par le trail Phase 3 (400 pips)
-                // qui se déclenche naturellement via trailGrid() quand pnl >= $25
             }
 
+            // ── Test target basket global (réalisé + flottant) ────
             int totalRecov = recovery_->sellCount() + recovery_->buyCount();
-            if (basketMon_->update(pnl, cached, totalRecov)) {
+            if (basketMon_->update(cyclePnl, cached, totalRecov)) {
                 if (!basketClosing_.exchange(true)) {
-                    closingStart_ = Clock::now();  // horodatage pour timeout anti-gel
-                    log(">>> BASKET TARGET ATTEINT P&L=" + std::to_string(pnl) + " [tick]");
+                    closingStart_ = Clock::now();
+                    log(">>> BASKET TARGET ATTEINT cyclePnL=" + std::to_string(cyclePnl)
+                        + " (réalisé=" + std::to_string(cycleRealizedPnL_)
+                        + " flottant=" + std::to_string(pnl) + ") [tick]");
                     closeBasketAtomic();
                     basketClosing_.store(false);
                 }
@@ -1225,8 +1230,9 @@ void TOP4EA_Engine::closeBasketAtomic() {
     ssLevel_ = 0.0; bsLevel_ = 0.0;
     recovery_->reset();
     basketMon_->reset();
-    beMgr_.reset();       // effacer tous les niveaux BE du cycle terminé
-    waveState_.store(0);  // remettre à zéro le suivi des vagues pour le prochain cycle
+    beMgr_.reset();           // effacer tous les niveaux VL du cycle terminé
+    waveState_.store(0);      // remettre à zéro le suivi des vagues pour le prochain cycle
+    cycleRealizedPnL_ = 0.0;  // remettre à zéro le profit encaissé (VL partiels)
 
     // ── FIX CRITIQUE : vider le cache d'ordres immédiatement ────
     // Sans ce vidage, le tick suivant lit le cache périmé (7 ordres, P&L=+10$),
@@ -1367,31 +1373,96 @@ void TOP4EA_Engine::updateProfitLockOrders(const std::vector<OrderInfo>& orders,
 }
 
 // ────────────────────────────────────────────────────────────
-//  closeSideAtVL — verrouillage déclenché → fermeture GLOBALE du panier
-//  side=0 → V-SS déclenché (côté BUY avait du profit verrouillé)
-//  side=1 → V-BS déclenché (côté SELL avait du profit verrouillé)
+//  closeSideAtVL — verrou déclenché → ferme UNIQUEMENT le côté verrouillé
+//  side=0 → V-SS déclenché : ferme toutes les positions Buy (profit verrouillé)
+//  side=1 → V-BS déclenché : ferme toutes les positions Sell (profit verrouillé)
 //
 //  PHILOSOPHIE DU SYSTÈME :
-//    Le verrou V-SS/V-BS est un filet de sécurité trailing placé quand
-//    un profit important est détecté sur un côté.  Quand ce niveau est
-//    franchi (marché qui revient), on NE ferme JAMAIS un seul côté :
-//    fermer le côté profitable et laisser le côté perdant courir
-//    aggraverait les pertes et va à l'encontre de la logique basket.
-//    La seule action correcte est la fermeture TOTALE du panier global
-//    (closeBasketAtomic), qui capture le profit verrouillé tout en
-//    stoppant immédiatement le saignement de l'autre côté.
+//    Scénario typique :
+//      1. SS déclenché → Sell s'ouvre, monte en profit +X
+//      2. Prix revient → BS déclenché → Buy s'ouvre
+//      3. V-BS posé derrière le Sell (profit +X verrouillé)
+//      4. V-BS touché → on ferme le Sell, on encaisse +X dans cycleRealizedPnL_
+//      5. Le Buy continue normalement, le cycle poursuit
+//      6. Quand cycleRealizedPnL_ + basketProfit(restant) >= target → close global
+//
+//    Le profit réalisé est mémorisé dans cycleRealizedPnL_ pour que le test
+//    de target basket en tienne compte.  Le côté restant continue seul.
 // ────────────────────────────────────────────────────────────
 void TOP4EA_Engine::closeSideAtVL(int side) {
-    log("[VL] Verrouillage " + std::string(side==0?"V-SS (BUY)":"V-BS (SELL)")
-        + " déclenché → fermeture GLOBALE panier"
-        " (jamais fermeture partielle d'un seul côté)");
+    // ── 1. Supprimer les ordres stops de grille (SS et BS) ───
+    int ss = ssTicket_.load();
+    int bs = bsTicket_.load();
+    if (ss > 0) { bridge_->sendCommand(makeDelete(ss)); ssTicket_.store(-1); ssLevel_ = 0.0; }
+    if (bs > 0) { bridge_->sendCommand(makeDelete(bs)); bsTicket_.store(-1); bsLevel_ = 0.0; }
 
-    if (!basketClosing_.exchange(true)) {
-        closingStart_ = Clock::now();
-        closeBasketAtomic();
-        basketClosing_.store(false);
+    // Supprimer l'ordre V du côté que l'on ferme (plus utile)
+    const auto& ownSlot = (side == 0) ? beMgr_.ssBE() : beMgr_.bsBE();
+    if (ownSlot.ticket > 0) bridge_->sendCommand(makeDelete(ownSlot.ticket));
+
+    auto orders = fetchOrders();
+    OrderType toClose = (side == 0) ? OrderType::Buy : OrderType::Sell;
+    Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
+
+    // ── 2. Calculer le profit du côté fermé (avant la fermeture) ─
+    double sideProfit = 0.0;
+    for (const auto& o : orders)
+        if (o.type == toClose)
+            sideProfit += o.profit + o.swap + o.commission;
+
+    // ── 3. Fermer UNIQUEMENT les positions du côté verrouillé ──
+    int closed = 0, total = 0;
+    for (const auto& o : orders) {
+        if (o.type != toClose) continue;
+        ++total;
+        double price = (toClose == OrderType::Buy) ? t.bid : t.ask;
+        auto res = bridge_->sendCommand(makeClose(o, price), 2000);
+        if (res.success) ++closed;
+    }
+
+    // ── 4. Encaisser le profit réalisé dans l'accumulateur du cycle ─
+    cycleRealizedPnL_ += sideProfit;
+
+    // ── 5. Reset recovery + VL du côté fermé ─────────────────
+    if (side == 0) { recovery_->resetBuy();  beMgr_.resetSS(); }
+    else           { recovery_->resetSell(); beMgr_.resetBS(); }
+
+    // Rafraîchir le cache d'ordres
+    auto fresh = fetchOrders();
+    { std::lock_guard lk(ordersMu_); orders_ = fresh; }
+
+    log("[VL] " + std::string(side==0?"V-SS":"V-BS")
+        + " → côté " + std::string(side==0?"BUY":"SELL")
+        + " fermé (" + std::to_string(closed) + "/" + std::to_string(total) + " pos)"
+        + " | profit encaissé=" + std::to_string(sideProfit) + "$"
+        + " | cycleRealizedPnL=" + std::to_string(cycleRealizedPnL_) + "$"
+        + " — cycle continue côté " + std::string(side==0?"SELL":"BUY"));
+
+    // ── 6. Vérifier si le target global est déjà atteint ─────
+    //    (réalisé + flottant restant)
+    double remPnl = basketProfit(fresh);
+    double totalCycle = cycleRealizedPnL_ + remPnl;
+
+    if (fresh.empty() || totalCycle >= cfg_.basketTarget) {
+        log("[VL] Target global atteint après VL"
+            + std::string(" (réalisé=") + std::to_string(cycleRealizedPnL_)
+            + " flottant=" + std::to_string(remPnl)
+            + " total=" + std::to_string(totalCycle) + "$)"
+            + " → fermeture globale du panier");
+        if (!basketClosing_.exchange(true)) {
+            closingStart_ = Clock::now();
+            closeBasketAtomic();
+            basketClosing_.store(false);
+        }
     } else {
-        log("[VL] closeBasketAtomic déjà en cours — VL ignoré (doublon)");
+        // ── 7. Repositionner la grille pour le côté restant ──
+        Tick t2; { std::lock_guard lk(tickMu_); t2 = lastTick_; }
+        gridOrigin_ = (t2.bid + t2.ask) * 0.5;
+        state_.store(EAState::GridActive);
+        log("[VL] Grille repositionnée @ " + std::to_string(gridOrigin_)
+            + " | target restant=" + std::to_string(cfg_.basketTarget - cycleRealizedPnL_)
+            + "$ (target=" + std::to_string(cfg_.basketTarget)
+            + " - réalisé=" + std::to_string(cycleRealizedPnL_) + ")");
     }
 }
 
@@ -1653,7 +1724,12 @@ std::string TOP4EA_Engine::dashboard() const {
     oss << std::setprecision(2);
     oss << "║  Bid/Ask   : " << tick.bid << " / " << tick.ask << "\n";
     oss << "╠═══════════════════════════════════╣\n";
-    oss << "║  Basket P&L: " << (pnl>=0?"+":"") << pnl << " $\n";
+    double cyclePnlDash = cycleRealizedPnL_ + pnl;
+    oss << "║  Basket P&L: " << (pnl>=0?"+":"") << pnl << " $";
+    if (cycleRealizedPnL_ > 0.01)
+        oss << "  [+réalisé=" << std::setprecision(2) << cycleRealizedPnL_
+            << " → cycle=" << (cyclePnlDash>=0?"+":"") << cyclePnlDash << "$]";
+    oss << "\n";
     oss << "║  Target    : " << cfg_.basketTarget << " $\n";
     oss << "║  Vélocité  : " << basketMon_->velocity() << " $/tick\n";
     oss << "╠═══════════════════════════════════╣\n";
