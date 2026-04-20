@@ -626,6 +626,19 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
                 + " → fermeture côté SELL (profit verrouillé)");
             vlMgr_.resetBS();
             triggerFired_.store(true);
+            // ── Dual Trail Fix #2b : reset sur déclenchement V-BS ─────────
+            // La fermeture V-BS peut être déclenchée via le verrou AGGRESSIVE
+            // (overrideBSForLock). On doit réinitialiser l'état dual trail ici
+            // car le return suivant court-circuite le bloc géométrique BS.
+            if (cfg_.trailModeAuto && vLockActive_) {
+                log("[DUAL-TRAIL] V-BS déclenché en mode VERROU — réinitialisation cycle → NATURAL"
+                    " vLockPrice=" + std::to_string(vLockPrice_));
+                dualTrailMode_      = TrailMode::NATURAL;
+                aggressiveBsTarget_ = 0.0;
+                vLockActive_        = false;
+                vLockPrice_         = 0.0;
+                ssProfitPipsCache_  = 0.0;
+            }
             closeSideAtVL(1);   // ferme toutes les positions Sell avec profit
             return;
         }
