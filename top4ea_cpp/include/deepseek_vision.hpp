@@ -118,11 +118,11 @@ public:
     [[nodiscard]] int callCount()  const noexcept { return callCount_.load();  }
     [[nodiscard]] int errorCount() const noexcept { return errorCount_.load(); }
 
-    // TTL du cache en secondes — 90s pour éviter [stale] entre 2 appels espacés
-    static constexpr int CACHE_TTL_SEC = 90;
+    // TTL du cache en secondes — 120s pour garantir fraîcheur entre deux appels
+    static constexpr int CACHE_TTL_SEC = 120;
 
-    // Intervalle minimum entre deux appels API (évite le spam)
-    static constexpr int MIN_CALL_INTERVAL_SEC = 20;
+    // Intervalle minimum entre deux appels API — 10s pour rester éveillé
+    static constexpr int MIN_CALL_INTERVAL_SEC = 10;
 
 private:
     // ─── HTTP synchrone (appelé depuis le thread dédié) ───────

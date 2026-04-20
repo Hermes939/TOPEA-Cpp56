@@ -180,7 +180,7 @@ void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
     // Garde : requiert au moins 5 barres M30 (réduit de 26 → accélère le démarrage)
     // Les premières analyses utilisent les barres synthétiques du warmUp()
     bool m30Ready = ((int)m30Bars_.size() >= 5);
-    if (deepseek_.hasApiKey() && (tickCount_ % 50 == 1) && m30Ready) {
+    if (deepseek_.hasApiKey() && (tickCount_ % 15 == 1) && m30Ready) {
         // Snapshot indicateurs pour le prompt
         std::deque<Bar> bM5, bM30;
         double se;
@@ -831,10 +831,14 @@ VisualDecision MarketIntelligence::analyze() const {
                                && ds2.confidence >= 55.0);
         bool bsOverexposed  = (netDelta > 0.10); // BS > SS de 0.10 lots au moins
 
-        // Bloquer BS si 2+ signaux baissiers ET déjà surexposé BS
+        // En mode normal (hors recovery), critère 1 suffit (prudence maximale)
+        // En recovery, on exige 2 signaux pour éviter de bloquer inutilement
+        int bsThreshold = inRecoveryCached ? 2 : 1;
+
+        // Bloquer BS si suffisamment de signaux baissiers convergent
         int bsBearScore = (int)bsBearStruct + (int)bsRsiOverbought
                         + (int)bsDsConfirm + (int)bsOverexposed;
-        if (bsBearScore >= 2) {
+        if (bsBearScore >= bsThreshold) {
             vd.allowBSRecovery = false;
             vd.bsBlockReason   = "[BS bloqué:";
             if (bsBearStruct)    vd.bsBlockReason += " struct.Bear";
@@ -854,9 +858,10 @@ VisualDecision MarketIntelligence::analyze() const {
                                && ds2.confidence >= 55.0);
         bool ssOverexposed  = (netDelta < -0.10); // SS > BS de 0.10 lots au moins
 
+        int ssThreshold = inRecoveryCached ? 2 : 1;
         int ssBullScore = (int)ssBullStruct + (int)ssRsiOversold
                         + (int)ssDsConfirm + (int)ssOverexposed;
-        if (ssBullScore >= 2) {
+        if (ssBullScore >= ssThreshold) {
             vd.allowSSRecovery = false;
             vd.ssBlockReason   = "[SS bloqué:";
             if (ssBullStruct)   vd.ssBlockReason += " struct.Bull";

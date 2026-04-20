@@ -116,9 +116,15 @@ public:
     // ─── Incrément forcé ────────────────────────────────────
     // Utilisé quand le broker a exécuté un stop (position réelle ouverte)
     // mais que CascadeGuard a bloqué l'incrément automatique.
-    // Garantit que le compteur reflète le nombre réel de niveaux de recovery.
-    void forceIncrementSell() noexcept { ++sellCount_; }
-    void forceIncrementBuy()  noexcept { ++buyCount_;  }
+    // Respecte maxRecovery : ne peut pas dépasser le plafond configuré.
+    void forceIncrementSell() noexcept {
+        if (cfg_.maxRecovery <= 0 || sellCount_.load() < cfg_.maxRecovery)
+            ++sellCount_;
+    }
+    void forceIncrementBuy() noexcept {
+        if (cfg_.maxRecovery <= 0 || buyCount_.load() < cfg_.maxRecovery)
+            ++buyCount_;
+    }
 
     // ─── Reset ──────────────────────────────────────────────
     void reset()     noexcept;
