@@ -70,6 +70,19 @@ public:
     void clearSSNeedsPlace() noexcept { ssVL_.needsPlace = false; }
     void clearBSNeedsPlace() noexcept { bsVL_.needsPlace = false; }
 
+    // ─── Intégration Dual Trail AGGRESSIVE ───────────────────
+    // Remplace le niveau V-BS par le prix de verrou AGGRESSIVE.
+    // Appelé depuis top4ea_engine quand vLockActive_ = true.
+    // Fait monter la priorité du V-BS broker au niveau de verrou garanti.
+    void overrideBSForLock(double lockLevel) noexcept {
+        if (!bsVL_.activated || std::abs(bsVL_.level - lockLevel) >= changeTol_) {
+            bsVL_.level      = lockLevel;
+            bsVL_.activated  = true;
+            bsVL_.active     = true;
+            bsVL_.needsPlace = true;
+        }
+    }
+
     // ─── Accesseurs ──────────────────────────────────────────
     [[nodiscard]] const VLSlot& ssVL() const noexcept { return ssVL_; }
     [[nodiscard]] const VLSlot& bsVL() const noexcept { return bsVL_; }

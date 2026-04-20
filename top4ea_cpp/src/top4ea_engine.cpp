@@ -708,6 +708,22 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
             else if (res.action == TriggerResult::Action::CloseOneSide)
                 closeOneSide(1);
         }
+
+        // ── Fix #2 : Dual Trail — réinitialisation cycle après BS verrouillé ──
+        // Quand le BS se déclenche en mode verrou, le cycle SELL est terminé.
+        // On remet l'état AGGRESSIVE à zéro pour que le prochain cycle reparte
+        // en NATURAL avec un contexte propre (distances symétriques).
+        if (cfg_.trailModeAuto && vLockActive_) {
+            log("[DUAL-TRAIL] BS déclenché en mode VERROU — réinitialisation cycle → NATURAL"
+                " vLockPrice=" + std::to_string(vLockPrice_)
+                + " ssProfitCache=" + std::to_string((int)ssProfitPipsCache_) + "pts");
+            dualTrailMode_      = TrailMode::NATURAL;
+            aggressiveBsTarget_ = 0.0;
+            vLockActive_        = false;
+            vLockPrice_         = 0.0;
+            ssProfitPipsCache_  = 0.0;
+        }
+
         // ── Relance immédiate du cycle ────────────────────────
         triggerFired_.store(true);
     }
@@ -1146,15 +1162,39 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
             return;   // traitement AGGRESSIVE terminé — ne pas appeler computeBuyStop
         }
 
-        // Passage de AGGRESSIVE → NATURAL : réinitialiser l'état agressif
+        // Passage de AGGRESSIVE → NATURAL : si verrou déjà activé → le maintenir sticky
+        // sinon réinitialiser la cible progressive uniquement
         if (dualTrailMode_ == TrailMode::NATURAL) {
-            bool hadLock = vLockActive_;
+            if (vLockActive_) {
+                // ── Fix #1 : Lock sticky ─────────────────────────────────────
+                // Le verrou reste actif même si le profit retombe sous le seuil.
+                // Garantit que le BS ne remonte JAMAIS au-dessus de vLockPrice_.
+                double aggressTarget = vLockPrice_;
+                double mdist2 = grid_->minDistPts();
+                if ((aggressTarget - curAsk) < mdist2)
+                    aggressTarget = math::normalize(curAsk + mdist2, cfg_.digits);
+                if (bs > 0 && !trailFrozen) {
+                    double delta = bsLevel_.load() - aggressTarget;
+                    if (delta > cfg_.point && aggressTarget > curAsk) {
+                        TradeCmd cmd;
+                        cmd.op     = TradeCmd::Op::ModifyOrder;
+                        cmd.ticket = bs;
+                        cmd.price  = math::normalize(aggressTarget, cfg_.digits);
+                        cmd.sl = 0.0; cmd.tp = 0.0;
+                        auto res = bridge_->sendCommand(cmd);
+                        if (res.success) {
+                            bsLevel_.store(cmd.price);
+                            log("BS VERROU maintenu @ " + std::to_string(cmd.price)
+                                + " [LOCK sticky — profit SS retombé sous seuil]");
+                        }
+                    }
+                }
+                return;  // lock maintenu — ne pas appeler computeBuyStop
+            }
+            // Pas de verrou actif : réinitialiser cible progressive
+            if (aggressiveBsTarget_ > 0.0)
+                log("[NATURAL] Réinitialisation cible AGGRESSIVE (pas de verrou actif)");
             aggressiveBsTarget_ = 0.0;
-            vLockActive_        = false;
-            vLockPrice_         = 0.0;
-            if (hadLock)
-                log("[AGGRESSIVE→NATURAL] Cycle réinitialisé — profit SS sous seuil "
-                    + std::to_string(cfg_.xLockPips) + "pts");
         }
     }
 
@@ -1596,6 +1636,17 @@ void TOP4EA_Engine::updateProfitLockOrders(const std::vector<OrderInfo>& orders,
     if (!cfg_.vlEnabled) return;
 
     bool changed = vlMgr_.recompute(tick, orders);
+
+    // ── Fix #3 : Intégration Dual Trail AGGRESSIVE ───────────
+    // Quand le verrou AGGRESSIVE est actif, on override le niveau V-BS
+    // du ProfitLockManager avec vLockPrice_ — le profit minimum garanti.
+    // Cela assure que l'ordre V-BS broker reflète le niveau de verrou réel
+    // et non la valeur trailing calculée par vlMgr_ (qui pourrait être plus haute).
+    if (cfg_.trailModeAuto && vLockActive_ && vLockPrice_ > 0.0) {
+        vlMgr_.overrideBSForLock(vLockPrice_);
+        changed = true;  // forcer le traitement même si vlMgr_ n'a pas changé
+    }
+
     if (!changed) return;
 
     // ── V-BS : trailing BuyStop côté SELL ────────────────────
