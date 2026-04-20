@@ -70,3 +70,21 @@ Variables d'environnement requises :
 ## Configuration (top4ea.conf)
 
 Tous les paramètres configurables sans recompilation, incluant `platform = auto|mt4|mt5`.
+
+## Système de Verrouillage Profit Trailing (V-SS / V-BS)
+
+Remplace l'ancien système break-even. Fonctionnement :
+- **V-SS** (SellStop trailing côté BUY) : s'active quand bid > avgBuy + `vl_activation_pts`. Niveau = bid - `vl_trail_pts`. Ratchet UP strict (ne descend jamais). Déclenchement → ferme toutes les Buy avec profit verrouillé.
+- **V-BS** (BuyStop trailing côté SELL) : s'active quand ask < avgSell - `vl_activation_pts`. Niveau = ask + `vl_trail_pts`. Ratchet DOWN strict (ne remonte jamais). Déclenchement → ferme toutes les Sell avec profit verrouillé.
+
+Paramètres `top4ea.conf` : `vl_enabled`, `vl_activation_pts` (défaut 50 pts), `vl_trail_pts` (défaut 30 pts).
+
+## Bugs corrigés (session courante)
+
+| Bug | Cause | Fix |
+|-----|-------|-----|
+| Duplication SS/BS via MetaApi HTTPS | POST timeout silencieux → ssTicket_=-1 → doublon | Scan `orders_` avant création, restaure ticket si doublon détecté |
+| Recovery Martingale ignorée | CascadeGuard/VisualAI bloquait l'incrément du compteur | `forceIncrementSell/Buy()` + appel toujours à `onSellStopTriggered` |
+| V-SS/V-BS lot incorrect | `baseLot` au lieu de `totalLots` | Lot = `totalLots` pour fermer tout le côté au déclenchement |
+| Break-Even → Verrouillage | Concept erroné (zéro perte) | Redesign complet : trailing ratchet profit lock (V-SS/V-BS) |
+

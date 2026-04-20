@@ -1,6 +1,18 @@
 // ============================================================
 //  TOP4EA — break_even_manager.cpp
-//  Implémentation du module Break-Even Orders (BE-BS / BE-SS)
+//  Module Verrouillage Profit Trailing — V-SS / V-BS
+//
+//  V-SS : trailing SellStop côté BUY
+//    - S'active quand bid > avgBuy + vlActivationPts × point
+//    - Niveau ratchet = bid - vlTrailPts × point
+//    - Monte avec le bid, ne descend JAMAIS
+//    - bid ≤ niveau → déclenche, ferme toutes les Buy
+//
+//  V-BS : trailing BuyStop côté SELL
+//    - S'active quand ask < avgSell - vlActivationPts × point
+//    - Niveau ratchet = ask + vlTrailPts × point
+//    - Descend avec l'ask, ne remonte JAMAIS
+//    - ask ≥ niveau → déclenche, ferme toutes les Sell
 // ============================================================
 #include "../include/break_even_manager.hpp"
 #include <cmath>
@@ -15,152 +27,175 @@ namespace top4ea {
 // ────────────────────────────────────────────────────────────
 BreakEvenManager::BreakEvenManager(const Config& cfg)
     : cfg_(cfg)
-    , changeTol_((double)cfg.beBufferPts * cfg.point / 4.0)
+    , changeTol_((double)cfg.vlTrailPts * cfg.point / 4.0)
 {}
 
 // ────────────────────────────────────────────────────────────
-//  calcSide — calcul pur du break-even d'un côté
-//  side = 0 → Buy positions  → BE-SS (sell stop en dessous)
-//  side = 1 → Sell positions → BE-BS (buy stop au dessus)
+//  updateSide — recalcul d'un côté (interne)
+//
+//  side = 0 → Buy positions  → V-SS (trailing sell stop, monte avec bid)
+//  side = 1 → Sell positions → V-BS (trailing buy stop, descend avec ask)
 // ────────────────────────────────────────────────────────────
-BECalc BreakEvenManager::calcSide(const std::vector<OrderInfo>& orders,
-                                   int side) const noexcept
+void BreakEvenManager::updateSide(int side, const Tick& tick,
+                                   const std::vector<OrderInfo>& orders) noexcept
 {
-    BECalc r;
     const OrderType target = (side == 0) ? OrderType::Buy : OrderType::Sell;
+    VLSlot& slot = (side == 0) ? ssVL_ : bsVL_;
 
-    double sumLP = 0.0;   // Σ(price × lots)
-    double sumL  = 0.0;   // Σ(lots)
-    double sumC  = 0.0;   // Σ(commission + swap) — valeurs négatives = coûts
+    double sumLP = 0.0;
+    double sumL  = 0.0;
 
     for (const auto& o : orders) {
         if (o.type != target) continue;
         if (o.lots <= 0.0)    continue;
         sumLP += o.openPrice * o.lots;
         sumL  += o.lots;
-        sumC  += o.commission + o.swap;
     }
 
-    if (sumL < 1e-6) return r;   // aucune position de ce côté
-
-    r.valid      = true;
-    r.avgEntry   = sumLP / sumL;
-    r.totalLots  = sumL;
-
-    // ── Coût commissions + swap en points ────────────────────
-    // P&L d'une position = (Δprice / point) × lots × tickValue
-    // Au break-even total : Σ P&L + sumC = 0
-    // Δprice_BE × sumL × tickValue / point = -sumC   (sumC < 0)
-    // Δprice_BE = (-sumC) / (sumL × tickValue / point)
-    //           = |sumC| × point / (sumL × tickValue)
-    double commPts = 0.0;
-    if (cfg_.tickValue > 1e-9 && sumL > 1e-6) {
-        commPts = std::abs(sumC) / (sumL * cfg_.tickValue) ;
-        // commPts est en points bruts (px/point)
-        // on le convertit en unités de prix en le gardant tel quel
-        // (le level sera avgEntry ± commPts, comme avgEntry est en prix)
+    if (sumL < 1e-6) {
+        // Aucune position de ce côté → désactiver complètement
+        if (slot.active) {
+            if (slot.ticket > 0) {
+                slot.prevTicket = slot.ticket;   // signaler la suppression à l'engine
+                slot.ticket     = -1;
+            }
+            slot = {};   // reset complet
+        }
+        return;
     }
-    // Buffer de sécurité fixe (beBufferPts) en unités de prix
-    double bufferPrice = (double)cfg_.beBufferPts * cfg_.point;
 
-    r.commCostPts = commPts + (double)cfg_.beBufferPts;  // pts totaux
+    double avgEntry  = sumLP / sumL;
+    double activPts  = (double)cfg_.vlActivationPts * cfg_.point;
+    double trailPts  = (double)cfg_.vlTrailPts      * cfg_.point;
+    double factor    = std::pow(10.0, cfg_.digits);
 
-    // ── Niveau final ──────────────────────────────────────────
-    // BE-SS (buys, side=0) : sell stop en DESSOUS de avgBuy
-    //   → trigger si prix baisse jusqu'ici = les buys couvrent leur coût
-    // BE-BS (sells, side=1) : buy stop AU DESSUS de avgSell
-    //   → trigger si prix monte jusqu'ici = les sells couvrent leur coût
+    // Mise à jour composition (toujours)
+    slot.active     = true;
+    slot.avgEntry   = avgEntry;
+    slot.totalLots  = sumL;
+
     if (side == 0) {
-        r.level = r.avgEntry - commPts * cfg_.point - bufferPrice;
+        // ── V-SS côté BUY ────────────────────────────────────
+        // Activation : bid monte suffisamment au-dessus du prix moyen
+        bool profitable = (tick.bid > avgEntry + activPts);
+
+        if (!slot.activated && profitable) {
+            // Première activation : poser le niveau initial
+            slot.activated  = true;
+            double initLvl  = std::round((tick.bid - trailPts) * factor) / factor;
+            slot.level      = initLvl;
+            slot.needsPlace = true;
+
+        } else if (slot.activated) {
+            // Déjà activé : appliquer le ratchet (level ne descend jamais)
+            double newLvl = std::round((tick.bid - trailPts) * factor) / factor;
+            if (newLvl > slot.level + changeTol_) {
+                slot.level      = newLvl;
+                slot.needsPlace = true;
+            }
+        }
+        // Si !profitable et pas encore activé → on attend
+
     } else {
-        r.level = r.avgEntry + commPts * cfg_.point + bufferPrice;
+        // ── V-BS côté SELL ───────────────────────────────────
+        // Activation : ask descend suffisamment en dessous du prix moyen
+        bool profitable = (tick.ask < avgEntry - activPts);
+
+        if (!slot.activated && profitable) {
+            // Première activation
+            slot.activated  = true;
+            double initLvl  = std::round((tick.ask + trailPts) * factor) / factor;
+            slot.level      = initLvl;
+            slot.needsPlace = true;
+
+        } else if (slot.activated) {
+            // Déjà activé : ratchet (level ne remonte jamais)
+            double newLvl = std::round((tick.ask + trailPts) * factor) / factor;
+            if (newLvl < slot.level - changeTol_) {
+                slot.level      = newLvl;
+                slot.needsPlace = true;
+            }
+        }
     }
-
-    // Normalisation au digit broker
-    double factor = std::pow(10.0, cfg_.digits);
-    r.level = std::round(r.level * factor) / factor;
-
-    return r;
 }
 
 // ────────────────────────────────────────────────────────────
-//  recompute — recalcule les deux slots et détecte les changements
+//  recompute — recalcule la composition et l'activation
+//  Appelé 1×/seconde quand les ordres sont rafraîchis.
+//  Retourne true si au moins un niveau doit être placé/modifié.
 // ────────────────────────────────────────────────────────────
-bool BreakEvenManager::recompute(const std::vector<OrderInfo>& orders) noexcept
+bool BreakEvenManager::recompute(const Tick& tick,
+                                  const std::vector<OrderInfo>& orders) noexcept
 {
-    bool changed = false;
+    bool wasSS = ssVL_.needsPlace;
+    bool wasBS = bsVL_.needsPlace;
 
-    // ── Côté Buy → BE-SS ─────────────────────────────────────
-    auto calcSS = calcSide(orders, 0);
-    if (calcSS.valid) {
-        if (!ssBE_.active || levelChanged(ssBE_.level, calcSS.level)) {
-            ssBE_.avgEntry  = calcSS.avgEntry;
-            ssBE_.totalLots = calcSS.totalLots;
-            ssBE_.level     = calcSS.level;
-            ssBE_.active    = true;
-            if (ssBE_.ticket > 0) {
-                // Invalider le ticket pour forcer un modify/replace
-                ssBE_.ticket = -1;
-            }
-            changed = true;
-        }
-    } else {
-        // Aucune position Buy → désactiver
-        if (ssBE_.active) {
-            ssBE_.active = false;
-            ssBE_.ticket = -1;
-            ssBE_.level  = 0.0;
-            changed = true;
-        }
-    }
+    updateSide(0, tick, orders);   // V-SS
+    updateSide(1, tick, orders);   // V-BS
 
-    // ── Côté Sell → BE-BS ────────────────────────────────────
-    auto calcBS = calcSide(orders, 1);
-    if (calcBS.valid) {
-        if (!bsBE_.active || levelChanged(bsBE_.level, calcBS.level)) {
-            bsBE_.avgEntry  = calcBS.avgEntry;
-            bsBE_.totalLots = calcBS.totalLots;
-            bsBE_.level     = calcBS.level;
-            bsBE_.active    = true;
-            if (bsBE_.ticket > 0) {
-                bsBE_.ticket = -1;
-            }
-            changed = true;
-        }
-    } else {
-        if (bsBE_.active) {
-            bsBE_.active = false;
-            bsBE_.ticket = -1;
-            bsBE_.level  = 0.0;
-            changed = true;
-        }
-    }
-
-    return changed;
+    return ssVL_.needsPlace != wasSS
+        || bsVL_.needsPlace != wasBS
+        || ssVL_.needsPlace
+        || bsVL_.needsPlace;
 }
 
 // ────────────────────────────────────────────────────────────
-//  checkTrigger — détection tick-level (aucune gate HTTP)
-//  Retourne le côté déclenché en priorité au plus proche
+//  applyTick — ratchet pur à chaque tick
+//  Ultra-rapide : pas de boucle sur les ordres.
+//  Applique seulement le ratchet si le slot est déjà activé.
+//  Retourne true si au moins un niveau a bougé assez.
+// ────────────────────────────────────────────────────────────
+bool BreakEvenManager::applyTick(const Tick& tick) noexcept
+{
+    bool moved = false;
+    double factor = std::pow(10.0, cfg_.digits);
+    double trailPts = (double)cfg_.vlTrailPts * cfg_.point;
+
+    // ── V-SS ratchet (monte seulement) ───────────────────────
+    if (ssVL_.activated && ssVL_.active) {
+        double newLvl = std::round((tick.bid - trailPts) * factor) / factor;
+        if (newLvl > ssVL_.level + changeTol_) {
+            ssVL_.level      = newLvl;
+            ssVL_.needsPlace = true;
+            moved            = true;
+        }
+    }
+
+    // ── V-BS ratchet (descend seulement) ─────────────────────
+    if (bsVL_.activated && bsVL_.active) {
+        double newLvl = std::round((tick.ask + trailPts) * factor) / factor;
+        if (newLvl < bsVL_.level - changeTol_) {
+            bsVL_.level      = newLvl;
+            bsVL_.needsPlace = true;
+            moved            = true;
+        }
+    }
+
+    return moved;
+}
+
+// ────────────────────────────────────────────────────────────
+//  checkTrigger — détection crossing tick-level (sans gate HTTP)
+//  Priorité au côté le plus proche du mid si les deux déclenchent.
 // ────────────────────────────────────────────────────────────
 int BreakEvenManager::checkTrigger(const Tick& tick) const noexcept
 {
-    // BE-SS : bid descend sous le niveau (buys à break-even)
-    bool ssFired = ssBE_.active && ssBE_.level > 0.0
-                   && tick.bid <= ssBE_.level;
+    // V-SS : bid ≤ niveau → les Buy sont à l'objectif de profit
+    bool ssFired = ssVL_.activated && ssVL_.level > 0.0
+                   && tick.bid <= ssVL_.level;
 
-    // BE-BS : ask monte au-dessus du niveau (sells à break-even)
-    bool bsFired = bsBE_.active && bsBE_.level > 0.0
-                   && tick.ask >= bsBE_.level;
+    // V-BS : ask ≥ niveau → les Sell sont à l'objectif de profit
+    bool bsFired = bsVL_.activated && bsVL_.level > 0.0
+                   && tick.ask >= bsVL_.level;
 
     if (!ssFired && !bsFired) return 0;
     if (ssFired  && !bsFired) return 1;
     if (!ssFired && bsFired)  return 2;
 
-    // Les deux déclenchés : prioriser le plus proche du mid
-    double mid  = (tick.bid + tick.ask) * 0.5;
-    double dSS  = std::abs(mid - ssBE_.level);
-    double dBS  = std::abs(mid - bsBE_.level);
+    // Les deux déclenchés simultanément : prioriser le plus proche du mid
+    double mid = (tick.bid + tick.ask) * 0.5;
+    double dSS = std::abs(mid - ssVL_.level);
+    double dBS = std::abs(mid - bsVL_.level);
     return (dSS <= dBS) ? 1 : 2;
 }
 
@@ -168,28 +203,25 @@ int BreakEvenManager::checkTrigger(const Tick& tick) const noexcept
 //  Gestion des tickets
 // ────────────────────────────────────────────────────────────
 void BreakEvenManager::setSSTicket(int ticket, double level) noexcept {
-    ssBE_.ticket = ticket;
-    ssBE_.level  = level;
+    ssVL_.ticket     = ticket;
+    ssVL_.level      = level;
+    ssVL_.needsPlace = false;
+    ssVL_.prevTicket = -1;
 }
 
 void BreakEvenManager::setBSTicket(int ticket, double level) noexcept {
-    bsBE_.ticket = ticket;
-    bsBE_.level  = level;
+    bsVL_.ticket     = ticket;
+    bsVL_.level      = level;
+    bsVL_.needsPlace = false;
+    bsVL_.prevTicket = -1;
 }
 
 // ────────────────────────────────────────────────────────────
 //  Reset
 // ────────────────────────────────────────────────────────────
-void BreakEvenManager::resetSS() noexcept {
-    ssBE_ = {};
-}
-void BreakEvenManager::resetBS() noexcept {
-    bsBE_ = {};
-}
-void BreakEvenManager::reset() noexcept {
-    ssBE_ = {};
-    bsBE_ = {};
-}
+void BreakEvenManager::resetSS() noexcept { ssVL_ = {}; }
+void BreakEvenManager::resetBS() noexcept { bsVL_ = {}; }
+void BreakEvenManager::reset()   noexcept { ssVL_ = {}; bsVL_ = {}; }
 
 // ────────────────────────────────────────────────────────────
 //  Rapport dashboard
@@ -197,21 +229,28 @@ void BreakEvenManager::reset() noexcept {
 std::string BreakEvenManager::report() const noexcept {
     std::ostringstream oss;
     oss << std::fixed << std::setprecision(2);
-    if (bsBE_.active && bsBE_.level > 0.0)
-        oss << "BE-BS@" << bsBE_.level
-            << "(avg=" << bsBE_.avgEntry << " L=" << bsBE_.totalLots << ")  ";
+    if (bsVL_.activated && bsVL_.level > 0.0)
+        oss << "V-BS@" << std::setprecision(5) << bsVL_.level
+            << "(avgSell=" << bsVL_.avgEntry
+            << " L=" << std::setprecision(2) << bsVL_.totalLots << ")  ";
+    else if (bsVL_.active)
+        oss << "V-BS:en_attente_activation  ";
     else
-        oss << "BE-BS:inactif  ";
-    if (ssBE_.active && ssBE_.level > 0.0)
-        oss << "BE-SS@" << ssBE_.level
-            << "(avg=" << ssBE_.avgEntry << " L=" << ssBE_.totalLots << ")";
+        oss << "V-BS:inactif  ";
+
+    if (ssVL_.activated && ssVL_.level > 0.0)
+        oss << "V-SS@" << std::setprecision(5) << ssVL_.level
+            << "(avgBuy=" << ssVL_.avgEntry
+            << " L=" << std::setprecision(2) << ssVL_.totalLots << ")";
+    else if (ssVL_.active)
+        oss << "V-SS:en_attente_activation";
     else
-        oss << "BE-SS:inactif";
+        oss << "V-SS:inactif";
     return oss.str();
 }
 
 // ────────────────────────────────────────────────────────────
-//  levelChanged — seuil minimum pour invalider un tick d'ordre
+//  levelChanged — seuil de changement significatif
 // ────────────────────────────────────────────────────────────
 bool BreakEvenManager::levelChanged(double oldLevel,
                                      double newLevel) const noexcept

@@ -1,26 +1,27 @@
 #pragma once
 // ============================================================
-//  TOP4EA — break_even_manager.hpp
-//  Module Break-Even Orders — BE-BS et BE-SS
+//  TOP4EA — break_even_manager.hpp  (rebaptisé Verrouillage Profit)
+//  Module Verrouillage Profit Trailing — V-BS et V-SS
 //
-//  Principe :
-//    BE-BS (Buy Stop côté SELL) :
-//      Placé au prix moyen pondéré de toutes les positions Sell
-//      + buffer (commissions + marge de sécurité).
-//      Quand le prix remonte jusqu'ici → les Sells sont à l'équilibre
-//      → le moteur ferme le côté Sell au marché (zéro perte).
+//  Principe (différent du break-even classique) :
 //
-//    BE-SS (Sell Stop côté BUY) :
-//      Placé au prix moyen pondéré de toutes les positions Buy
-//      - buffer.
-//      Quand le prix descend jusqu'ici → les Buys sont à l'équilibre
-//      → le moteur ferme le côté Buy au marché (zéro perte).
+//    V-SS (Sell Stop Trailing, côté BUY) :
+//      S'active quand les Buy sont en profit ≥ vlActivationPts.
+//      Niveau = bid - vlTrailPts — suit le bid À LA HAUSSE uniquement.
+//      Ratchet strict : le niveau MONTE avec le bid, ne descend JAMAIS.
+//      Déclenchement (bid ≤ niveau) → ferme toutes les Buy = profit verrouillé.
 //
-//  Architecture modulaire :
-//    - Indépendant du moteur de recovery
-//    - Mis à jour à chaque changement de composition du panier
-//    - Détection de crossing au niveau tick (non soumise à la gate HTTP)
-//    - Ordres BE placés sur le broker (visuel + fallback si déconnexion)
+//    V-BS (Buy Stop Trailing, côté SELL) :
+//      S'active quand les Sell sont en profit ≥ vlActivationPts.
+//      Niveau = ask + vlTrailPts — suit l'ask À LA BAISSE uniquement.
+//      Ratchet strict : le niveau DESCEND avec l'ask, ne remonte JAMAIS.
+//      Déclenchement (ask ≥ niveau) → ferme toutes les Sell = profit verrouillé.
+//
+//  Architecture :
+//    - recompute(tick, orders) : recalcule avgEntry + gère l'activation initiale
+//    - applyTick(tick)         : applique le ratchet à chaque tick (ultra-rapide)
+//    - checkTrigger(tick)      : détecte le déclenchement (aucune gate HTTP)
+//    - Les ordres broker V-SS/V-BS sont placés pour visibilité + fallback
 // ============================================================
 #include "types.hpp"
 #include <vector>
@@ -29,62 +30,59 @@
 
 namespace top4ea {
 
-// ─── Résultat du calcul break-even pour un côté ─────────────
-struct BECalc {
-    bool   valid        = false;
-    double avgEntry     = 0.0;   // prix moyen pondéré du côté
-    double totalLots    = 0.0;   // lots cumulés du côté
-    double commCostPts  = 0.0;   // coût commissions+swaps en points
-    double level        = 0.0;   // niveau à placer (avgEntry ± buffer)
+// ─── Slot d'un ordre Verrouillage ───────────────────────────
+struct VLSlot {
+    int    ticket     = -1;    // ticket broker de l'ordre stop pending (-1 = aucun)
+    int    prevTicket = -1;    // ticket à supprimer avant de placer le nouveau
+    double level      = 0.0;   // niveau courant du ratchet (= niveau du stop broker)
+    double avgEntry   = 0.0;   // prix moyen pondéré du côté (mis à jour par recompute)
+    double totalLots  = 0.0;   // lots cumulés du côté
+    bool   active     = false; // des positions de ce côté existent
+    bool   activated  = false; // seuil d'activation atteint (profit ≥ vlActivationPts)
+    bool   needsPlace = false; // ordre à placer ou modifier sur le broker
 };
 
 // ============================================================
-//  BreakEvenManager
+//  BreakEvenManager — repurposé en ProfitLockManager (V-SS/V-BS)
+//  Le nom de classe est conservé pour éviter de casser les includes.
 // ============================================================
 class BreakEvenManager {
 public:
-    // ─── Slot d'ordre BE ─────────────────────────────────────
-    struct BESlot {
-        int    ticket    = -1;
-        double level     = 0.0;    // niveau placé sur broker
-        double avgEntry  = 0.0;    // prix moyen au moment du calcul
-        double totalLots = 0.0;
-        bool   active    = false;  // slot en service
-    };
-
     explicit BreakEvenManager(const Config& cfg);
 
-    // ─── Recalcul des niveaux ────────────────────────────────
-    // Analyse les positions marché courantes et recalcule avgEntry
-    // + niveau BE pour chaque côté.
-    // Retourne vrai si au moins un niveau a bougé au-delà du seuil.
-    bool recompute(const std::vector<OrderInfo>& orders) noexcept;
+    // ─── Recalcul composition ────────────────────────────────
+    // Appelé quand les ordres changent (1×/seconde via fetchOrders).
+    // Recalcule avgEntry, totalLots, et gère l'activation initiale.
+    // Retourne true si un ordre broker doit être placé/modifié.
+    bool recompute(const Tick& tick,
+                   const std::vector<OrderInfo>& orders) noexcept;
 
-    // ─── Calcul statique ─────────────────────────────────────
-    // Peut être utilisé en dehors du cycle normal (ex: avant placement)
-    [[nodiscard]] BECalc calcSide(const std::vector<OrderInfo>& orders,
-                                  int side) const noexcept;
-    // side = 0 : positions Buy  → BE-SS en dessous
-    // side = 1 : positions Sell → BE-BS au dessus
+    // ─── Ratchet tick-level ──────────────────────────────────
+    // Appelé à CHAQUE tick — ultra-rapide (pas de boucle orders).
+    // Applique le ratchet : V-SS monte avec bid, V-BS descend avec ask.
+    // Retourne true si le niveau a bougé assez pour modifier l'ordre broker.
+    bool applyTick(const Tick& tick) noexcept;
 
-    // ─── Détection de crossing (appelée à chaque tick) ───────
-    // Retourne 0 = rien | 1 = BE-SS franchi | 2 = BE-BS franchi
-    // (priorité au côté le plus proche du prix)
+    // ─── Détection de déclenchement (chaque tick) ────────────
+    // 0 = rien | 1 = V-SS franchi (fermer BUY) | 2 = V-BS franchi (fermer SELL)
     [[nodiscard]] int checkTrigger(const Tick& tick) const noexcept;
 
-    // ─── Gestion des tickets broker ─────────────────────────
+    // ─── Gestion tickets broker ──────────────────────────────
     void setSSTicket(int ticket, double level) noexcept;
     void setBSTicket(int ticket, double level) noexcept;
+    void clearSSNeedsPlace() noexcept { ssVL_.needsPlace = false; }
+    void clearBSNeedsPlace() noexcept { bsVL_.needsPlace = false; }
 
-    // ─── Accesseurs ──────────────────────────────────────────
-    [[nodiscard]] const BESlot& ssBE() const noexcept { return ssBE_; }
-    [[nodiscard]] const BESlot& bsBE() const noexcept { return bsBE_; }
+    // ─── Accesseurs (compat engine) ──────────────────────────
+    // Noms conservés pour compatibilité (ssBE → ssVL, bsBE → bsVL)
+    [[nodiscard]] const VLSlot& ssBE() const noexcept { return ssVL_; }
+    [[nodiscard]] const VLSlot& bsBE() const noexcept { return bsVL_; }
 
-    [[nodiscard]] double ssLevel() const noexcept { return ssBE_.level; }
-    [[nodiscard]] double bsLevel() const noexcept { return bsBE_.level; }
+    [[nodiscard]] double ssLevel() const noexcept { return ssVL_.level; }
+    [[nodiscard]] double bsLevel() const noexcept { return bsVL_.level; }
 
-    [[nodiscard]] bool ssActive() const noexcept { return ssBE_.active; }
-    [[nodiscard]] bool bsActive() const noexcept { return bsBE_.active; }
+    [[nodiscard]] bool ssActive() const noexcept { return ssVL_.activated; }
+    [[nodiscard]] bool bsActive() const noexcept { return bsVL_.activated; }
 
     // ─── Reset ───────────────────────────────────────────────
     void resetSS() noexcept;
@@ -95,16 +93,17 @@ public:
     [[nodiscard]] std::string report() const noexcept;
 
 private:
+    // Helpers internes
+    void updateSide(int side, const Tick& tick,
+                    const std::vector<OrderInfo>& orders) noexcept;
     [[nodiscard]] bool levelChanged(double oldLevel,
                                     double newLevel) const noexcept;
 
     Config  cfg_;
-    BESlot  ssBE_;   // BE-SS → protège positions Buy
-    BESlot  bsBE_;   // BE-BS → protège positions Sell
+    VLSlot  ssVL_;   // V-SS → trailing stop côté BUY (monte avec le bid)
+    VLSlot  bsVL_;   // V-BS → trailing stop côté SELL (descend avec l'ask)
 
-    // Seuil de changement pour éviter les mises à jour inutiles
-    // (= beBufferPts / 4 points en prix)
-    double  changeTol_ = 0.0;
+    double  changeTol_ = 0.0;   // seuil minimum de déplacement pour mise à jour broker
 };
 
 } // namespace top4ea

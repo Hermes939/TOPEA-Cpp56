@@ -113,6 +113,13 @@ public:
         return rollingKelly_.count();
     }
 
+    // ─── Incrément forcé ────────────────────────────────────
+    // Utilisé quand le broker a exécuté un stop (position réelle ouverte)
+    // mais que CascadeGuard a bloqué l'incrément automatique.
+    // Garantit que le compteur reflète le nombre réel de niveaux de recovery.
+    void forceIncrementSell() noexcept { ++sellCount_; }
+    void forceIncrementBuy()  noexcept { ++buyCount_;  }
+
     // ─── Reset ──────────────────────────────────────────────
     void reset()     noexcept;
     void resetSell() noexcept { sellCount_.store(0); }

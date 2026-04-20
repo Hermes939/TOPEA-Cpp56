@@ -107,15 +107,16 @@ private:
     void closeWavePartial(int wave);  // wave 0=Wave1(50%) wave 1=Wave2(30%)
     void closeOneSide(int sideType);
 
-    // ─── Break-Even Orders ───────────────────────────────────
-    // Met à jour les ordres BE-BS et BE-SS sur le broker
-    // d'après la composition courante du panier (positions marché).
-    void updateBreakEvenOrders(const std::vector<OrderInfo>& orders);
+    // ─── Verrouillage Profit Trailing (V-SS / V-BS) ─────────
+    // Met à jour les ordres V-BS et V-SS sur le broker
+    // d'après la composition et le tick courant (ratchet trailing).
+    void updateProfitLockOrders(const std::vector<OrderInfo>& orders,
+                                const Tick& tick);
 
-    // Ferme un côté au marché quand son niveau BE est atteint
-    // side=0 → ferme positions Buy (BE-SS déclenché)
-    // side=1 → ferme positions Sell (BE-BS déclenché)
-    void closeSideAtBE(int side);
+    // Ferme un côté au marché quand son niveau V est atteint
+    // side=0 → ferme positions Buy (V-SS déclenché, profit verrouillé)
+    // side=1 → ferme positions Sell (V-BS déclenché, profit verrouillé)
+    void closeSideAtVL(int side);
 
     [[nodiscard]] std::vector<OrderInfo> fetchOrders();
     [[nodiscard]] double basketProfit(

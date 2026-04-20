@@ -394,10 +394,10 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
     //    à des ordres réels côté broker, corrige silencieusement si décalage.
     syncTriggersFallback(orders);
 
-    // 7b. Mise à jour des ordres Break-Even (BE-BS / BE-SS)
-    //     Recalcule les niveaux si la composition du panier a changé
-    //     et place/modifie les ordres BE sur le broker.
-    updateBreakEvenOrders(orders);
+    // 7b. Mise à jour des ordres Verrouillage Profit (V-BS / V-SS)
+    //     Recalcule avgEntry + ratchet si la composition du panier a changé.
+    //     Place/modifie les ordres stop trailing V sur le broker.
+    updateProfitLockOrders(orders, tick);
 
     // 8. Analyse intelligence profonde (1×/seconde — données fraîches)
     {
@@ -545,27 +545,32 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
     // ── Lecture décision Visual AI (thread-safe via getter) ───
     VisualDecision vdNow = marketIntel_->getLastDecision();
 
-    // ── [BE] Break-Even : vérification avant la logique recovery ─
-    // Priorité : si un niveau BE est franchi → fermeture côté marché
-    // immédiate AVANT tout nouveau recovery (protège le capital).
-    if (cfg_.beEnabled) {
-        int beTrig = beMgr_.checkTrigger(tick);
-        if (beTrig == 1) {
-            log("[BE] BE-SS franchi @ bid=" + std::to_string(tick.bid)
-                + " ≤ BE-SS=" + std::to_string(beMgr_.ssLevel())
-                + " → fermeture côté BUY au marché (break-even)");
+    // ── [VL] Verrouillage Profit Trailing — priorité maximale ──
+    // Le ratchet est appliqué à chaque tick avant la logique recovery.
+    // Si un niveau de verrouillage est franchi → fermeture immédiate côté marché.
+    if (cfg_.vlEnabled) {
+        // Ratchet tick-level : fait monter V-SS et descendre V-BS avec le prix
+        if (beMgr_.applyTick(tick)) {
+            // Niveau ratchet a bougé : l'engine mettra à jour les ordres broker
+            // lors du prochain cycle fetchOrders (pas d'action HTTP ici)
+        }
+        int vlTrig = beMgr_.checkTrigger(tick);
+        if (vlTrig == 1) {
+            log("[VL] V-SS franchi @ bid=" + std::to_string(tick.bid)
+                + " ≤ V-SS=" + std::to_string(beMgr_.ssLevel())
+                + " → fermeture côté BUY (profit verrouillé)");
             beMgr_.resetSS();
             triggerFired_.store(true);
-            closeSideAtBE(0);   // ferme toutes les positions Buy
+            closeSideAtVL(0);   // ferme toutes les positions Buy avec profit
             return;
         }
-        if (beTrig == 2) {
-            log("[BE] BE-BS franchi @ ask=" + std::to_string(tick.ask)
-                + " ≥ BE-BS=" + std::to_string(beMgr_.bsLevel())
-                + " → fermeture côté SELL au marché (break-even)");
+        if (vlTrig == 2) {
+            log("[VL] V-BS franchi @ ask=" + std::to_string(tick.ask)
+                + " ≥ V-BS=" + std::to_string(beMgr_.bsLevel())
+                + " → fermeture côté SELL (profit verrouillé)");
             beMgr_.resetBS();
             triggerFired_.store(true);
-            closeSideAtBE(1);   // ferme toutes les positions Sell
+            closeSideAtVL(1);   // ferme toutes les positions Sell avec profit
             return;
         }
     }
@@ -581,13 +586,30 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
         ssTicket_.store(-1);  // empêche tout re-déclenchement sur le tick suivant
         ssLevel_ = 0.0;       // sera recalculé géométriquement par trailGrid()
 
-        // ── Audit Visual AI — autorisation recovery ────────────
+        // ── BUG FIX MARTINGALE ────────────────────────────────
+        // Le broker a TOUJOURS exécuté ce SS (position Sell ouverte).
+        // On appelle TOUJOURS onSellStopTriggered pour enregistrer le niveau
+        // dans le RecoveryEngine et incrémenter le compteur Martingale.
+        // Si CascadeGuard bloque l'incrément automatique → on force l'incrément
+        // car la position est réelle et le prochain lot DOIT progresser.
+        // Le Visual AI décide seulement si on place un NOUVEAU SS recovery.
+        auto res = recovery_->onSellStopTriggered(triggeredAt, gap);
+        if (res.action == TriggerResult::Action::Blocked) {
+            // CascadeGuard a bloqué : forcer quand même l'incrément
+            // (position Sell réelle ouverte → compte doit refléter la réalité)
+            recovery_->forceIncrementSell();
+            log("[Recovery] SS broker exécuté — Martingale forcée malgré CascadeGuard"
+                " count=" + std::to_string(recovery_->sellCount()));
+        }
+
         if (!vdNow.allowRecovery) {
-            log("[AUDIT] Recovery SS bloqué par Visual AI"
+            // Visual AI bloque le nouveau SS recovery (sécurité directionnelle)
+            // Le compteur est déjà incrémenté → lot correct au prochain SS
+            log("[AUDIT] Nouveau SS recovery bloqué par Visual AI"
                 " score=" + std::to_string((int)vdNow.recoveryScore)
-                + " raison=" + vdNow.recoveryReason);
+                + " raison=" + vdNow.recoveryReason
+                + " | Martingale count=" + std::to_string(recovery_->sellCount()));
         } else {
-            auto res = recovery_->onSellStopTriggered(triggeredAt, gap);
             if (res.action == TriggerResult::Action::NewRecovery)
                 state_.store(EAState::Recovery);
             else if (res.action == TriggerResult::Action::CloseOneSide)
@@ -607,13 +629,22 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
         bsTicket_.store(-1);
         bsLevel_ = 0.0;
 
-        // ── Audit Visual AI — autorisation recovery ────────────
+        // ── BUG FIX MARTINGALE ────────────────────────────────
+        // Même logique : le broker a toujours exécuté ce BS.
+        // Incrément forcé si CascadeGuard bloque pour préserver la Martingale.
+        auto res = recovery_->onBuyStopTriggered(triggeredAt, gap);
+        if (res.action == TriggerResult::Action::Blocked) {
+            recovery_->forceIncrementBuy();
+            log("[Recovery] BS broker exécuté — Martingale forcée malgré CascadeGuard"
+                " count=" + std::to_string(recovery_->buyCount()));
+        }
+
         if (!vdNow.allowRecovery) {
-            log("[AUDIT] Recovery BS bloqué par Visual AI"
+            log("[AUDIT] Nouveau BS recovery bloqué par Visual AI"
                 " score=" + std::to_string((int)vdNow.recoveryScore)
-                + " raison=" + vdNow.recoveryReason);
+                + " raison=" + vdNow.recoveryReason
+                + " | Martingale count=" + std::to_string(recovery_->buyCount()));
         } else {
-            auto res = recovery_->onBuyStopTriggered(triggeredAt, gap);
             if (res.action == TriggerResult::Action::NewRecovery)
                 state_.store(EAState::Recovery);
             else if (res.action == TriggerResult::Action::CloseOneSide)
@@ -779,6 +810,28 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
                                    bool trailFrozen) {
     int ss = ssTicket_.load();
 
+    // ── BUG FIX ANTI-DUPLICATION (MetaApi HTTPS) ─────────────
+    // Si ssTicket_=-1 (ticket inconnu : POST timeout silencieux, reconnexion…)
+    // mais qu'un SellStop non-BE existe dans le cache broker → restaurer le ticket
+    // pour éviter de créer un doublon sur le broker.
+    if (ss <= 0) {
+        std::vector<OrderInfo> ordCache;
+        { std::lock_guard lk2(ordersMu_); ordCache = orders_; }
+        for (const auto& o : ordCache) {
+            bool isBE = o.comment.find(":BE_") != std::string::npos;
+            if (!isBE && o.type == OrderType::SellStop) {
+                ssTicket_.store(o.ticket);
+                ssLevel_     = o.openPrice;
+                ssCreatedAt_ = Clock::now();   // réinitialiser le garde
+                log("[Guard-SS] Anti-doublon : SS existant restauré ticket="
+                    + std::to_string(o.ticket)
+                    + " @ " + std::to_string(o.openPrice));
+                ss = o.ticket;   // recharger pour la suite
+                break;
+            }
+        }
+    }
+
     // Ancrage géométrique pur : passe gridOrigin_ comme référence fixe
     // Le niveau est toujours à origin - (depth+1) × GridGap × factor
     auto pl = grid_->computeSellStop(ss, ssLevel_, gridOrigin_, recovDepth, gapFactor);
@@ -856,6 +909,27 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
                                   int recovDepth, double gapFactor,
                                   bool trailFrozen) {
     int bs = bsTicket_.load();
+
+    // ── BUG FIX ANTI-DUPLICATION (MetaApi HTTPS) ─────────────
+    // Si bsTicket_=-1 mais qu'un BuyStop non-BE existe dans le cache broker
+    // → restaurer le ticket pour éviter de créer un doublon.
+    if (bs <= 0) {
+        std::vector<OrderInfo> ordCache;
+        { std::lock_guard lk2(ordersMu_); ordCache = orders_; }
+        for (const auto& o : ordCache) {
+            bool isBE = o.comment.find(":BE_") != std::string::npos;
+            if (!isBE && o.type == OrderType::BuyStop) {
+                bsTicket_.store(o.ticket);
+                bsLevel_     = o.openPrice;
+                bsCreatedAt_ = Clock::now();
+                log("[Guard-BS] Anti-doublon : BS existant restauré ticket="
+                    + std::to_string(o.ticket)
+                    + " @ " + std::to_string(o.openPrice));
+                bs = o.ticket;
+                break;
+            }
+        }
+    }
 
     // Ancrage géométrique pur : passe gridOrigin_ comme référence fixe
     // Le niveau est toujours à origin + (depth+1) × GridGap × factor
@@ -1168,91 +1242,118 @@ void TOP4EA_Engine::closeOneSide(int sideType) {
 }
 
 // ────────────────────────────────────────────────────────────
-//  updateBreakEvenOrders — place/met à jour les ordres BE-BS/BE-SS
+//  updateProfitLockOrders — place/modifie les ordres V-BS / V-SS
 //  Appelé 1×/seconde après fetchOrders() depuis processTick.
-//  Priorité de protection :
-//    BE-BS (above sells) → si prix remonte aux sells → fermeture côté SELL
-//    BE-SS (below buys)  → si prix descend aux buys  → fermeture côté BUY
+//
+//  Logique :
+//    beMgr_.recompute(tick, orders) recalcule avgEntry et applique le ratchet.
+//    Si needsPlace=true pour un slot :
+//      - Si ticket broker existant  → ORDER_MODIFY (déplacer le stop au nouveau niveau)
+//      - Sinon                      → créer nouvel ordre pending avec lot=totalLots
+//    Le lot = totalLots pour fermer TOUT le côté au déclenchement.
 // ────────────────────────────────────────────────────────────
-void TOP4EA_Engine::updateBreakEvenOrders(const std::vector<OrderInfo>& orders) {
-    if (!cfg_.beEnabled) return;
+void TOP4EA_Engine::updateProfitLockOrders(const std::vector<OrderInfo>& orders,
+                                            const Tick& tick) {
+    if (!cfg_.vlEnabled) return;
 
-    bool changed = beMgr_.recompute(orders);
+    bool changed = beMgr_.recompute(tick, orders);
     if (!changed) return;
 
-    Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
-
-    // ── BE-BS : buy stop au-dessus des positions SELL ─────────
+    // ── V-BS : trailing BuyStop côté SELL ────────────────────
+    // Level descend avec l'ask (ratchet DOWN). Ticket sur broker pour visibilité.
     const auto& bsSlot = beMgr_.bsBE();
-    if (bsSlot.active && bsSlot.level > 0.0) {
-        // Supprimer l'ancien ordre BE-BS si existant et niveau a changé
+    if (bsSlot.activated && bsSlot.level > 0.0 && bsSlot.needsPlace) {
+        // Supprimer l'ancien ordre avant de placer le nouveau (évite doublon)
         if (bsSlot.ticket > 0) {
             bridge_->sendCommand(makeDelete(bsSlot.ticket));
         }
-        // Vérifier que le niveau est au-dessus du prix courant
-        if (bsSlot.level > t.ask) {
+        // Valider le niveau : V-BS doit être au-dessus du prix courant (ask)
+        if (bsSlot.level > tick.ask) {
+            double vlLot = std::max(bsSlot.totalLots, cfg_.baseLot);
+            vlLot = std::min(vlLot, cfg_.volumeMax);
+            vlLot = std::max(std::round(vlLot / cfg_.volumeStep) * cfg_.volumeStep,
+                             cfg_.volumeMin);
             TradeCmd cmd;
             cmd.op      = TradeCmd::Op::MarketOrder;
             cmd.type    = OrderType::BuyStop;
-            cmd.lots    = cfg_.baseLot;
+            cmd.lots    = vlLot;
             cmd.price   = bsSlot.level;
             cmd.slippage= cfg_.slippage;
             cmd.magic   = cfg_.magic;
             cmd.symbol  = cfg_.symbol;
-            cmd.comment = cfg_.symbol + ":BE_BS #" + std::to_string(++orderCounter_);
+            cmd.comment = cfg_.symbol + ":V_BS #" + std::to_string(++orderCounter_);
             auto res = bridge_->sendCommand(cmd);
             if (res.success) {
                 beMgr_.setBSTicket(res.ticket, bsSlot.level);
-                log("[BE] BE-BS placé @ " + std::to_string(bsSlot.level)
+                log("[VL] V-BS placé/mis à jour @ " + std::to_string(bsSlot.level)
                     + " (avgSell=" + std::to_string(bsSlot.avgEntry)
-                    + " L=" + std::to_string(bsSlot.totalLots) + ")");
+                    + " L=" + std::to_string(vlLot)
+                    + " totalSellLots=" + std::to_string(bsSlot.totalLots) + ")");
+            } else {
+                beMgr_.clearBSNeedsPlace();
             }
+        } else {
+            log("[VL] V-BS ignoré : niveau " + std::to_string(bsSlot.level)
+                + " ≤ ask " + std::to_string(tick.ask) + " (pas encore en profit suffisant)");
+            beMgr_.clearBSNeedsPlace();
         }
     }
 
-    // ── BE-SS : sell stop en dessous des positions BUY ────────
+    // ── V-SS : trailing SellStop côté BUY ────────────────────
+    // Level monte avec le bid (ratchet UP). Ticket sur broker pour visibilité.
     const auto& ssSlot = beMgr_.ssBE();
-    if (ssSlot.active && ssSlot.level > 0.0) {
+    if (ssSlot.activated && ssSlot.level > 0.0 && ssSlot.needsPlace) {
         if (ssSlot.ticket > 0) {
             bridge_->sendCommand(makeDelete(ssSlot.ticket));
         }
-        // Vérifier que le niveau est en dessous du prix courant
-        if (ssSlot.level < t.bid) {
+        // Valider le niveau : V-SS doit être en dessous du prix courant (bid)
+        if (ssSlot.level < tick.bid) {
+            double vlLot = std::max(ssSlot.totalLots, cfg_.baseLot);
+            vlLot = std::min(vlLot, cfg_.volumeMax);
+            vlLot = std::max(std::round(vlLot / cfg_.volumeStep) * cfg_.volumeStep,
+                             cfg_.volumeMin);
             TradeCmd cmd;
             cmd.op      = TradeCmd::Op::MarketOrder;
             cmd.type    = OrderType::SellStop;
-            cmd.lots    = cfg_.baseLot;
+            cmd.lots    = vlLot;
             cmd.price   = ssSlot.level;
             cmd.slippage= cfg_.slippage;
             cmd.magic   = cfg_.magic;
             cmd.symbol  = cfg_.symbol;
-            cmd.comment = cfg_.symbol + ":BE_SS #" + std::to_string(++orderCounter_);
+            cmd.comment = cfg_.symbol + ":V_SS #" + std::to_string(++orderCounter_);
             auto res = bridge_->sendCommand(cmd);
             if (res.success) {
                 beMgr_.setSSTicket(res.ticket, ssSlot.level);
-                log("[BE] BE-SS placé @ " + std::to_string(ssSlot.level)
+                log("[VL] V-SS placé/mis à jour @ " + std::to_string(ssSlot.level)
                     + " (avgBuy=" + std::to_string(ssSlot.avgEntry)
-                    + " L=" + std::to_string(ssSlot.totalLots) + ")");
+                    + " L=" + std::to_string(vlLot)
+                    + " totalBuyLots=" + std::to_string(ssSlot.totalLots) + ")");
+            } else {
+                beMgr_.clearSSNeedsPlace();
             }
+        } else {
+            log("[VL] V-SS ignoré : niveau " + std::to_string(ssSlot.level)
+                + " ≥ bid " + std::to_string(tick.bid) + " (pas encore en profit suffisant)");
+            beMgr_.clearSSNeedsPlace();
         }
     }
 }
 
 // ────────────────────────────────────────────────────────────
-//  closeSideAtBE — fermeture au marché d'un côté (break-even atteint)
-//  side=0 → ferme toutes les positions Buy
-//  side=1 → ferme toutes les positions Sell
-//  Appelé depuis detectGeometricTriggers quand niveau BE est franchi.
+//  closeSideAtVL — fermeture au marché d'un côté (profit verrouillé)
+//  side=0 → ferme toutes les positions Buy (V-SS déclenché)
+//  side=1 → ferme toutes les positions Sell (V-BS déclenché)
+//  Appelé depuis detectGeometricTriggers quand niveau VL est franchi.
 // ────────────────────────────────────────────────────────────
-void TOP4EA_Engine::closeSideAtBE(int side) {
-    // Supprimer les ordres stops en attente (SS et BS) pour libérer la marge
+void TOP4EA_Engine::closeSideAtVL(int side) {
+    // Supprimer les ordres stops de grille (SS et BS) pour libérer la marge
     int ss = ssTicket_.load();
     int bs = bsTicket_.load();
     if (ss > 0) { bridge_->sendCommand(makeDelete(ss)); ssTicket_.store(-1); ssLevel_ = 0.0; }
     if (bs > 0) { bridge_->sendCommand(makeDelete(bs)); bsTicket_.store(-1); bsLevel_ = 0.0; }
 
-    // Supprimer aussi l'ordre BE opposé (inutile une fois le côté fermé)
-    const auto& oppSlot = (side == 0) ? beMgr_.ssBE() : beMgr_.bsBE();
+    // Supprimer l'ordre V opposé (plus utile une fois le côté fermé)
+    const auto& oppSlot = (side == 0) ? beMgr_.bsBE() : beMgr_.ssBE();
     if (oppSlot.ticket > 0) bridge_->sendCommand(makeDelete(oppSlot.ticket));
 
     auto orders = fetchOrders();
@@ -1276,14 +1377,14 @@ void TOP4EA_Engine::closeSideAtBE(int side) {
     auto fresh = fetchOrders();
     { std::lock_guard lk(ordersMu_); orders_ = fresh; }
 
-    log("[BE] Côté " + std::string(side==0?"BUY":"SELL")
-        + " fermé au marché (break-even) — "
+    log("[VL] Côté " + std::string(side==0?"BUY":"SELL")
+        + " fermé au marché (profit verrouillé) — "
         + std::to_string(closed) + "/" + std::to_string(total) + " positions");
 
     // Si le panier restant est nul ou en profit → fermer tout
     double remPnl = basketProfit(fresh);
     if (fresh.empty() || remPnl >= cfg_.basketTarget * 0.2) {
-        log("[BE] Panier résiduel P&L=" + std::to_string(remPnl)
+        log("[VL] Panier résiduel P&L=" + std::to_string(remPnl)
             + " → déclenchement closeBasketAtomic()");
         if (!basketClosing_.exchange(true)) {
             closingStart_ = Clock::now();
@@ -1295,7 +1396,7 @@ void TOP4EA_Engine::closeSideAtBE(int side) {
         Tick t2; { std::lock_guard lk(tickMu_); t2 = lastTick_; }
         gridOrigin_ = (t2.bid + t2.ask) * 0.5;
         state_.store(EAState::GridActive);
-        log("[BE] Grille repositionnée @ " + std::to_string(gridOrigin_)
+        log("[VL] Grille repositionnée @ " + std::to_string(gridOrigin_)
             + " — cycle continue côté opposé");
     }
 }
@@ -1593,23 +1694,29 @@ std::string TOP4EA_Engine::dashboard() const {
     oss << "║  Marge lib : " << freePct << "%\n";
     oss << "║  SS @ " << std::setprecision(5) << ssLevel_ << "\n";
     oss << "║  BS @ " << bsLevel_ << "\n";
-    // ── Break-Even Orders ──────────────────────────────────────
-    if (cfg_.beEnabled) {
-        oss << "╠═══════ BREAK-EVEN ORDERS ══════════╣\n";
-        const auto& beBS = beMgr_.bsBE();
-        const auto& beSS = beMgr_.ssBE();
-        if (beBS.active && beBS.level > 0.0)
-            oss << "║  BE-BS: " << std::setprecision(5) << beBS.level
-                << " (avg sell=" << beBS.avgEntry
-                << " L=" << std::setprecision(2) << beBS.totalLots << ")\n";
+    // ── Verrouillage Profit Trailing (V-BS / V-SS) ────────────
+    if (cfg_.vlEnabled) {
+        oss << "╠══════ VERROUILLAGE PROFIT (V) ══════╣\n";
+        const auto& vBS = beMgr_.bsBE();
+        const auto& vSS = beMgr_.ssBE();
+        if (vBS.activated && vBS.level > 0.0)
+            oss << "║  V-BS: " << std::setprecision(5) << vBS.level
+                << " (avgSell=" << vBS.avgEntry
+                << " L=" << std::setprecision(2) << vBS.totalLots
+                << ") ↓ratchet\n";
+        else if (vBS.active)
+            oss << "║  V-BS: en attente activation (profit insuffisant)\n";
         else
-            oss << "║  BE-BS: inactif (aucune position Sell)\n";
-        if (beSS.active && beSS.level > 0.0)
-            oss << "║  BE-SS: " << std::setprecision(5) << beSS.level
-                << " (avg buy =" << beSS.avgEntry
-                << " L=" << std::setprecision(2) << beSS.totalLots << ")\n";
+            oss << "║  V-BS: inactif (aucune position Sell)\n";
+        if (vSS.activated && vSS.level > 0.0)
+            oss << "║  V-SS: " << std::setprecision(5) << vSS.level
+                << " (avgBuy =" << vSS.avgEntry
+                << " L=" << std::setprecision(2) << vSS.totalLots
+                << ") ↑ratchet\n";
+        else if (vSS.active)
+            oss << "║  V-SS: en attente activation (profit insuffisant)\n";
         else
-            oss << "║  BE-SS: inactif (aucune position Buy)\n";
+            oss << "║  V-SS: inactif (aucune position Buy)\n";
     }
     // Cascade guard — statut live basé sur le tick courant
     auto cg = recovery_->liveCheck(grid_->effectiveGridGap());

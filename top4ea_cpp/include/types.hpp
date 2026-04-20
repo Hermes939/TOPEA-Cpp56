@@ -235,15 +235,19 @@ struct Config {
     int         basketRecoveryThreshold = 5;
     double      basketRecoveryBonus     = 0.05;
 
-    // ─── Break-Even Orders (BE-BS / BE-SS) ───────────────────
-    // BE-BS : buy stop au prix moyen des sells + buffer
-    //         → si prix remonte jusqu'ici, les sells sont à l'équilibre
-    // BE-SS : sell stop au prix moyen des buys  - buffer
-    //         → si prix descend jusqu'ici, les buys  sont à l'équilibre
-    // beBufferPts : marge de sécurité supplémentaire (en points)
-    //              couvre les frais de commission/spread + cushion
-    bool        beEnabled    = true;
-    int         beBufferPts  = 30;    // 30 pts ≈ 3 pips XAUUSDm (inclut commissions)
+    // ─── Verrouillage Profit Trailing (V-BS / V-SS) ──────────
+    // V-SS (Sell Stop trailing côté BUY) :
+    //   S'active quand les Buy sont en profit ≥ vlActivationPts.
+    //   Niveau = bid - vlTrailPts. Monte avec le bid (ratchet UP, jamais en baisse).
+    //   Déclenchement → toutes les Buy fermées au marché (profit verrouillé).
+    //
+    // V-BS (Buy Stop trailing côté SELL) :
+    //   S'active quand les Sell sont en profit ≥ vlActivationPts.
+    //   Niveau = ask + vlTrailPts. Descend avec l'ask (ratchet DOWN, jamais en hausse).
+    //   Déclenchement → toutes les Sell fermées au marché (profit verrouillé).
+    bool        vlEnabled        = true;
+    int         vlActivationPts  = 50;   // profit minimum en pts avant activation du trailing
+    int         vlTrailPts       = 30;   // distance trailing en pts (ex: 30 pts = 3 pips XAU)
 
     // ─── Connexion MetaApi ───────────────────────────────────
     // token et accountId lus depuis METAAPI_TOKEN / METAAPI_ACCOUNT_ID

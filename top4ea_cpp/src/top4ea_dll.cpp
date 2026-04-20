@@ -91,8 +91,12 @@ static top4ea::Config loadConfig(const char* path) {
             else if (key=="basket_recovery_threshold") cfg.basketRecoveryThreshold = std::stoi(val);
             else if (key=="basket_recovery_bonus")     cfg.basketRecoveryBonus     = std::stod(val);
             // Break-Even Orders
-            else if (key=="be_enabled")    cfg.beEnabled   = (val=="true"||val=="1");
-            else if (key=="be_buffer_pts") cfg.beBufferPts = std::stoi(val);
+            else if (key=="vl_enabled")         cfg.vlEnabled        = (val=="true"||val=="1");
+            else if (key=="vl_activation_pts")  cfg.vlActivationPts  = std::stoi(val);
+            else if (key=="vl_trail_pts")        cfg.vlTrailPts       = std::stoi(val);
+            // Rétrocompatibilité anciens fichiers .conf (be_ → vl_)
+            else if (key=="be_enabled")    cfg.vlEnabled   = (val=="true"||val=="1");
+            else if (key=="be_buffer_pts") cfg.vlTrailPts  = std::stoi(val);
             // Schedule lots fixe recovery
             else if (key=="use_fixed_lot_schedule")   cfg.useFixedLotSchedule     = (val=="true"||val=="1");
             // TP par vagues
