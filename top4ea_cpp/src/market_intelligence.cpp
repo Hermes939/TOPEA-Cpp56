@@ -179,29 +179,75 @@ void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
     // Fréquence augmentée (15→5) pour que DeepSeek ne s'endorme jamais.
     // En mode recovery actif, appel encore plus fréquent (toujours si tick%3==1).
     // forceWake() est appelé toutes les 20 ticks pour bypass si signal périmé.
-    // Garde : requiert au moins 5 barres M30 (réduit de 26 → accélère le démarrage)
+    // Garde : requiert au moins 5 barres M30 OU timeout de 300s (mode dégradé)
     bool m30Ready = ((int)m30Bars_.size() >= 5);
-    int dsTickMod = inRecovery ? 3 : 5;  // plus réactif en recovery
-    if (deepseek_.hasApiKey() && m30Ready &&
+
+    // ── Timeout fallback MTA (300 s) ─────────────────────────────────────────
+    // Si m30Bars_ n'atteint jamais 5 barres (données broker indisponibles,
+    // warmUp() non appelé, ou symbole non-standard), DeepSeek serait
+    // définitivement bloqué. Après 300 secondes, on active le mode dégradé :
+    // DeepSeek peut tourner avec les barres disponibles (même < 5).
+    static auto m30DeadlineStart = SysClock::now();
+    static bool m30DegradedLogged = false;
+    bool m30Timeout = false;
+    if (!m30Ready) {
+        using Sec = std::chrono::seconds;
+        long elapsedSec = std::chrono::duration_cast<Sec>(
+            SysClock::now() - m30DeadlineStart).count();
+        if (elapsedSec >= 300) {
+            m30Timeout = true;
+            if (!m30DegradedLogged) {
+                int bc_m30;
+                { std::lock_guard lk(mu_); bc_m30 = (int)m30Bars_.size(); }
+                std::cout << "[MTA-BOOT] ⚠ m30 TIMEOUT (300s) — mode dégradé activé"
+                          << " M30=" << bc_m30 << " barres"
+                          << " (DeepSeek activé sans attendre 5 barres M30)\n";
+                m30DegradedLogged = true;
+            }
+        }
+    }
+
+    // ── Log boot MTA : m30Ready status (une seule fois au démarrage) ─────────
+    static bool m30ReadyLogged = false;
+    if (!m30ReadyLogged) {
+        int bc_m5, bc_m15, bc_m30;
+        { std::lock_guard lk(mu_); bc_m5  = (int)m5Bars_.size();
+                                    bc_m15 = (int)m15Bars_.size();
+                                    bc_m30 = (int)m30Bars_.size(); }
+        if (m30Ready) {
+            std::cout << "[MTA-BOOT] ✓ m30Ready — M5:" << bc_m5
+                      << " M15:" << bc_m15 << " M30:" << bc_m30
+                      << " barres (prêt pour DeepSeek)\n";
+            m30ReadyLogged = true;
+        } else {
+            // Log l'avancement en cours (seulement toutes les 50 ticks)
+            if (tickCount_ % 50 == 0) {
+                std::cout << "[MTA-BOOT] ✗ m30Ready NOT YET — M5:" << bc_m5
+                          << " M15:" << bc_m15 << " M30:" << bc_m30
+                          << "/5 barres (attente DeepSeek)\n";
+            }
+        }
+    }
+
+    bool canCallDS = m30Ready || m30Timeout;
+    int dsTickMod  = inRecovery ? 3 : 5;  // plus réactif en recovery
+    if (deepseek_.hasApiKey() && canCallDS &&
         ((tickCount_ % dsTickMod == 1) || (tickCount_ % 20 == 0))) {
-        // Snapshot indicateurs pour le prompt
-        std::deque<Bar> bM5, bM30;
+        // ── Source d'indicateurs UNIQUE — même snapshot que le dashboard ──
+        // Le prompt DeepSeek utilise EXACTEMENT les mêmes valeurs RSI/MACD/BB
+        // que le dashboard : celles de lastDecision_ (mis à jour par analyze()
+        // toutes les 10 ticks). Aucun recalcul alternatif possible → zéro divergence.
+        IndiSet im5, im30;
         double se;
+        MarketStructure st;
         {
             std::lock_guard lk(mu_);
-            bM5  = m5Bars_;
-            bM30 = m30Bars_;
+            im5  = lastDecision_.m5;       // identique à lastIndM5_ mais sans cache séparé
+            im30 = lastDecision_.m30;      // identique à lastIndM30_ mais sans cache séparé
             se   = spreadEwma_;
+            st   = lastDecision_.structure;
         }
-        Bar c5, cM30;
-        { std::lock_guard lk(mu_); c5 = curM5_; cM30 = curM30_; }
-        if (c5.ticks  > 0) bM5.push_back(c5);
-        if (cM30.ticks > 0) bM30.push_back(cM30);
-
-        IndiSet im5  = computeIndicators(bM5);
-        IndiSet im30 = computeIndicators(bM30);
         TradingSession ses = detectSession();
-        MarketStructure st = analyzeStructure(bM5);
 
         DSMarketContext ctx;
         ctx.session      = sessionName(ses);
@@ -226,6 +272,18 @@ void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
         ctx.ssLots      = ssLots;
         ctx.netDelta    = bsLots - ssLots;
         ctx.inRecovery  = inRecovery;
+
+        // ── Log âge du snapshot indicateurs utilisé par DS ───────
+        // analyze() est appelé toutes les 10 ticks → snapshot max 9 ticks old.
+        // Si > 5 ticks, log pour visibilité opérationnelle (non-bloquant).
+        {
+            int snapshotAgeTicks = tickCount_ % 10;  // ticks depuis le dernier analyze()
+            if (snapshotAgeTicks > 5) {
+                std::cout << "[DS-SNAP] snapshot indicateurs âge=" << snapshotAgeTicks
+                          << " ticks (prochain analyze() dans "
+                          << (10 - snapshotAgeTicks) << " ticks)\n";
+            }
+        }
 
         // Réveil forcé si signal trop vieux (prioritaire sur requestAnalysis normal)
         // forceWake bypasse le throttle et relance immédiatement si périmé

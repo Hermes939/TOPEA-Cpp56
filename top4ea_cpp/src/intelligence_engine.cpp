@@ -21,6 +21,7 @@
 //  - recordCycleClosed() : alimenté par TOP4EA_Engine
 // ============================================================
 #include "../include/intelligence_engine.hpp"
+#include <iostream>
 #include <sstream>
 #include <iomanip>
 #include <cmath>
@@ -193,8 +194,14 @@ std::pair<double,double> IntelligenceEngine::fuseGapFactors(
         bsF *= finalTight;
     }
 
-    ssF = std::clamp(ssF, 0.50, 3.0);
-    bsF = std::clamp(bsF, 0.50, 3.0);
+    // Plafond institutionnel : cap multiplicateur combiné
+    // Évite que la multiplication cumulative (régime × delta × OFI × P&L)
+    // produise des valeurs extrêmes (ex: 0.85 × 1.30 × 1.30 × 0.90 ≈ 1.29 — ok)
+    // mais protège contre les cas pathologiques.
+    static constexpr double MAX_TRAIL_FACTOR = 3.0;
+    static constexpr double MIN_TRAIL_FACTOR = 0.50;
+    ssF = std::clamp(ssF, MIN_TRAIL_FACTOR, MAX_TRAIL_FACTOR);
+    bsF = std::clamp(bsF, MIN_TRAIL_FACTOR, MAX_TRAIL_FACTOR);
     return {ssF, bsF};
 }
 
@@ -343,9 +350,49 @@ IntelligenceEngine::Analysis IntelligenceEngine::analyze(
 
     double mid = (tick.bid + tick.ask) * 0.5;
 
+    // ── Audit ATR : vérification cohérence source unique ──────
+    // L'ATR externe (atrPoints) vient du GridEngine ; l'ATR interne
+    // est calculé depuis les barres OHLC dans GeometricImbalance.
+    // Si les deux divergent de plus de 60%, log un avertissement.
+    {
+        double internalATR = geoImbalance_.atrValue();
+        if (internalATR > 1e-9 && atrPoints > 1e-9) {
+            double divergence = std::abs(atrPoints - internalATR) / internalATR;
+            if (divergence > 0.60) {
+                std::ostringstream warn;
+                warn << std::fixed << std::setprecision(4);
+                warn << "[AUDIT-ATR] Divergence ATR détectée: externe="
+                     << atrPoints << " interne(geo)=" << internalATR
+                     << " écart=" << (divergence * 100.0) << "% — vérifier source";
+                // Limiter les logs répétitifs (log toutes les 500 appels)
+                static int atrWarnCount = 0;
+                if (++atrWarnCount % 500 == 1) {
+                    std::cout << warn.str() << "\n";
+                }
+            }
+        } else if (internalATR < 1e-9 && atrPoints > 1e-9) {
+            // ATR interne à zéro = barres OHLC pas encore reçues
+            static bool atrNotReadyLogged = false;
+            if (!atrNotReadyLogged) {
+                std::cout << "[AUDIT-ATR] ATR interne=0.0 — en attente de barres OHLC"
+                          << " (utilisation ATR externe=" << atrPoints << ")\n";
+                atrNotReadyLogged = true;
+            }
+        }
+    }
+
+    // ── Source ATR canonique — consolidation source unique ────
+    // geoImbalance_.atrValue() est LA source de référence (barres OHLC).
+    // L'ATR externe (atrPoints) sert uniquement de fallback à froid.
+    // Tout le reste de analyze() utilise exclusivement effectiveATR.
+    double effectiveATR = (geoImbalance_.atrValue() > 1e-9)
+                        ? geoImbalance_.atrValue()
+                        : atrPoints;
+    a.atrPoints = effectiveATR;
+
     // ── [80%/1] Régime OU × ATR × Momentum ───────────────────
     ouEst_.push(mid);
-    volReg_.push(atrPoints);
+    volReg_.push(effectiveATR);
 
     double rho1 = 0.0;
     if (ouEst_.ready()) {
@@ -358,8 +405,8 @@ IntelligenceEngine::Analysis IntelligenceEngine::analyze(
     a.rho1         = rho1;
     a.momentumFast = momF;
     a.momentumSlow = momS;
-    a.volRegime    = volReg_.classify(atrPoints);
-    a.regime       = classifyRegime(atrPoints, rho1, momF, momS);
+    a.volRegime    = volReg_.classify(effectiveATR);
+    a.regime       = classifyRegime(effectiveATR, rho1, momF, momS);
 
     // ── [80%/2] Delta institutionnel multi-niveau ─────────────
     double buyLots = 0.0, sellLots = 0.0;

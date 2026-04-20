@@ -467,7 +467,14 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
         AccountSnapshot acc; { std::lock_guard lk(accMu_); acc = account_; }
         double pnl    = basketProfit(orders);
         double target = effectiveTarget(orders);
-        double atrPts = grid_->atrPoints();
+        // ── Hiérarchie ATR cross-fichiers ─────────────────────────
+        // grid_->atrPoints()          : ATR adaptatif du GridEngine (VolRegime EMA)
+        //                              → source primaire pour le dimensionnement de grille
+        // intel_->geoImbalance ATR   : ATR depuis barres OHLC dans GeometricImbalance
+        //                              → source canonique pour FVG/OFI/régime OU
+        // PRIORITÉ dans analyze()    : geo ATR si > 0, sinon grid ATR (fallback froid)
+        // Les deux ATR convergent après ~14 barres OHLC = ~70 ticks M5
+        double atrPts = grid_->atrPoints();   // fallback uniquement (remplacé si geo>0)
         int    ssR    = recovery_->sellCount();
         int    bsR    = recovery_->buyCount();
 
@@ -552,6 +559,67 @@ void TOP4EA_Engine::initOrRestore() {
             log("[WarmUp] Visual AI réchauffé — prix=" + std::to_string(mid)
                 + " ATRest=" + std::to_string(atrEst));
         }
+    }
+
+    // ── Rapport de boot audit — vérifications CALCULÉES ──────
+    // Chaque ligne est dérivée de l'état réel des modules (pas de hardcode).
+    // Log une seule fois immédiatement après l'initialisation complète.
+    {
+        std::ostringstream boot;
+        boot << std::fixed << std::setprecision(4);
+
+        // Module readiness — pointeurs nullptr = erreur d'init
+        const bool bridgeOk = (bridge_    != nullptr);
+        const bool gridOk   = (grid_      != nullptr) && (grid_->effectiveGridGap() > 0);
+        const bool intelOk  = (intel_     != nullptr);
+        const bool mktOk    = (marketIntel_ != nullptr);
+
+        // ATR cross-source state
+        const double gridATR  = gridOk  ? grid_->atrPoints() : 0.0;
+        const int    gridGap  = gridOk  ? grid_->effectiveGridGap() : 0;
+
+        // θ deltas vs CalibrableParams defaults (detect calibration drift)
+        static constexpr double DEF_ATR_MULT  = 0.50;
+        static constexpr double DEF_KELLY     = 0.25;
+        static constexpr double DEF_GAP_EXP   = 0.05;
+        static constexpr double DEF_TRAIL_ASM = 0.15;
+        static constexpr double DEF_VEL       = 0.85;
+        static constexpr double DEF_CPPI      = 3.0;
+        static constexpr double DEF_VABT      = 0.15;
+        static constexpr double DEF_OU_MIN    = 0.05;
+
+        auto diffStr = [](double cur, double def) -> std::string {
+            double d = cur - def;
+            if (std::abs(d) < 1e-6) return " [=def]";
+            std::ostringstream s;
+            s << std::fixed << std::setprecision(4) << " [" << (d >= 0 ? "+" : "") << d << "]";
+            return s.str();
+        };
+
+        boot << "[BOOT-AUDIT] ════════════════════════════════\n"
+             << "[BOOT-AUDIT]  bridge   : " << (bridgeOk ? "INIT" : "NULL ⚠") << "\n"
+             << "[BOOT-AUDIT]  grid     : " << (gridOk   ? "INIT gap=" + std::to_string(gridGap) + "pts"
+                                                          : "NULL ou gap=0 ⚠") << "\n"
+             << "[BOOT-AUDIT]  intel    : " << (intelOk  ? "INIT" : "NULL ⚠") << "\n"
+             << "[BOOT-AUDIT]  visualAI : " << (mktOk    ? "INIT" : "NULL ⚠") << "\n"
+             << "[BOOT-AUDIT]  deepseek : " << (mktOk && marketIntel_->hasDeepSeekKey()
+                                                ? "CLE OK" : "PAS DE CLE") << "\n"
+             << "[BOOT-AUDIT]  symbol   : " << cfg_.symbol
+             << " digits=" << cfg_.digits << " point=" << cfg_.point << "\n"
+             << "[BOOT-AUDIT]  ATR grid : " << gridATR << " (fallback froid avant barres OHLC)\n"
+             << "[BOOT-AUDIT]  ATR src  : geo(OHLC)>0 → canonique | grid → fallback\n"
+             << "[BOOT-AUDIT]  θ atrMult: " << cfg_.atrMultiplier << diffStr(cfg_.atrMultiplier, DEF_ATR_MULT)
+             << "  kelly: " << cfg_.kellyMaxFraction << diffStr(cfg_.kellyMaxFraction, DEF_KELLY) << "\n"
+             << "[BOOT-AUDIT]  θ gapExp : " << cfg_.gapExpansionFactor << diffStr(cfg_.gapExpansionFactor, DEF_GAP_EXP)
+             << "  asym: " << cfg_.trailAsymmetryFactor << diffStr(cfg_.trailAsymmetryFactor, DEF_TRAIL_ASM) << "\n"
+             << "[BOOT-AUDIT]  θ vel    : " << cfg_.velocityTrigger << diffStr(cfg_.velocityTrigger, DEF_VEL)
+             << "  cppi: " << cfg_.cppiMultiplier << diffStr(cfg_.cppiMultiplier, DEF_CPPI) << "\n"
+             << "[BOOT-AUDIT]  θ vabt   : " << cfg_.vabtCoeff << diffStr(cfg_.vabtCoeff, DEF_VABT)
+             << "  ouMin: " << cfg_.ouMinTheta << diffStr(cfg_.ouMinTheta, DEF_OU_MIN) << "\n"
+             << "[BOOT-AUDIT]  θ wiring : cppi→CPPI(engine~1340) vabt→basket(engine~1358)"
+             << " ouMin→OU(grid+intel)\n"
+             << "[BOOT-AUDIT] ════════════════════════════════";
+        log(boot.str());
     }
 }
 
@@ -2286,9 +2354,61 @@ std::string TOP4EA_Engine::dashboard() const {
                 << "  CloseProb=" << std::setprecision(1) << ia.closeProbPct << "%\n";
         }
     }
-    // ─── Panneau VISUAL AI + SOUS-AGENTS ─────────────────────
+    // ─── Panneau FACTEURS TRAIL ───────────────────────────────
+    // Vue synthétique de tous les multiplicateurs trail actifs :
+    //  [1] ssGapFactor/bsGapFactor = sortie fuseGapFactors (Intel Engine)
+    //  [2] asymmetryMult = 1.0 + |OFI| × 0.30 (facteur déséquilibre OFI)
+    //  [3] dsTrailSSBias/dsTrailBSBias = biais directionnel DeepSeek (±20%)
+    //  [4] gapExpansionFactor = expansion géométrique calibrée (θ)
+    //  [5] Facteur effectif final = après phase-override + DS bias + clamp [0.40, 4.0]
     {
-        VisualDecision vd = marketIntel_->analyze();
+        std::lock_guard lk(intelMu_);
+        const auto& ia = lastIntel_;
+        VisualDecision latestVD = marketIntel_->getLastDecision();
+
+        oss << "╠══════════ FACTEURS TRAIL ═══════════╣\n";
+        oss << std::setprecision(3);
+
+        // [1] Facteurs base Intel Engine (après fuseGapFactors, clamp [0.5, 3.0])
+        oss << "║  [1] Intel  : SS×" << ia.ssGapFactor
+            << "  BS×" << ia.bsGapFactor;
+        if (ia.trailFrozen) oss << " ❄";
+        oss << "\n";
+
+        // [2] Asymétrie OFI — valeur réelle depuis imbAnalysis.asymmetryMultiplier
+        // (1.0 + |OFI_normalisé| × 0.30, clampé [1.0, 1.30] dans GeometricImbalance)
+        // Exposée via Analysis::asymmetryMult (assignée ligne ~438 de intelligence_engine.cpp)
+        oss << "║  [2] AsymOFI: ×" << std::setprecision(3) << ia.asymmetryMult
+            << " OFI=" << std::setprecision(4) << ia.ofiNormalized
+            << " imb=" << std::setprecision(1) << ia.imbalanceScore << "/100\n";
+
+        // [3] Biais DeepSeek (dsTrailSSBias/dsTrailBSBias) appliqué dans trailGrid
+        oss << std::setprecision(3);
+        oss << "║  [3] DS-Bias: SS×" << latestVD.dsTrailSSBias
+            << "  BS×" << latestVD.dsTrailBSBias;
+        if (latestVD.dsOverride) oss << " ⚡DS";
+        oss << "\n";
+
+        // [4] gapExpansionFactor (calibré par Adam/AutoML)
+        oss << "║  [4] GapExp : ×" << std::setprecision(4) << cfg_.gapExpansionFactor
+            << "  Asym:" << cfg_.trailAsymmetryFactor << "\n";
+
+        // [5] Facteur effectif combiné SS/BS (avant phase-override dans trailGrid)
+        // Estimation : Intel × DS-Bias (la phase-override se substitue complètement)
+        double effSS = std::clamp(ia.ssGapFactor * latestVD.dsTrailSSBias, 0.40, 4.0);
+        double effBS = std::clamp(ia.bsGapFactor * latestVD.dsTrailBSBias, 0.40, 4.0);
+        oss << "║  [5] Effectif: SS×" << std::setprecision(3) << effSS
+            << "  BS×" << effBS
+            << "  [clamp 0.40–4.0]\n";
+
+        oss << std::setprecision(2);
+    }
+    // ─── Panneau VISUAL AI + SOUS-AGENTS ─────────────────────
+    // Utilise getLastDecision() (cache thread-safe) au lieu de analyze()
+    // pour garantir que le dashboard et le prompt DeepSeek montrent les
+    // MÊMES valeurs RSI/MACD/BB (calculées lors du dernier tick%10).
+    {
+        VisualDecision vd = marketIntel_->getLastDecision();
         oss << "╠═══════ VISUAL AI — MULTI-AGENTS ═══╣\n";
         oss << "║  Session : " << MarketIntelligence::sessionName(vd.session)
             << "   Struct: " << MarketIntelligence::structureName(vd.structure) << "\n";
