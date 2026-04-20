@@ -96,10 +96,22 @@ void RecoveryEngine::reset() noexcept {
 }
 
 void RecoveryEngine::restoreFromOrders(int sellOrders, int buyOrders) noexcept {
-    sellCount_.store(sellOrders);
-    buyCount_.store(buyOrders);
-    std::cout << "[Recovery] Restauré sellRecov=" << sellOrders
-              << " buyRecov=" << buyOrders << "\n";
+    // Plafonner au maxRecovery pour éviter d'afficher N/5 quand N > 5
+    // Les positions broker réelles sont conservées mais le COMPTEUR est capé.
+    int maxR = (cfg_.maxRecovery > 0) ? cfg_.maxRecovery : 99;
+    int cappedSell = std::min(sellOrders, maxR);
+    int cappedBuy  = std::min(buyOrders,  maxR);
+    sellCount_.store(cappedSell);
+    buyCount_.store(cappedBuy);
+    if (sellOrders > maxR || buyOrders > maxR) {
+        std::cout << "[Recovery] ⚠ PLAFOND maxRecovery=" << maxR
+                  << " — SELL réel=" << sellOrders << " (capé→" << cappedSell << ")"
+                  << " | BUY réel=" << buyOrders  << " (capé→" << cappedBuy  << ")"
+                  << " — Bloquer tout nouveau recovery immédiatement\n";
+    } else {
+        std::cout << "[Recovery] Restauré sellRecov=" << cappedSell
+                  << " buyRecov=" << cappedBuy << "\n";
+    }
 }
 
 } // namespace top4ea
