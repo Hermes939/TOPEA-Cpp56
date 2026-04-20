@@ -1,0 +1,8 @@
+{
+  "state": "watching",
+  "n_cycles": 0,
+  "last_train": null,
+  "timestamp": "2026-04-20T11:39:27.258517",
+  "best_val_loss": 0.0,
+  "current_params": {}
+}

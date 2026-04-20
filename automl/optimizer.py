@@ -1,18 +1,21 @@
 """
-TOP4EA AutoML — Optimisation des hyperparamètres avec Optuna
+TOP4EA AutoML — Optimisation des hyperparamètres
+Production-grade — Optuna TPE avec timeout, grid search fallback
 
 MÉTHODE :
 ─────────────────────────────────────────────────────────
-Optuna utilise l'algorithme TPE (Tree-structured Parzen Estimator)
-pour trouver les meilleurs hyperparamètres du modèle PyTorch :
-  - Architecture (hidden_dim, n_res_blocks, dropout)
-  - Entraînement (lr, batch_size, weight_decay)
+Optuna TPE (Tree-structured Parzen Estimator) pour trouver
+les meilleurs hyperparamètres du modèle PyTorch :
+  - Architecture : hidden_dim, n_res_blocks, dropout
+  - Entraînement : lr, batch_size, weight_decay
 
-Le critère optimisé est la loss de validation minimale
-sur le jeu de données de trading historique.
-
-Optuna est optionnel — si non installé, l'optimizer utilise
-un grid search simplifié sans dépendances.
+ROBUSTESSE PRODUCTION :
+  • Timeout Optuna configurable (défaut 120s) — jamais de blocage
+  • Fallback grid search si Optuna non installé
+  • Trial pruning par MedianPruner (coupe les essais perdants tôt)
+  • Chaque trial avec try/except → un trial qui plante ne tue pas l'étude
+  • Architecture finale sauvegardée en JSON pour traçabilité
+  • Validation temporelle (pas de fuite de données)
 """
 
 import json
@@ -23,7 +26,10 @@ from typing import Dict, Optional
 
 import numpy as np
 
-from trainer import load_dataset, compute_labels, build_tensors, OUTPUT_JSON, MODEL_PATH
+from trainer import (
+    load_dataset, compute_labels, build_tensors,
+    OUTPUT_JSON, MODEL_PATH, _load_checkpoint,
+)
 from model import TOP4EAParamNet, CompositeLoss
 
 logger = logging.getLogger("top4ea.optimizer")
@@ -33,7 +39,7 @@ BEST_ARCH_PATH    = Path("automl/output/best_arch.json")
 
 
 # ────────────────────────────────────────────────────────────
-#  Évaluation d'une configuration hyperparams
+#  Évaluation d'une configuration
 # ────────────────────────────────────────────────────────────
 def evaluate_config(
     hidden_dim:   int,
@@ -43,12 +49,17 @@ def evaluate_config(
     batch_size:   int,
     weight_decay: float,
     X_train, Y_train, X_val, Y_val,
-    epochs:       int = 20,
+    epochs: int = 20,
+    trial=None,                      # handle Optuna trial pour pruning
 ) -> float:
-    """Entraîne et évalue une configuration — retourne la val_loss."""
+    """Entraîne une configuration et retourne la val_loss."""
     import torch
     from torch.utils.data import DataLoader, TensorDataset
     from torch.optim.lr_scheduler import CosineAnnealingLR
+    import torch.nn as nn
+
+    # batch_size sécurisé
+    effective_batch = min(batch_size, max(1, len(X_train)))
 
     model     = TOP4EAParamNet(
         hidden_dim   = hidden_dim,
@@ -61,18 +72,19 @@ def evaluate_config(
     criterion = CompositeLoss()
 
     train_ds = TensorDataset(X_train, Y_train)
-    train_dl = DataLoader(train_ds, batch_size=batch_size,
+    train_dl = DataLoader(train_ds, batch_size=effective_batch,
                           shuffle=True, drop_last=False)
 
     best_val = float("inf")
-    import torch.nn as nn
 
-    for _ in range(epochs):
+    for ep in range(epochs):
         model.train()
         for xb, yb in train_dl:
             optimizer.zero_grad()
             pred = model(xb)
             loss, _ = criterion(pred, yb, xb, model)
+            if torch.isnan(loss) or torch.isinf(loss):
+                return float("inf")
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -82,25 +94,40 @@ def evaluate_config(
         with torch.no_grad():
             val_pred = model(X_val)
             val_loss, _ = criterion(val_pred, Y_val, X_val, model)
-        best_val = min(best_val, float(val_loss))
+            val_f = float(val_loss)
+            if not (val_f != val_f):  # pas NaN
+                best_val = min(best_val, val_f)
+
+        # Pruning Optuna (coupe les essais mauvais en cours de route)
+        if trial is not None:
+            try:
+                import optuna
+                trial.report(best_val, ep)
+                if trial.should_prune():
+                    raise optuna.TrialPruned()
+            except ImportError:
+                pass
 
     return best_val
 
 
 # ────────────────────────────────────────────────────────────
-#  Recherche Optuna (si disponible)
+#  Recherche Optuna avec timeout
 # ────────────────────────────────────────────────────────────
 def run_optuna_search(
     X_train, Y_train, X_val, Y_val,
-    n_trials: int = 20,
+    n_trials:       int = 10,
+    timeout_sec:    int = 120,       # timeout absolu
 ) -> Dict:
-    """Lance une étude Optuna pour trouver les meilleurs hyperparams."""
+    """Lance une étude Optuna TPE avec timeout et pruning."""
     try:
         import optuna
         optuna.logging.set_verbosity(optuna.logging.WARNING)
     except ImportError:
-        logger.warning("Optuna non installé — utilisation du grid search")
+        logger.warning("Optuna non installé — grid search")
         return run_grid_search(X_train, Y_train, X_val, Y_val)
+
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=3, n_warmup_steps=5)
 
     def objective(trial):
         hidden_dim   = trial.suggest_categorical("hidden_dim", [64, 128, 256])
@@ -110,25 +137,63 @@ def run_optuna_search(
         batch_size   = trial.suggest_categorical("batch_size", [16, 32, 64])
         weight_decay = trial.suggest_float("weight_decay", 1e-5, 1e-3, log=True)
 
-        return evaluate_config(
-            hidden_dim, n_res_blocks, dropout, lr, batch_size, weight_decay,
-            X_train, Y_train, X_val, Y_val, epochs=15,
-        )
+        try:
+            return evaluate_config(
+                hidden_dim, n_res_blocks, dropout, lr, batch_size, weight_decay,
+                X_train, Y_train, X_val, Y_val, epochs=15, trial=trial,
+            )
+        except Exception as e:
+            logger.warning(f"Trial échoué : {e}")
+            return float("inf")
 
-    study = optuna.create_study(direction="minimize")
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    study = optuna.create_study(direction="minimize", pruner=pruner)
+    study.optimize(
+        objective,
+        n_trials       = n_trials,
+        timeout        = timeout_sec,          # ← timeout absolu (jamais de blocage)
+        show_progress_bar = False,
+        catch           = (Exception,),
+    )
+
+    if not study.best_trials:
+        logger.warning("Aucun trial Optuna valide — grid search")
+        return run_grid_search(X_train, Y_train, X_val, Y_val)
 
     best = study.best_params
-    logger.info(f"Optuna meilleurs params: {best} (val_loss={study.best_value:.5f})")
+    logger.info(f"Optuna best: {best} (val_loss={study.best_value:.5f})"
+                f" | {len(study.trials)} trials | timeout={timeout_sec}s")
+
+    # Sauvegarder l'historique des trials pour traçabilité
+    try:
+        history = [
+            {
+                "number":   t.number,
+                "val_loss": t.value,
+                "params":   t.params,
+                "state":    str(t.state),
+            }
+            for t in study.trials if t.value is not None
+        ]
+        OPTUNA_STUDY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(OPTUNA_STUDY_PATH, "w") as f:
+            json.dump({
+                "best":    best,
+                "best_val_loss": study.best_value,
+                "n_trials": len(study.trials),
+                "timestamp": int(time.time()),
+                "history": history,
+            }, f, indent=2)
+    except Exception:
+        pass
 
     return best
 
 
 # ────────────────────────────────────────────────────────────
-#  Grid search simplifié (sans Optuna)
+#  Grid search simplifié (fallback sans Optuna)
 # ────────────────────────────────────────────────────────────
 def run_grid_search(X_train, Y_train, X_val, Y_val) -> Dict:
-    """Grid search simple sur les hyperparamètres clés."""
+    """Grid search sur les configurations clés — 4 architectures testées."""
     configs = [
         {"hidden_dim": 64,  "n_res_blocks": 1, "dropout": 0.10, "lr": 1e-3,
          "batch_size": 32,  "weight_decay": 1e-4},
@@ -144,16 +209,21 @@ def run_grid_search(X_train, Y_train, X_val, Y_val) -> Dict:
     best_config = configs[0]
 
     for cfg in configs:
-        loss = evaluate_config(
-            **cfg, X_train=X_train, Y_train=Y_train,
-            X_val=X_val, Y_val=Y_val, epochs=10,
-        )
-        logger.info(f"Config: {cfg} → val_loss={loss:.5f}")
-        if loss < best_loss:
-            best_loss   = loss
-            best_config = cfg
+        try:
+            loss = evaluate_config(
+                **cfg,
+                X_train=X_train, Y_train=Y_train,
+                X_val=X_val,     Y_val=Y_val,
+                epochs=15,
+            )
+            logger.info(f"Grid: {cfg} → val_loss={loss:.5f}")
+            if loss < best_loss:
+                best_loss   = loss
+                best_config = cfg
+        except Exception as e:
+            logger.warning(f"Config grid échouée : {cfg} — {e}")
 
-    logger.info(f"Meilleure config: {best_config} (loss={best_loss:.5f})")
+    logger.info(f"Meilleure config grid: {best_config} (loss={best_loss:.5f})")
     return best_config
 
 
@@ -161,37 +231,47 @@ def run_grid_search(X_train, Y_train, X_val, Y_val) -> Dict:
 #  Pipeline complet d'optimisation
 # ────────────────────────────────────────────────────────────
 def optimize_and_train(
-    csv_path:     Path = Path("data/automl_training.csv"),
-    model_path:   Path = MODEL_PATH,
-    output_json:  Path = OUTPUT_JSON,
-    n_trials:     int  = 15,
-    final_epochs: int  = 100,
+    csv_path:       Path = Path("data/automl_training.csv"),
+    model_path:     Path = MODEL_PATH,
+    output_json:    Path = OUTPUT_JSON,
+    n_trials:       int  = 10,
+    final_epochs:   int  = 100,
+    optuna_timeout: int  = 120,
 ) -> Optional[Dict]:
     """
     1. Charge les données
-    2. Optimise les hyperparamètres
-    3. Entraîne le modèle final
+    2. Optimise les hyperparamètres (Optuna TPE avec timeout)
+    3. Entraîne le modèle final avec la meilleure architecture
     4. Exporte les paramètres optimaux
     """
-    import torch
     from trainer import train
 
     df = load_dataset(csv_path)
     if df is None:
         return None
 
-    df = compute_labels(df)
-    n_val = max(1, int(len(df) * 0.20))
-    df_train = df.iloc[:-n_val] if n_val < len(df) else df
+    df      = compute_labels(df)
+    n_val   = max(1, int(len(df) * 0.20))
+    df_train = df.iloc[:-n_val] if n_val < len(df) else df.copy()
     df_val   = df.iloc[-n_val:]
+
+    if len(df_train) < 2:
+        logger.warning("Données insuffisantes pour l'optimisation")
+        return None
 
     X_train, Y_train = build_tensors(df_train)
     X_val,   Y_val   = build_tensors(df_val)
 
-    logger.info(f"Lancement optimisation hyperparams ({n_trials} essais)...")
-    best_arch = run_optuna_search(X_train, Y_train, X_val, Y_val, n_trials)
+    logger.info(f"Optimisation ({n_trials} trials, timeout={optuna_timeout}s)...")
+    t0 = time.time()
+    best_arch = run_optuna_search(
+        X_train, Y_train, X_val, Y_val,
+        n_trials=n_trials, timeout_sec=optuna_timeout,
+    )
+    logger.info(f"Optimisation terminée en {time.time()-t0:.1f}s")
 
-    # Sauvegarder la meilleure architecture
+    # Sauvegarde de la meilleure architecture
+    BEST_ARCH_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(BEST_ARCH_PATH, "w") as f:
         json.dump(best_arch, f, indent=2)
     logger.info(f"Architecture sauvegardée : {BEST_ARCH_PATH}")
@@ -203,8 +283,8 @@ def optimize_and_train(
         model_path  = model_path,
         output_json = output_json,
         epochs      = final_epochs,
-        batch_size  = best_arch.get("batch_size", 32),
-        lr          = best_arch.get("lr", 1e-3),
+        batch_size  = int(best_arch.get("batch_size", 32)),
+        lr          = float(best_arch.get("lr", 1e-3)),
         verbose     = True,
     )
 
@@ -215,6 +295,6 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     result = optimize_and_train()
     if result:
-        print(f"\nOptimisation terminée. Paramètres exportés vers {OUTPUT_JSON}")
+        print(f"\nOptimisation terminée. Paramètres → {OUTPUT_JSON}")
     else:
         print("Données insuffisantes.")
