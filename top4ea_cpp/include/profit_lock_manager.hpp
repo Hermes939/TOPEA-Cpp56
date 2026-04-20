@@ -1,21 +1,19 @@
 #pragma once
 // ============================================================
-//  TOP4EA — break_even_manager.hpp  (rebaptisé Verrouillage Profit)
-//  Module Verrouillage Profit Trailing — V-BS et V-SS
+//  TOP4EA — profit_lock_manager.hpp
+//  Module Verrouillage Profit Trailing — V-SS / V-BS
 //
-//  Principe (différent du break-even classique) :
+//  V-SS (Sell Stop Trailing, côté BUY) :
+//    S'active quand les Buy sont en profit ≥ vlActivationPts.
+//    Niveau = bid - vlTrailPts — suit le bid À LA HAUSSE uniquement.
+//    Ratchet strict : le niveau MONTE avec le bid, ne descend JAMAIS.
+//    Déclenchement (bid ≤ niveau) → ferme toutes les Buy = profit verrouillé.
 //
-//    V-SS (Sell Stop Trailing, côté BUY) :
-//      S'active quand les Buy sont en profit ≥ vlActivationPts.
-//      Niveau = bid - vlTrailPts — suit le bid À LA HAUSSE uniquement.
-//      Ratchet strict : le niveau MONTE avec le bid, ne descend JAMAIS.
-//      Déclenchement (bid ≤ niveau) → ferme toutes les Buy = profit verrouillé.
-//
-//    V-BS (Buy Stop Trailing, côté SELL) :
-//      S'active quand les Sell sont en profit ≥ vlActivationPts.
-//      Niveau = ask + vlTrailPts — suit l'ask À LA BAISSE uniquement.
-//      Ratchet strict : le niveau DESCEND avec l'ask, ne remonte JAMAIS.
-//      Déclenchement (ask ≥ niveau) → ferme toutes les Sell = profit verrouillé.
+//  V-BS (Buy Stop Trailing, côté SELL) :
+//    S'active quand les Sell sont en profit ≥ vlActivationPts.
+//    Niveau = ask + vlTrailPts — suit l'ask À LA BAISSE uniquement.
+//    Ratchet strict : le niveau DESCEND avec l'ask, ne remonte JAMAIS.
+//    Déclenchement (ask ≥ niveau) → ferme toutes les Sell = profit verrouillé.
 //
 //  Architecture :
 //    - recompute(tick, orders) : recalcule avgEntry + gère l'activation initiale
@@ -43,12 +41,11 @@ struct VLSlot {
 };
 
 // ============================================================
-//  BreakEvenManager — repurposé en ProfitLockManager (V-SS/V-BS)
-//  Le nom de classe est conservé pour éviter de casser les includes.
+//  ProfitLockManager — gestion des verrous trailing V-SS / V-BS
 // ============================================================
-class BreakEvenManager {
+class ProfitLockManager {
 public:
-    explicit BreakEvenManager(const Config& cfg);
+    explicit ProfitLockManager(const Config& cfg);
 
     // ─── Recalcul composition ────────────────────────────────
     // Appelé quand les ordres changent (1×/seconde via fetchOrders).
@@ -73,10 +70,9 @@ public:
     void clearSSNeedsPlace() noexcept { ssVL_.needsPlace = false; }
     void clearBSNeedsPlace() noexcept { bsVL_.needsPlace = false; }
 
-    // ─── Accesseurs (compat engine) ──────────────────────────
-    // Noms conservés pour compatibilité (ssBE → ssVL, bsBE → bsVL)
-    [[nodiscard]] const VLSlot& ssBE() const noexcept { return ssVL_; }
-    [[nodiscard]] const VLSlot& bsBE() const noexcept { return bsVL_; }
+    // ─── Accesseurs ──────────────────────────────────────────
+    [[nodiscard]] const VLSlot& ssVL() const noexcept { return ssVL_; }
+    [[nodiscard]] const VLSlot& bsVL() const noexcept { return bsVL_; }
 
     [[nodiscard]] double ssLevel() const noexcept { return ssVL_.level; }
     [[nodiscard]] double bsLevel() const noexcept { return bsVL_.level; }
@@ -93,14 +89,13 @@ public:
     [[nodiscard]] std::string report() const noexcept;
 
 private:
-    // Helpers internes
     void updateSide(int side, const Tick& tick,
                     const std::vector<OrderInfo>& orders) noexcept;
     [[nodiscard]] bool levelChanged(double oldLevel,
                                     double newLevel) const noexcept;
 
     Config  cfg_;
-    VLSlot  ssVL_;   // V-SS → trailing stop côté BUY (monte avec le bid)
+    VLSlot  ssVL_;   // V-SS → trailing stop côté BUY  (monte avec le bid)
     VLSlot  bsVL_;   // V-BS → trailing stop côté SELL (descend avec l'ask)
 
     double  changeTol_ = 0.0;   // seuil minimum de déplacement pour mise à jour broker

@@ -12,7 +12,7 @@
 #include "intelligence_engine.hpp"
 #include "market_intelligence.hpp"
 #include "agent_orchestrator.hpp"
-#include "break_even_manager.hpp"
+#include "profit_lock_manager.hpp"
 #include <memory>
 #include <atomic>
 #include <mutex>
@@ -159,8 +159,8 @@ private:
     std::unique_ptr<MarketIntelligence> marketIntel_;
     AgentOrchestrator                   orchestrator_;
 
-    // ─── Break-Even Manager ──────────────────────────────────
-    BreakEvenManager                    beMgr_;
+    // ─── Verrou Profit (V-SS / V-BS) ────────────────────────
+    ProfitLockManager                   vlMgr_;
 
     // Cache de la dernière analyse (pour dashboard)
     mutable std::mutex                  intelMu_;
@@ -176,11 +176,11 @@ private:
 
     // ── Horodatages de création SS/BS (anti-doublon) ─────────
     // syncTriggersFallback n'invalide pas un ticket créé depuis
-    // moins de beProtectWindowSec secondes (évite faux-positifs
+    // moins de kOrderProtectWindowSec secondes (évite faux-positifs
     // dus aux HTTP 429 / latence API).
     TimePoint ssCreatedAt_ = {};
     TimePoint bsCreatedAt_ = {};
-    static constexpr int kBeProtectWindowSec = 10;
+    static constexpr int kOrderProtectWindowSec = 10;
 
     // ── Relance immédiate après trigger géométrique ──────────
     // Quand un SS ou BS se déclenche, ce flag force le passage

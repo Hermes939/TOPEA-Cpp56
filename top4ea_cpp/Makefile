@@ -18,21 +18,21 @@ BUILDDIR  := build
 
 ## ── Sources DLL (toute la logique, sans loader ni main) ──────
 DLL_SRCS  := $(SRCDIR)/metaapi_bridge.cpp       \
-	     $(SRCDIR)/grid_engine.cpp           \
-	     $(SRCDIR)/basket_manager.cpp        \
-	     $(SRCDIR)/recovery_engine.cpp       \
-	     $(SRCDIR)/break_even_manager.cpp    \
-	     $(SRCDIR)/intelligence_engine.cpp   \
-	     $(SRCDIR)/geometric_imbalance.cpp   \
-	     $(SRCDIR)/institutional_delta.cpp   \
-	     $(SRCDIR)/error_memory.cpp          \
-	     $(SRCDIR)/math_calibrator.cpp       \
-	     $(SRCDIR)/deepseek_vision.cpp       \
-	     $(SRCDIR)/market_intelligence.cpp   \
-	     $(SRCDIR)/grid_slot_agent.cpp       \
-	     $(SRCDIR)/agent_orchestrator.cpp    \
-	     $(SRCDIR)/top4ea_engine.cpp         \
-	     $(SRCDIR)/top4ea_dll.cpp
+             $(SRCDIR)/grid_engine.cpp           \
+             $(SRCDIR)/basket_manager.cpp        \
+             $(SRCDIR)/recovery_engine.cpp       \
+             $(SRCDIR)/profit_lock_manager.cpp   \
+             $(SRCDIR)/intelligence_engine.cpp   \
+             $(SRCDIR)/geometric_imbalance.cpp   \
+             $(SRCDIR)/institutional_delta.cpp   \
+             $(SRCDIR)/error_memory.cpp          \
+             $(SRCDIR)/math_calibrator.cpp       \
+             $(SRCDIR)/deepseek_vision.cpp       \
+             $(SRCDIR)/market_intelligence.cpp   \
+             $(SRCDIR)/grid_slot_agent.cpp       \
+             $(SRCDIR)/agent_orchestrator.cpp    \
+             $(SRCDIR)/top4ea_engine.cpp         \
+             $(SRCDIR)/top4ea_dll.cpp
 
 ## ── Source loader (thin main) ─────────────────────────────────
 LOADER_SRC := $(SRCDIR)/loader.cpp
