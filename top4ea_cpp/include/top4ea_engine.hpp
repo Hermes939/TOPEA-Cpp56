@@ -12,6 +12,7 @@
 #include "intelligence_engine.hpp"
 #include "market_intelligence.hpp"
 #include "agent_orchestrator.hpp"
+#include "break_even_manager.hpp"
 #include <memory>
 #include <atomic>
 #include <mutex>
@@ -106,6 +107,16 @@ private:
     void closeWavePartial(int wave);  // wave 0=Wave1(50%) wave 1=Wave2(30%)
     void closeOneSide(int sideType);
 
+    // ─── Break-Even Orders ───────────────────────────────────
+    // Met à jour les ordres BE-BS et BE-SS sur le broker
+    // d'après la composition courante du panier (positions marché).
+    void updateBreakEvenOrders(const std::vector<OrderInfo>& orders);
+
+    // Ferme un côté au marché quand son niveau BE est atteint
+    // side=0 → ferme positions Buy (BE-SS déclenché)
+    // side=1 → ferme positions Sell (BE-BS déclenché)
+    void closeSideAtBE(int side);
+
     [[nodiscard]] std::vector<OrderInfo> fetchOrders();
     [[nodiscard]] double basketProfit(
         const std::vector<OrderInfo>& orders) const noexcept;
@@ -147,6 +158,9 @@ private:
     std::unique_ptr<MarketIntelligence> marketIntel_;
     AgentOrchestrator                   orchestrator_;
 
+    // ─── Break-Even Manager ──────────────────────────────────
+    BreakEvenManager                    beMgr_;
+
     // Cache de la dernière analyse (pour dashboard)
     mutable std::mutex                  intelMu_;
     IntelligenceEngine::Analysis        lastIntel_;
@@ -158,6 +172,20 @@ private:
     std::atomic<int> bsTicket_ { -1 };
     double  ssLevel_     = 0.0;
     double  bsLevel_     = 0.0;
+
+    // ── Horodatages de création SS/BS (anti-doublon) ─────────
+    // syncTriggersFallback n'invalide pas un ticket créé depuis
+    // moins de beProtectWindowSec secondes (évite faux-positifs
+    // dus aux HTTP 429 / latence API).
+    TimePoint ssCreatedAt_ = {};
+    TimePoint bsCreatedAt_ = {};
+    static constexpr int kBeProtectWindowSec = 10;
+
+    // ── Relance immédiate après trigger géométrique ──────────
+    // Quand un SS ou BS se déclenche, ce flag force le passage
+    // de la gate HTTP au tick suivant → trailGrid() est appelé
+    // sans attendre la seconde réglementaire.
+    std::atomic<bool> triggerFired_ { false };
 
     // ── Ancrage géométrique de la grille ─────────────────────
     // Établi une seule fois au démarrage (ou après basket close)

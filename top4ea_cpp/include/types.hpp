@@ -235,6 +235,16 @@ struct Config {
     int         basketRecoveryThreshold = 5;
     double      basketRecoveryBonus     = 0.05;
 
+    // ─── Break-Even Orders (BE-BS / BE-SS) ───────────────────
+    // BE-BS : buy stop au prix moyen des sells + buffer
+    //         → si prix remonte jusqu'ici, les sells sont à l'équilibre
+    // BE-SS : sell stop au prix moyen des buys  - buffer
+    //         → si prix descend jusqu'ici, les buys  sont à l'équilibre
+    // beBufferPts : marge de sécurité supplémentaire (en points)
+    //              couvre les frais de commission/spread + cushion
+    bool        beEnabled    = true;
+    int         beBufferPts  = 30;    // 30 pts ≈ 3 pips XAUUSDm (inclut commissions)
+
     // ─── Connexion MetaApi ───────────────────────────────────
     // token et accountId lus depuis METAAPI_TOKEN / METAAPI_ACCOUNT_ID
     // region lue depuis METAAPI_REGION (défaut : new-york)

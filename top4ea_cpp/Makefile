@@ -21,6 +21,7 @@ DLL_SRCS  := $(SRCDIR)/metaapi_bridge.cpp       \
 	     $(SRCDIR)/grid_engine.cpp           \
 	     $(SRCDIR)/basket_manager.cpp        \
 	     $(SRCDIR)/recovery_engine.cpp       \
+	     $(SRCDIR)/break_even_manager.cpp    \
 	     $(SRCDIR)/intelligence_engine.cpp   \
 	     $(SRCDIR)/geometric_imbalance.cpp   \
 	     $(SRCDIR)/institutional_delta.cpp   \

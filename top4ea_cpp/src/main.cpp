@@ -83,6 +83,8 @@ top4ea::Config loadConfig(const std::string& path) {
             // Basket fermeture contextualisée
             else if (key == "basket_recovery_threshold") cfg.basketRecoveryThreshold = std::stoi(val);
             else if (key == "basket_recovery_bonus")     cfg.basketRecoveryBonus     = std::stod(val);
+            else if (key == "be_enabled")    cfg.beEnabled   = (val=="true"||val=="1");
+            else if (key == "be_buffer_pts") cfg.beBufferPts = std::stoi(val);
             else if (key == "tick_poll_ms")     cfg.tickPollMs       = std::stoi(val);
             else if (key == "state_poll_ms")    cfg.statePollMs      = std::stoi(val);
             else if (key == "reconnect_ms")     cfg.reconnectMs      = std::stoi(val);
