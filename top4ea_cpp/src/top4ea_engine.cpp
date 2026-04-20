@@ -714,6 +714,25 @@ void TOP4EA_Engine::trailGrid() {
     double ssLot = recovery_->sellLot();
     double bsLot = recovery_->buyLot();
 
+    // ── Lire la décision Visual AI + DeepSeek (orchestrateur) ────
+    // LOCK_WAIT  : DeepSeek ou VisualAI a détecté une zone de risque élevé
+    //              → on gèle le trailing (ne pas modifier les stops existants)
+    // TRAIL_FREEZE: RSI extrême ou désaccord fort DeepSeek → gel protecteur
+    // STOP_ORDERS : spread critique / news spike → aucun nouvel ordre
+    // NO_TRADE    : session fermée → aucun nouvel ordre
+    MarketDecision vdDecision = orchestrator_.currentDecision();
+    bool vlDecisionStopsNew   = (vdDecision == MarketDecision::STOP_ORDERS ||
+                                 vdDecision == MarketDecision::NO_TRADE);
+    bool vlDecisionFreeze     = (vdDecision == MarketDecision::LOCK_WAIT ||
+                                 vdDecision == MarketDecision::TRAIL_FREEZE);
+
+    if (vlDecisionStopsNew) {
+        log("[DS/VisualAI] trailGrid bloqué — décision="
+            + MarketIntelligence::decisionName(vdDecision)
+            + " (aucun nouvel ordre stop)");
+        return;
+    }
+
     // ── Lire la dernière analyse intelligence ─────────────────
     // Les facteurs de gap et le freeze sont pilotés par l'intelligence
     // qui prend en compte : régime marché, delta, recovery, vélocité P&L
@@ -736,6 +755,14 @@ void TOP4EA_Engine::trailGrid() {
             double pnl  = basketProfit(ord);
             trailFrozen = (pnl >= cfg_.basketTarget * cfg_.trailFreezeZone && pnl > 0.0);
         }
+    }
+
+    // Gel Visual AI / DeepSeek surcharge Intel si plus restrictif
+    if (vlDecisionFreeze && !trailFrozen) {
+        log("[DS/VisualAI] Trail gelé par décision="
+            + MarketIntelligence::decisionName(vdDecision)
+            + " (LOCK_WAIT ou TRAIL_FREEZE — stops non modifiés)");
+        trailFrozen = true;
     }
 
     // ── Trailing session-based + phases de profit ─────────────
@@ -1340,64 +1367,31 @@ void TOP4EA_Engine::updateProfitLockOrders(const std::vector<OrderInfo>& orders,
 }
 
 // ────────────────────────────────────────────────────────────
-//  closeSideAtVL — fermeture au marché d'un côté (profit verrouillé)
-//  side=0 → ferme toutes les positions Buy (V-SS déclenché)
-//  side=1 → ferme toutes les positions Sell (V-BS déclenché)
-//  Appelé depuis detectGeometricTriggers quand niveau VL est franchi.
+//  closeSideAtVL — verrouillage déclenché → fermeture GLOBALE du panier
+//  side=0 → V-SS déclenché (côté BUY avait du profit verrouillé)
+//  side=1 → V-BS déclenché (côté SELL avait du profit verrouillé)
+//
+//  PHILOSOPHIE DU SYSTÈME :
+//    Le verrou V-SS/V-BS est un filet de sécurité trailing placé quand
+//    un profit important est détecté sur un côté.  Quand ce niveau est
+//    franchi (marché qui revient), on NE ferme JAMAIS un seul côté :
+//    fermer le côté profitable et laisser le côté perdant courir
+//    aggraverait les pertes et va à l'encontre de la logique basket.
+//    La seule action correcte est la fermeture TOTALE du panier global
+//    (closeBasketAtomic), qui capture le profit verrouillé tout en
+//    stoppant immédiatement le saignement de l'autre côté.
 // ────────────────────────────────────────────────────────────
 void TOP4EA_Engine::closeSideAtVL(int side) {
-    // Supprimer les ordres stops de grille (SS et BS) pour libérer la marge
-    int ss = ssTicket_.load();
-    int bs = bsTicket_.load();
-    if (ss > 0) { bridge_->sendCommand(makeDelete(ss)); ssTicket_.store(-1); ssLevel_ = 0.0; }
-    if (bs > 0) { bridge_->sendCommand(makeDelete(bs)); bsTicket_.store(-1); bsLevel_ = 0.0; }
+    log("[VL] Verrouillage " + std::string(side==0?"V-SS (BUY)":"V-BS (SELL)")
+        + " déclenché → fermeture GLOBALE panier"
+        " (jamais fermeture partielle d'un seul côté)");
 
-    // Supprimer l'ordre V opposé (plus utile une fois le côté fermé)
-    const auto& oppSlot = (side == 0) ? beMgr_.bsBE() : beMgr_.ssBE();
-    if (oppSlot.ticket > 0) bridge_->sendCommand(makeDelete(oppSlot.ticket));
-
-    auto orders = fetchOrders();
-    OrderType toClose = (side == 0) ? OrderType::Buy : OrderType::Sell;
-    Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
-
-    int closed = 0, total = 0;
-    for (const auto& o : orders) {
-        if (o.type != toClose) continue;
-        ++total;
-        double price = (toClose == OrderType::Buy) ? t.bid : t.ask;
-        auto res = bridge_->sendCommand(makeClose(o, price), 2000);
-        if (res.success) ++closed;
-    }
-
-    // Reset recovery du côté fermé
-    if (side == 0) { recovery_->resetBuy();  beMgr_.resetSS(); }
-    else           { recovery_->resetSell(); beMgr_.resetBS(); }
-
-    // Rafraîchir le cache
-    auto fresh = fetchOrders();
-    { std::lock_guard lk(ordersMu_); orders_ = fresh; }
-
-    log("[VL] Côté " + std::string(side==0?"BUY":"SELL")
-        + " fermé au marché (profit verrouillé) — "
-        + std::to_string(closed) + "/" + std::to_string(total) + " positions");
-
-    // Si le panier restant est nul ou en profit → fermer tout
-    double remPnl = basketProfit(fresh);
-    if (fresh.empty() || remPnl >= cfg_.basketTarget * 0.2) {
-        log("[VL] Panier résiduel P&L=" + std::to_string(remPnl)
-            + " → déclenchement closeBasketAtomic()");
-        if (!basketClosing_.exchange(true)) {
-            closingStart_ = Clock::now();
-            closeBasketAtomic();
-            basketClosing_.store(false);
-        }
+    if (!basketClosing_.exchange(true)) {
+        closingStart_ = Clock::now();
+        closeBasketAtomic();
+        basketClosing_.store(false);
     } else {
-        // Repositionner la grille depuis le nouveau mid
-        Tick t2; { std::lock_guard lk(tickMu_); t2 = lastTick_; }
-        gridOrigin_ = (t2.bid + t2.ask) * 0.5;
-        state_.store(EAState::GridActive);
-        log("[VL] Grille repositionnée @ " + std::to_string(gridOrigin_)
-            + " — cycle continue côté opposé");
+        log("[VL] closeBasketAtomic déjà en cours — VL ignoré (doublon)");
     }
 }
 
