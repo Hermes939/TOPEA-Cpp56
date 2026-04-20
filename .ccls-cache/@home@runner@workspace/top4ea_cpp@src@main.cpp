@@ -43,7 +43,12 @@ top4ea::Config loadConfig(const std::string& path) {
         std::string key = trim(line.substr(0, eq));
         std::string val = trim(line.substr(eq+1));
         try {
-            if      (key == "symbol")           cfg.symbol           = val;
+            if      (key == "platform") {
+                if      (val == "mt5" || val == "MT5") cfg.platform = top4ea::PlatformType::MT5;
+                else if (val == "mt4" || val == "MT4") cfg.platform = top4ea::PlatformType::MT4;
+                else                                   cfg.platform = top4ea::PlatformType::Auto;
+            }
+            else if (key == "symbol")           cfg.symbol           = val;
             else if (key == "base_lot")         cfg.baseLot          = std::stod(val);
             else if (key == "lot_multiplier")   cfg.lotMultiplier    = std::stod(val);
             else if (key == "grid_gap")         cfg.gridGap          = std::stoi(val);
@@ -97,12 +102,16 @@ top4ea::Config loadConfig(const std::string& path) {
 
 // ─── Affichage bannière ──────────────────────────────────────
 void printBanner(const top4ea::Config& cfg) {
+    const char* platStr = (cfg.platform == top4ea::PlatformType::MT5) ? "MT5"
+                        : (cfg.platform == top4ea::PlatformType::MT4) ? "MT4"
+                        : "Auto (détection au démarrage)";
     std::cout << R"(
 ╔══════════════════════════════════════════════════╗
-║        TOP4EA  C++20  v3.0  — INSTITUTIONNEL     ║
-║   Grid Recovery EA — Connexion MetaApi MT4       ║
+║        TOP4EA  C++20  v3.1  — INSTITUTIONNEL     ║
+║   Grid Recovery EA — MetaApi MT4 / MT5           ║
 ╠══════════════════════════════════════════════════╣
-)" << "║  Symbole   : " << cfg.symbol       << "\n"
+)" << "║  Plateforme: " << platStr      << "\n"
+   << "║  Symbole   : " << cfg.symbol       << "\n"
    << "║  Digits    : " << (cfg.digits==0 ? "0 (AUTO-DÉTECTION BROKER)" :
                              std::to_string(cfg.digits) + " (surcharge manuelle)") << "\n"
    << "║  BaseLot   : " << cfg.baseLot      << "\n"

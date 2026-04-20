@@ -177,24 +177,59 @@ int BasketCloser::phase2_singles(const std::vector<OrderInfo>& buys,
     currentTick_ = refresh_();
     int nS = (int)singles.size();
 
-    // ── Fermeture PARALLÈLE (cible ≤50ms) ───────────────────
-    // Zone A (≤4 ordres) : toujours parallèle
-    // Zone B/C (5+)      : parallèle aussi — les futures attendent toutes
+    // ── Fermeture différenciée par zone ──────────────────────
+    // Zone A (≤4 ordres) : parallèle direct, cible ≤20ms
+    // Zone B (5-8 ordres) : parallèle par lots de 4 avec refresh inter-lot
+    // Zone C (9+ ordres) : parallèle par lots de 4, refresh + délai inter-lot
+    //                       pour éviter de saturer le broker
+    static constexpr int BATCH_SIZE = 4;
+
     std::vector<std::future<bool>> futures;
     futures.reserve(nS);
 
-    for (int k = 0; k < nS; ++k) {
-        const auto& o = singles[k];
-        double price = (o.type == OrderType::Buy)
-                       ? currentTick_.bid
-                       : currentTick_.ask;
-        int    ticket  = o.ticket;
-        double lots    = o.lots;
-        int    slip    = cfg_.slippage;
-        futures.push_back(std::async(std::launch::async,
-            [this, ticket, lots, price, slip]() -> bool {
-                return closeOrder_(ticket, lots, price, slip);
-            }));
+    if (zone == BasketZone::A) {
+        // Zone A : tout en parallèle d'un coup
+        for (int k = 0; k < nS; ++k) {
+            const auto& o = singles[k];
+            double price = (o.type == OrderType::Buy)
+                           ? currentTick_.bid : currentTick_.ask;
+            int    ticket = o.ticket;
+            double lots   = o.lots;
+            int    slip   = cfg_.slippage;
+            futures.push_back(std::async(std::launch::async,
+                [this, ticket, lots, price, slip]() -> bool {
+                    return closeOrder_(ticket, lots, price, slip);
+                }));
+        }
+    } else {
+        // Zone B/C : traitement par lots pour ne pas saturer le broker
+        for (int k = 0; k < nS; ++k) {
+            const auto& o = singles[k];
+            double price = (o.type == OrderType::Buy)
+                           ? currentTick_.bid : currentTick_.ask;
+            int    ticket = o.ticket;
+            double lots   = o.lots;
+            int    slip   = cfg_.slippage;
+            futures.push_back(std::async(std::launch::async,
+                [this, ticket, lots, price, slip]() -> bool {
+                    return closeOrder_(ticket, lots, price, slip);
+                }));
+
+            // Après chaque lot de BATCH_SIZE ordres, attendre + rafraîchir le prix
+            bool isLastInBatch = ((k + 1) % BATCH_SIZE == 0);
+            bool isLastOrder   = (k == nS - 1);
+            if (isLastInBatch && !isLastOrder) {
+                // Attendre les futures du lot courant avant le prochain
+                int batchStart = k - BATCH_SIZE + 1;
+                for (int j = batchStart; j <= k; ++j)
+                    futures[j].wait();
+                // Rafraîchir les prix pour le lot suivant
+                currentTick_ = refresh_();
+                // Zone C : légère pause pour éviter d'inonder l'API broker
+                if (zone == BasketZone::C)
+                    std::this_thread::sleep_for(Ms(5));
+            }
+        }
     }
 
     int count = 0;

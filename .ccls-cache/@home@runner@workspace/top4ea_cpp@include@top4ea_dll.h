@@ -1,10 +1,11 @@
 // ============================================================
 //  TOP4EA — top4ea_dll.h
 //  API C exportée — interface DLL C++20
+//  Compatible MT4 et MT5 via MetaApi REST
 //
 //  Compatible :
 //   - Linux  : libtop4ea.so  (dlopen)
-//   - Windows: top4ea.dll    (LoadLibrary / MQL4 #import)
+//   - Windows: top4ea.dll    (LoadLibrary / MQL4 ou MQL5 #import)
 //
 //  Pattern d'utilisation :
 //    void* h = TOP4EA_Create("top4ea.conf");
@@ -44,7 +45,7 @@ void   TOP4EA_OnTick(void* handle,
 //     Retourne 0 = OK, -1 = erreur
 int    TOP4EA_CloseAll(void* handle);
 
-// ─── Commandes de trading directes (mode MT4 DLL) ───────────
+// ─── Commandes de trading directes (mode MT4/MT5 DLL) ───────
 //     Retournent le ticket (>0) ou un code erreur (<0)
 int    TOP4EA_PlaceOrder(void* handle,
                          int    order_type,
@@ -56,11 +57,20 @@ int    TOP4EA_PlaceOrder(void* handle,
                          int    slippage,
                          const char* comment);
 
-int    TOP4EA_CloseOrder (void* handle, int ticket, double lots,
-                          double price, int slippage);
-int    TOP4EA_DeleteOrder(void* handle, int ticket);
-int    TOP4EA_ModifyOrder(void* handle, int ticket, double price,
-                          double sl, double tp);
+int    TOP4EA_CloseOrder  (void* handle, int ticket, double lots,
+                           double price, int slippage);
+int    TOP4EA_DeleteOrder (void* handle, int ticket);
+
+// ModifyOrder  : modification d'un ordre PENDING (BuyStop, SellStop, Limit)
+//   → ORDER_MODIFY + orderId via MetaApi (MT4 et MT5)
+int    TOP4EA_ModifyOrder (void* handle, int ticket, double price,
+                           double sl, double tp);
+
+// ModifyPosition : modification SL/TP d'une POSITION OUVERTE (Buy, Sell)
+//   MT5 → POSITION_MODIFY + positionId (requis par MT5)
+//   MT4 → ORDER_MODIFY + positionId (MetaApi accepte les deux)
+int    TOP4EA_ModifyPosition(void* handle, int ticket,
+                              double sl, double tp);
 
 // ─── Infos compte (MT4 DLL) ─────────────────────────────────
 double TOP4EA_GetBalance    (void* handle);

@@ -51,7 +51,12 @@ static top4ea::Config loadConfig(const char* path) {
         std::string key = trim(line.substr(0, eq));
         std::string val = trim(line.substr(eq + 1));
         try {
-            if      (key=="symbol")           cfg.symbol            = val;
+            if      (key=="platform") {
+                if      (val=="mt5"||val=="MT5") cfg.platform = top4ea::PlatformType::MT5;
+                else if (val=="mt4"||val=="MT4") cfg.platform = top4ea::PlatformType::MT4;
+                else                             cfg.platform = top4ea::PlatformType::Auto;
+            }
+            else if (key=="symbol")           cfg.symbol            = val;
             else if (key=="base_lot")         cfg.baseLot           = std::stod(val);
             else if (key=="lot_multiplier")   cfg.lotMultiplier     = std::stod(val);
             else if (key=="grid_gap")         cfg.gridGap           = std::stoi(val);
@@ -256,9 +261,27 @@ int TOP4EA_ModifyOrder(void* handle, int ticket, double price,
     auto* h = static_cast<TOP4EA_Handle*>(handle);
 
     top4ea::TradeCmd cmd;
-    cmd.op     = top4ea::TradeCmd::Op::ModifyOrder;
+    cmd.op     = top4ea::TradeCmd::Op::ModifyOrder;  // ordre pending
     cmd.ticket = ticket;
     cmd.price  = price;
+    cmd.sl     = sl;
+    cmd.tp     = tp;
+
+    auto res = h->engine.sendTrade(cmd);
+    return res.success ? 1 : -(res.error);
+}
+
+// ── Modification SL/TP d'une position ouverte (MT5 : POSITION_MODIFY) ─
+// À utiliser pour modifier les stops d'un trade actif (Buy/Sell)
+// Différent de ModifyOrder qui s'applique aux ordres pending uniquement.
+int TOP4EA_ModifyPosition(void* handle, int ticket, double sl, double tp) {
+    if (!handle) return -1;
+    auto* h = static_cast<TOP4EA_Handle*>(handle);
+
+    top4ea::TradeCmd cmd;
+    cmd.op     = top4ea::TradeCmd::Op::ModifyPosition;
+    cmd.ticket = ticket;
+    cmd.price  = 0.0;
     cmd.sl     = sl;
     cmd.tp     = tp;
 
