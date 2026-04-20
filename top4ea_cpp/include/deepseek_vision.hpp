@@ -118,11 +118,19 @@ public:
     [[nodiscard]] int callCount()  const noexcept { return callCount_.load();  }
     [[nodiscard]] int errorCount() const noexcept { return errorCount_.load(); }
 
-    // TTL du cache en secondes — 120s pour garantir fraîcheur entre deux appels
-    static constexpr int CACHE_TTL_SEC = 120;
+    // TTL du cache en secondes — 45s max pour garantir fraîcheur en temps réel
+    static constexpr int CACHE_TTL_SEC = 45;
 
-    // Intervalle minimum entre deux appels API — 10s pour rester éveillé
-    static constexpr int MIN_CALL_INTERVAL_SEC = 10;
+    // Intervalle minimum entre deux appels API — 5s pour ne jamais s'endormir
+    static constexpr int MIN_CALL_INTERVAL_SEC = 5;
+
+    // Délai de réveil forcé — si signal > FORCE_WAKE_SEC, bypass throttle
+    static constexpr int FORCE_WAKE_SEC = 30;
+
+    // ─── Réveil forcé — contourne le throttling si signal périmé ──────
+    // Appelle requestAnalysis en ignorant lastCallTime_ si le signal
+    // est absent ou plus vieux que FORCE_WAKE_SEC secondes.
+    void forceWake(const DSMarketContext& ctx);
 
 private:
     // ─── HTTP synchrone (appelé depuis le thread dédié) ───────

@@ -175,12 +175,15 @@ void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
         lastDecision_ = vd;
     }
 
-    // ── Appel DeepSeek LLM — toutes les 50 ticks (non-bloquant) ──
-    // Lance un thread détaché → résultat disponible ~1s plus tard
+    // ── Appel DeepSeek LLM — toutes les 5 ticks (non-bloquant) ──
+    // Fréquence augmentée (15→5) pour que DeepSeek ne s'endorme jamais.
+    // En mode recovery actif, appel encore plus fréquent (toujours si tick%3==1).
+    // forceWake() est appelé toutes les 20 ticks pour bypass si signal périmé.
     // Garde : requiert au moins 5 barres M30 (réduit de 26 → accélère le démarrage)
-    // Les premières analyses utilisent les barres synthétiques du warmUp()
     bool m30Ready = ((int)m30Bars_.size() >= 5);
-    if (deepseek_.hasApiKey() && (tickCount_ % 15 == 1) && m30Ready) {
+    int dsTickMod = inRecovery ? 3 : 5;  // plus réactif en recovery
+    if (deepseek_.hasApiKey() && m30Ready &&
+        ((tickCount_ % dsTickMod == 1) || (tickCount_ % 20 == 0))) {
         // Snapshot indicateurs pour le prompt
         std::deque<Bar> bM5, bM30;
         double se;
@@ -224,7 +227,12 @@ void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
         ctx.netDelta    = bsLots - ssLots;
         ctx.inRecovery  = inRecovery;
 
-        try { deepseek_.requestAnalysis(ctx); }
+        // Réveil forcé si signal trop vieux (prioritaire sur requestAnalysis normal)
+        // forceWake bypasse le throttle et relance immédiatement si périmé
+        try {
+            deepseek_.forceWake(ctx);      // réveil si signal > 30s
+            deepseek_.requestAnalysis(ctx); // appel normal (throttlé à 5s)
+        }
         catch (...) { /* thread non-créé — pas critique */ }
     }
 }

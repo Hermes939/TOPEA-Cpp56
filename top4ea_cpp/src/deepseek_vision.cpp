@@ -45,6 +45,36 @@ DeepSeekVision::DeepSeekVision() {
 DeepSeekVision::~DeepSeekVision() {}
 
 // ============================================================
+//  forceWake — réveil forcé si le signal est périmé
+//  Bypasse le throttling si lastSignal est vieux > FORCE_WAKE_SEC
+// ============================================================
+void DeepSeekVision::forceWake(const DSMarketContext& ctx) {
+    if (!hasApiKey()) return;
+
+    // Vérifier si le signal est réellement périmé
+    {
+        std::lock_guard lk(signalMu_);
+        if (lastSignal_.signal != DSSignal::UNKNOWN) {
+            auto age = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - lastSignal_.timestamp).count();
+            if (age < FORCE_WAKE_SEC) return;  // Signal encore frais, pas besoin
+        }
+    }
+
+    // Forcer le reset du throttle pour provoquer un appel immédiat
+    {
+        std::lock_guard lk(callMu_);
+        if (callInProgress_) return;  // Déjà un appel en cours, patience
+        // Réinitialiser lastCallTime_ pour bypass throttle
+        lastCallTime_ = std::chrono::steady_clock::now()
+                        - std::chrono::seconds(MIN_CALL_INTERVAL_SEC + 1);
+    }
+
+    std::cout << "[DeepSeekVision] RÉVEIL FORCÉ — signal périmé, nouvel appel lancé\n";
+    requestAnalysis(ctx);
+}
+
+// ============================================================
 //  requestAnalysis — lance un appel asynchrone non-bloquant
 // ============================================================
 void DeepSeekVision::requestAnalysis(const DSMarketContext& ctx) {
