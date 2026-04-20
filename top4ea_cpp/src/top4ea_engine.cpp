@@ -896,8 +896,9 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
             return;
         }
 
-        // ── Cooldown post-déclenchement (3 s) ──────────────────
-        // Après qu'un SS se déclenche, on attend avant de placer le suivant.
+        // ── Cooldown post-déclenchement (20 s) ─────────────────
+        // Après qu'un SS se déclenche, on attend 20s avant de placer le suivant.
+        // Cela donne au CascadeGuard le temps de mesurer le déplacement réel.
         auto now = Clock::now();
         static TimePoint ssCoolUntil{};
         if (now < ssCoolUntil) {
@@ -905,6 +906,20 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
                             ssCoolUntil - now).count();
             log("[Guard-SS] cooldown " + std::to_string(left) + "ms restants — rejeté");
             return;
+        }
+
+        // ── CascadeGuard : bloquer si déplacement insuffisant (recovery) ───
+        // Ne s'applique qu'aux recovery stops (recovDepth > 0).
+        // Les SS_GRID initiaux (recovDepth = 0) sont toujours autorisés.
+        if (recovDepth > 0) {
+            auto chk = recovery_->liveCheck((double)grid_->effectiveGridGap());
+            if (!chk.priceDispatchOk) {
+                log("[Guard-SS-CG] CascadeGuard bloque création SS recovery"
+                    " | dépl=" + std::to_string((int)chk.priceDisplacement)
+                    + "/" + std::to_string((int)chk.requiredDisplacement)
+                    + "pts — nouveau SS refusé");
+                return;
+            }
         }
 
         log("SS absent → création @ " + std::to_string(pl.targetPrice)
@@ -918,7 +933,7 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
             ssTicket_.store(res.ticket);
             ssLevel_     = pl.targetPrice;
             ssCreatedAt_ = Clock::now();   // horodatage anti-doublon
-            ssCoolUntil  = ssCreatedAt_ + std::chrono::seconds(3);
+            ssCoolUntil  = ssCreatedAt_ + std::chrono::seconds(20);
             log("SS créé ticket=" + std::to_string(res.ticket)
                 + " @ " + std::to_string(ssLevel_));
             // Enregistrement sous-agent L(sellCount)
@@ -994,7 +1009,7 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
             return;
         }
 
-        // ── Cooldown post-déclenchement (3 s) ──────────────────
+        // ── Cooldown post-déclenchement (20 s) ─────────────────
         auto now = Clock::now();
         static TimePoint bsCoolUntil{};
         if (now < bsCoolUntil) {
@@ -1002,6 +1017,20 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
                             bsCoolUntil - now).count();
             log("[Guard-BS] cooldown " + std::to_string(left) + "ms restants — rejeté");
             return;
+        }
+
+        // ── CascadeGuard : bloquer si déplacement insuffisant (recovery) ───
+        // Ne s'applique qu'aux recovery stops (recovDepth > 0).
+        // Les BS_GRID initiaux (recovDepth = 0) sont toujours autorisés.
+        if (recovDepth > 0) {
+            auto chk = recovery_->liveCheck((double)grid_->effectiveGridGap());
+            if (!chk.priceDispatchOk) {
+                log("[Guard-BS-CG] CascadeGuard bloque création BS recovery"
+                    " | dépl=" + std::to_string((int)chk.priceDisplacement)
+                    + "/" + std::to_string((int)chk.requiredDisplacement)
+                    + "pts — nouveau BS refusé");
+                return;
+            }
         }
 
         log("BS absent → création @ " + std::to_string(pl.targetPrice)
@@ -1015,7 +1044,7 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
             bsTicket_.store(res.ticket);
             bsLevel_     = pl.targetPrice;
             bsCreatedAt_ = Clock::now();   // horodatage anti-doublon
-            bsCoolUntil  = bsCreatedAt_ + std::chrono::seconds(3);
+            bsCoolUntil  = bsCreatedAt_ + std::chrono::seconds(20);
             log("BS créé ticket=" + std::to_string(res.ticket)
                 + " @ " + std::to_string(bsLevel_));
             // Enregistrement sous-agent L(buyCount)
