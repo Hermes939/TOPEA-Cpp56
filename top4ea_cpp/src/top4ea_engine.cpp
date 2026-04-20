@@ -1390,15 +1390,29 @@ void TOP4EA_Engine::updateProfitLockOrders(const std::vector<OrderInfo>& orders,
 //    de target basket en tienne compte.  Le côté restant continue seul.
 // ────────────────────────────────────────────────────────────
 void TOP4EA_Engine::closeSideAtVL(int side) {
-    // ── 1. Supprimer les ordres stops de grille (SS et BS) ───
+    // ── 1. Supprimer UNIQUEMENT le stop de direction opposée au VL ───
+    //
+    //  Règle de direction (clé de la philosophie verrou) :
+    //    • V-SS est un SellStop  → même direction que SS → V-SS et SS partagent
+    //      la direction VENTE.  Quand V-SS tire (Buy fermé), on GARDE le SS car
+    //      le côté Sell a encore besoin de ses ordres de récupération SellStop.
+    //      On SUPPRIME le BS (BuyStop) car les Buy sont fermés, plus d'entrées Buy.
+    //
+    //    • V-BS est un BuyStop   → même direction que BS → V-BS et BS partagent
+    //      la direction ACHAT.  Quand V-BS tire (Sell fermé), on GARDE le BS car
+    //      le côté Buy a encore besoin de ses ordres de récupération BuyStop.
+    //      On SUPPRIME le SS (SellStop) car les Sell sont fermés, plus d'entrées Sell.
+    //
+    //  Résumé : conserver le stop HOMONYME du VL, supprimer l'opposé.
     int ss = ssTicket_.load();
     int bs = bsTicket_.load();
-    if (ss > 0) { bridge_->sendCommand(makeDelete(ss)); ssTicket_.store(-1); ssLevel_ = 0.0; }
-    if (bs > 0) { bridge_->sendCommand(makeDelete(bs)); bsTicket_.store(-1); bsLevel_ = 0.0; }
-
-    // Supprimer l'ordre V du côté que l'on ferme (plus utile)
-    const auto& ownSlot = (side == 0) ? beMgr_.ssBE() : beMgr_.bsBE();
-    if (ownSlot.ticket > 0) bridge_->sendCommand(makeDelete(ownSlot.ticket));
+    if (side == 0) {
+        // V-SS déclenché → Buy fermé → supprimer BS (plus d'entrées Buy), garder SS
+        if (bs > 0) { bridge_->sendCommand(makeDelete(bs)); bsTicket_.store(-1); bsLevel_ = 0.0; }
+    } else {
+        // V-BS déclenché → Sell fermé → supprimer SS (plus d'entrées Sell), garder BS
+        if (ss > 0) { bridge_->sendCommand(makeDelete(ss)); ssTicket_.store(-1); ssLevel_ = 0.0; }
+    }
 
     auto orders = fetchOrders();
     OrderType toClose = (side == 0) ? OrderType::Buy : OrderType::Sell;
