@@ -1104,7 +1104,10 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
 
         if (dualTrailMode_ == TrailMode::AGGRESSIVE && ssLots > 1e-6) {
             // ── Mode AGGRESSIVE : glisser BS progressivement vers le verrou ──
-            double lockLevel = ssAvgEntry + (double)cfg_.bsOvershootPips * cfg_.point;
+            // Lock level = ssAvgEntry - bsOvershootPips (EN-DESSOUS de l'entrée moyenne)
+            // Pour les positions SELL : profit garanti = bsOvershootPips quand BS déclenche
+            //   → profit/lot = ssAvgEntry - lockLevel = bsOvershootPips pts
+            double lockLevel = ssAvgEntry - (double)cfg_.bsOvershootPips * cfg_.point;
             double stepSize  = (double)cfg_.aggressiveStepPts * cfg_.point;
 
             // Initialiser la cible progressive au niveau BS courant
@@ -1126,7 +1129,8 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
                         log("[AGGRESSIVE] Verrou BS activé @ "
                             + std::to_string(lockLevel)
                             + " [ss_entry=" + std::to_string(ssAvgEntry)
-                            + " +overshoot=" + std::to_string(cfg_.bsOvershootPips) + "pts]");
+                            + " -overshoot=" + std::to_string(cfg_.bsOvershootPips) + "pts"
+                            + " profit_garanti=" + std::to_string(cfg_.bsOvershootPips) + "pts]");
                     }
                 }
             }
