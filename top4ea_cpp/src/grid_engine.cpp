@@ -105,8 +105,8 @@ bool GridEngine::isPriceValid(double price, double minDist,
 StopPlacement GridEngine::computeSellStop(
     int    currentTicket,
     double currentLevel,
-    double anchorPrice,
-    int    recovDepth,
+    double /*anchorPrice*/,
+    int    /*recovDepth*/,
     double gapFactor) const noexcept
 {
     std::lock_guard lk(mu_);
@@ -114,19 +114,15 @@ StopPlacement GridEngine::computeSellStop(
 
     double bid = lastBid_.load(std::memory_order_relaxed);
 
-    // ── Ancrage géométrique pur ────────────────────────────────
-    // Le SellStop est placé à EXACTEMENT (depth+1) niveaux de grille
-    // EN DESSOUS de l'origine. Jamais calculé depuis le prix courant.
-    // Si anchorPrice non encore établi → fallback bid courant (init)
-    double anchor = (anchorPrice > 0.0) ? anchorPrice : bid;
-
-    // Pas géométrique : 1 GridGap complet × facteur asymétrique intelligence
+    // ── Ancrage flottant : toujours 1 GridGap sous le bid courant ─
+    // La profondeur de récupération (recovDepth) n'affecte PAS le
+    // niveau géométrique — elle pilote uniquement le lot via Kelly.
+    // Cela garantit que le SS est toujours à exactement 1 gap du prix,
+    // quelle que soit l'historique des triggers.
     double step = effectiveGridGap() * gapFactor * pointSize();
+    double target = math::normalize(bid - step, cfg_.digits);
 
-    // Niveau fixe : origin - (depth+1) × step
-    double target = math::normalize(anchor - (recovDepth + 1) * step, cfg_.digits);
-
-    // Garde broker : le stop doit respecter le STOPLEVEL minimum
+    // Garde broker : respect du STOPLEVEL minimum
     double mdist = minDistPts();
     if ((bid - target) < mdist)
         target = math::normalize(bid - mdist, cfg_.digits);
@@ -135,16 +131,13 @@ StopPlacement GridEngine::computeSellStop(
     sp.currentPrice = currentLevel;
 
     if (currentTicket <= 0) {
-        // Stop absent → création au niveau géométrique
         sp.needsCreate = true;
     } else {
         sp.delta = target - currentLevel;
         // ── RATCHET HAUT UNIQUEMENT ────────────────────────────
-        // Un SellStop ne se déplace QUE vers le haut (jamais vers le bas).
-        // Si target < currentLevel → stop trop bas, on garde le niveau actuel
-        // plus élevé (protège mieux). Seuil = 1 grid-gap entier (anti-bruit).
+        // Le SS ne monte que si le bid a monté d'au moins 1 gap entier.
         double minChange = effectiveGridGap() * pointSize();
-        sp.needsModify = (sp.delta > minChange);   // delta > 0 = monte seulement
+        sp.needsModify = (sp.delta > minChange);
     }
     return sp;
 }
@@ -152,8 +145,8 @@ StopPlacement GridEngine::computeSellStop(
 StopPlacement GridEngine::computeBuyStop(
     int    currentTicket,
     double currentLevel,
-    double anchorPrice,
-    int    recovDepth,
+    double /*anchorPrice*/,
+    int    /*recovDepth*/,
     double gapFactor) const noexcept
 {
     std::lock_guard lk(mu_);
@@ -161,18 +154,13 @@ StopPlacement GridEngine::computeBuyStop(
 
     double ask = lastAsk_.load(std::memory_order_relaxed);
 
-    // ── Ancrage géométrique pur ────────────────────────────────
-    // Le BuyStop est placé à EXACTEMENT (depth+1) niveaux de grille
-    // AU DESSUS de l'origine. Jamais calculé depuis le prix courant.
-    double anchor = (anchorPrice > 0.0) ? anchorPrice : ask;
-
-    // Pas géométrique : 1 GridGap complet × facteur asymétrique intelligence
+    // ── Ancrage flottant : toujours 1 GridGap au-dessus du ask courant ─
+    // La profondeur de récupération (recovDepth) n'affecte PAS le
+    // niveau géométrique — elle pilote uniquement le lot via Kelly.
     double step = effectiveGridGap() * gapFactor * pointSize();
+    double target = math::normalize(ask + step, cfg_.digits);
 
-    // Niveau fixe : origin + (depth+1) × step
-    double target = math::normalize(anchor + (recovDepth + 1) * step, cfg_.digits);
-
-    // Garde broker : le stop doit respecter le STOPLEVEL minimum
+    // Garde broker : respect du STOPLEVEL minimum
     double mdist = minDistPts();
     if ((target - ask) < mdist)
         target = math::normalize(ask + mdist, cfg_.digits);
@@ -183,14 +171,11 @@ StopPlacement GridEngine::computeBuyStop(
     if (currentTicket <= 0) {
         sp.needsCreate = true;
     } else {
-        sp.delta = currentLevel - target;  // > 0 = currentLevel monte au-dessus de target
+        sp.delta = currentLevel - target;
         // ── RATCHET BAS UNIQUEMENT ─────────────────────────────
-        // Un BuyStop ne se déplace QUE vers le bas (jamais vers le haut).
-        // target < currentLevel → descend → OK.
-        // target > currentLevel → le stop montait vers le prix → refusé.
-        // Seuil = 1 grid-gap entier (anti-bruit).
+        // Le BS ne descend que si le ask a baissé d'au moins 1 gap entier.
         double minChange = effectiveGridGap() * pointSize();
-        sp.needsModify = (sp.delta > minChange);  // delta>0 = currentLevel > target = BS descend
+        sp.needsModify = (sp.delta > minChange);
     }
     return sp;
 }

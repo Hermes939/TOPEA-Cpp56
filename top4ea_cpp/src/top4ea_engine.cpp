@@ -597,11 +597,12 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
 
     if (pl.needsCreate) {
         double curBid  = grid_->bid();
-        double minDist = grid_->effectiveGridGap() * cfg_.point;  // 1 gap complet
+        double minDist = grid_->minDistPts();  // seuil broker minimum (≈102 pts)
 
-        // ── Garde distance géométrique ─────────────────────────
-        // Le SS doit être strictement à ≥1 GridGap sous le bid courant.
-        // Sans cela, le stop s'exécute immédiatement → cascade infinie.
+        // ── Garde distance broker ───────────────────────────────
+        // Le SS doit respecter le STOPLEVEL minimum du broker.
+        // Avec ancrage flottant (bid - step), la distance est toujours
+        // ≈1 GridGap >> minDist sauf anomalie de prix.
         if ((curBid - pl.targetPrice) < minDist) {
             log("[Guard-SS] trop proche bid " + std::to_string(curBid)
                 + " | target=" + std::to_string(pl.targetPrice)
@@ -673,10 +674,12 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
 
     if (pl.needsCreate) {
         double curAsk  = grid_->ask();
-        double minDist = grid_->effectiveGridGap() * cfg_.point;  // 1 gap complet
+        double minDist = grid_->minDistPts();  // seuil broker minimum (≈102 pts)
 
-        // ── Garde distance géométrique ─────────────────────────
-        // Le BS doit être strictement à ≥1 GridGap AU-DESSUS du ask courant.
+        // ── Garde distance broker ───────────────────────────────
+        // Le BS doit respecter le STOPLEVEL minimum du broker.
+        // Avec ancrage flottant (ask + step), la distance est toujours
+        // ≈1 GridGap >> minDist sauf anomalie de prix.
         if ((pl.targetPrice - curAsk) < minDist) {
             log("[Guard-BS] trop proche ask " + std::to_string(curAsk)
                 + " | target=" + std::to_string(pl.targetPrice)

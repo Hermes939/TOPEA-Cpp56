@@ -564,14 +564,22 @@ std::string MetaApiBridge::cmdToJson(const TradeCmd& cmd) const {
         oss << ",\"comment\":\""  << commentFmt(cmd.comment) << "\"";
         oss << ",\"magic\":"      << cmd.magic;
 
-        if (mt5) {
-            // MT5 : "deviation" en points (≠ MT4 "slippage" en ticks)
-            // + fillingMode requis par certains brokers MT5
-            oss << ",\"deviation\":"   << cmd.slippage;
-            oss << ",\"fillingMode\":\"ORDER_FILLING_FOK\"";
-        } else {
-            // MT4 : "slippage" en ticks
-            oss << ",\"slippage\":"    << cmd.slippage;
+        // deviation / slippage + fillingMode :
+        // UNIQUEMENT pour les ordres au MARCHÉ (Buy/Sell directs).
+        // Les ordres PENDING (BuyStop, SellStop, BuyLimit, SellLimit)
+        // ne les acceptent pas — MetaApi retourne HTTP 400 si présents.
+        const bool isMarketExec = (cmd.type == OrderType::Buy ||
+                                   cmd.type == OrderType::Sell);
+        if (isMarketExec) {
+            if (mt5) {
+                // MT5 : "deviation" en points (≠ MT4 "slippage" en ticks)
+                // + fillingMode requis par certains brokers MT5
+                oss << ",\"deviation\":"   << cmd.slippage;
+                oss << ",\"fillingMode\":\"ORDER_FILLING_FOK\"";
+            } else {
+                // MT4 : "slippage" en ticks
+                oss << ",\"slippage\":"    << cmd.slippage;
+            }
         }
 
     } else if (cmd.op == TradeCmd::Op::CloseOrder ||

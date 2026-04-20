@@ -64,8 +64,20 @@ void MetaApiBridge::start() {
     if (acc) {
         connected_.store(true);
         if (connectCb_) connectCb_(true);
+
+        // ── Détection plateforme (MT4 ou MT5) ────────────────
+        // Applique la plateforme détectée sauf si la config force une valeur.
+        if (cfg_.platform == PlatformType::Auto) {
+            platform_.store(acc->platform);
+        } else {
+            platform_.store(cfg_.platform);  // surcharge manuelle
+        }
+        const char* platStr = (platform_.load() == PlatformType::MT5) ? "MT5"
+                            : (platform_.load() == PlatformType::MT4) ? "MT4"
+                            : "Auto";
         std::cout << "[MetaApi] Connecté — " << accountId_
-                  << " | Balance=" << acc->balance << " " << acc->currency << "\n";
+                  << " | Balance=" << acc->balance << " " << acc->currency
+                  << " | Platform=" << platStr << "\n";
         if (accountCb_) accountCb_(*acc);
     } else {
         std::cerr << "[MetaApi] Connexion initiale échouée — "
@@ -491,10 +503,15 @@ std::string MetaApiBridge::cmdToJson(const TradeCmd& cmd) const {
     // Précision prix = digits broker (défaut sécurisé : 5 si non détecté)
     int pricePrecision = (cfg_.digits > 0) ? cfg_.digits : 5;
 
+    // Plateforme effective : config ou détectée
+    const bool mt5 = (platform_.load() == PlatformType::MT5)
+                  || (platform_.load() == PlatformType::Auto
+                      && cfg_.platform == PlatformType::MT5);
+
     std::ostringstream oss;
     oss << std::fixed;
 
-    // Lot toujours à 2 décimales (standard MT4/MT5)
+    // ── Formateurs ───────────────────────────────────────────
     auto priceFmt = [&](double price) -> std::string {
         std::ostringstream tmp;
         tmp << std::fixed << std::setprecision(pricePrecision) << price;
@@ -505,12 +522,22 @@ std::string MetaApiBridge::cmdToJson(const TradeCmd& cmd) const {
         tmp << std::fixed << std::setprecision(2) << lots;
         return tmp.str();
     };
+    // MT5 limite les commentaires à 31 caractères
+    auto commentFmt = [&](const std::string& c) -> std::string {
+        return mt5 ? c.substr(0, std::min((int)c.size(), 31)) : c;
+    };
 
+    // ── Type d'action MetaApi ────────────────────────────────
     auto actionType = [&]() -> std::string {
-        if (cmd.op == TradeCmd::Op::DeletePending) return "ORDER_CANCEL";
-        if (cmd.op == TradeCmd::Op::CloseOrder)   return "POSITION_CLOSE_ID";
-        if (cmd.op == TradeCmd::Op::CloseBy)      return "POSITION_CLOSE_ID";
-        if (cmd.op == TradeCmd::Op::ModifyOrder)  return "ORDER_MODIFY";
+        if (cmd.op == TradeCmd::Op::DeletePending)  return "ORDER_CANCEL";
+        if (cmd.op == TradeCmd::Op::CloseOrder)     return "POSITION_CLOSE_ID";
+        if (cmd.op == TradeCmd::Op::CloseBy)        return "POSITION_CLOSE_ID";
+        if (cmd.op == TradeCmd::Op::ModifyOrder)    return "ORDER_MODIFY";
+        if (cmd.op == TradeCmd::Op::ModifyPosition) {
+            // MT5 : POSITION_MODIFY pour modifier SL/TP d'une position ouverte
+            // MT4 : ORDER_MODIFY avec positionId fonctionne aussi via MetaApi
+            return mt5 ? "POSITION_MODIFY" : "ORDER_MODIFY";
+        }
         switch (cmd.type) {
             case OrderType::Buy:       return "ORDER_TYPE_BUY";
             case OrderType::Sell:      return "ORDER_TYPE_SELL";
@@ -534,21 +561,43 @@ std::string MetaApiBridge::cmdToJson(const TradeCmd& cmd) const {
             oss << ",\"stopLoss\":"   << priceFmt(cmd.sl);
         if (cmd.tp > 0.0)
             oss << ",\"takeProfit\":" << priceFmt(cmd.tp);
-        oss << ",\"comment\":\""  << cmd.comment << "\"";
+        oss << ",\"comment\":\""  << commentFmt(cmd.comment) << "\"";
         oss << ",\"magic\":"      << cmd.magic;
-        oss << ",\"slippage\":"   << cmd.slippage;
+
+        if (mt5) {
+            // MT5 : "deviation" en points (≠ MT4 "slippage" en ticks)
+            // + fillingMode requis par certains brokers MT5
+            oss << ",\"deviation\":"   << cmd.slippage;
+            oss << ",\"fillingMode\":\"ORDER_FILLING_FOK\"";
+        } else {
+            // MT4 : "slippage" en ticks
+            oss << ",\"slippage\":"    << cmd.slippage;
+        }
+
     } else if (cmd.op == TradeCmd::Op::CloseOrder ||
                cmd.op == TradeCmd::Op::CloseBy) {
         // Résolution ID MetaApi réel (UUID ou numérique) depuis la table idMap_
         oss << ",\"positionId\":\"" << resolveId(cmd.ticket) << "\"";
+
     } else if (cmd.op == TradeCmd::Op::DeletePending) {
         oss << ",\"orderId\":\"" << resolveId(cmd.ticket) << "\"";
+
     } else if (cmd.op == TradeCmd::Op::ModifyOrder) {
         // Ordres pending (SellStop / BuyStop) → orderId + openPrice obligatoire
         // Précision broker correcte — CRITIQUE pour les ordres Exness 3-digit
         oss << ",\"orderId\":\"" << resolveId(cmd.ticket) << "\"";
         if (cmd.price > 0.0)
             oss << ",\"openPrice\":" << priceFmt(cmd.price);
+        if (cmd.sl > 0.0)
+            oss << ",\"stopLoss\":"   << priceFmt(cmd.sl);
+        if (cmd.tp > 0.0)
+            oss << ",\"takeProfit\":" << priceFmt(cmd.tp);
+
+    } else if (cmd.op == TradeCmd::Op::ModifyPosition) {
+        // Modification SL/TP d'une position ouverte
+        // MT5 : POSITION_MODIFY + positionId
+        // MT4 : ORDER_MODIFY + positionId (MetaApi accepte les deux)
+        oss << ",\"positionId\":\"" << resolveId(cmd.ticket) << "\"";
         if (cmd.sl > 0.0)
             oss << ",\"stopLoss\":"   << priceFmt(cmd.sl);
         if (cmd.tp > 0.0)
@@ -667,6 +716,14 @@ AccountSnapshot MetaApiBridge::parseAccount(const std::string& j) {
     a.marginLevel = jsonGetD(j, "marginLevel");
     a.leverage    = jsonGetI(j, "leverage");
     a.currency    = jsonGet (j, "currency");
+
+    // ── Détection plateforme MT4 / MT5 ───────────────────────
+    // MetaApi retourne "platform": "mt4" ou "platform": "mt5"
+    // dans accountInformation. On mappe ici pour adapter le comportement.
+    std::string plat = jsonGet(j, "platform");
+    if      (plat == "mt5" || plat == "MT5") a.platform = PlatformType::MT5;
+    else if (plat == "mt4" || plat == "MT4") a.platform = PlatformType::MT4;
+    else                                      a.platform = PlatformType::Auto;
     return a;
 }
 
