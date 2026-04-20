@@ -79,6 +79,17 @@ Remplace l'ancien système break-even. Fonctionnement :
 
 Paramètres `top4ea.conf` : `vl_enabled`, `vl_activation_pts` (défaut 50 pts), `vl_trail_pts` (défaut 30 pts).
 
+## DeepSeek AI — Intégration active (market_intelligence.cpp)
+
+L'IA DeepSeek était présente mais n'agissait pas réellement (signal affiché, aucun effet opérationnel). 4 fixes appliqués :
+
+| Fix | Problème | Solution |
+|-----|----------|----------|
+| [A] Orientation active | DS ignoré sur TRAIL_NATURAL/OBSERVE (cas les plus fréquents) | DS ≥60% confiance oriente vers TRAIL_AGGRESSIVE dans sa direction |
+| [B] Seuils abaissés | LOCK=85%, désaccord=90% → DS à 65% était ignoré | LOCK→70%, désaccord→70% |
+| [C] Déblocage mutuel recovery | DS SELL bloque BS + struct.Bull bloque SS → tout bloqué | DS ≥70% contrebalance la structure seule, débloque recovery dans sa direction |
+| [D] Biais trail réel | DS n'impactait jamais les distances SS/BS | dsTrailSSBias/dsTrailBSBias appliqués dans trailGrid() (max ±20%) |
+
 ## Bugs corrigés (session courante)
 
 | Bug | Cause | Fix |
@@ -87,4 +98,3 @@ Paramètres `top4ea.conf` : `vl_enabled`, `vl_activation_pts` (défaut 50 pts), 
 | Recovery Martingale ignorée | CascadeGuard/VisualAI bloquait l'incrément du compteur | `forceIncrementSell/Buy()` + appel toujours à `onSellStopTriggered` |
 | V-SS/V-BS lot incorrect | `baseLot` au lieu de `totalLots` | Lot = `totalLots` pour fermer tout le côté au déclenchement |
 | Break-Even → Verrouillage | Concept erroné (zéro perte) | Redesign complet : trailing ratchet profit lock (V-SS/V-BS) |
-

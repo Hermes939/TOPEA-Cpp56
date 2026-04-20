@@ -105,6 +105,11 @@ struct VisualDecision {
     // ── Couche DeepSeek LLM ───────────────────────────────────
     DeepSeekSignal  dsSignal;              // dernier signal LLM (UNKNOWN si inactif)
     bool            dsOverride = false;    // true si DeepSeek a surpassé l'analyse locale
+
+    // Biais DS sur les facteurs de trail (appliqués dans trailGrid)
+    // < 1.0 = serrer ce côté (trigger plus tôt), > 1.0 = élargir (protection)
+    double dsTrailSSBias = 1.0;
+    double dsTrailBSBias = 1.0;
 };
 
 // ============================================================

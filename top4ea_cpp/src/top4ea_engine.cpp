@@ -872,6 +872,31 @@ void TOP4EA_Engine::trailGrid() {
         // Phase 0 : facteurs Intel conservés sans modification (distance initiale)
     }
 
+    // ── Biais DS sur les facteurs de gap (si trail non figé) ─
+    // Applique le biais directionnel calculé par DeepSeek dans analyze().
+    // Max ±20% sur les facteurs. Ignoré si trail est figé (zone TP).
+    if (!trailFrozen) {
+        VisualDecision latestVD = marketIntel_->getLastDecision();
+        if (latestVD.dsTrailSSBias != 1.0 || latestVD.dsTrailBSBias != 1.0) {
+            static double prevSSBias = 1.0, prevBSBias = 1.0;
+            if (std::abs(latestVD.dsTrailSSBias - prevSSBias) > 0.01 ||
+                std::abs(latestVD.dsTrailBSBias - prevBSBias) > 0.01) {
+                log("[DS-TRAIL] Biais appliqué: SS×"
+                    + std::to_string(latestVD.dsTrailSSBias).substr(0, 5)
+                    + " BS×" + std::to_string(latestVD.dsTrailBSBias).substr(0, 5)
+                    + " (DS:" + latestVD.dsSignal.signalName()
+                    + " " + std::to_string((int)latestVD.dsSignal.confidence) + "%)");
+                prevSSBias = latestVD.dsTrailSSBias;
+                prevBSBias = latestVD.dsTrailBSBias;
+            }
+            ssGapFactor *= latestVD.dsTrailSSBias;
+            bsGapFactor *= latestVD.dsTrailBSBias;
+            // Clamp final : éviter des valeurs absurdes
+            ssGapFactor = std::clamp(ssGapFactor, 0.40, 4.0);
+            bsGapFactor = std::clamp(bsGapFactor, 0.40, 4.0);
+        }
+    }
+
     // Log transition freeze
     static bool wasFrozen = false;
     if (trailFrozen && !wasFrozen) {
