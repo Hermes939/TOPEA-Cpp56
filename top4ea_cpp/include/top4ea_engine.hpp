@@ -227,6 +227,18 @@ private:
     // 0 = aucune vague fermée | 1 = Wave1 faite (50%) | 2 = Wave2 faite (+30%)
     std::atomic<int>  waveState_     { 0 };
 
+    // ─── Dual Trail NATURAL / AGGRESSIVE ─────────────────────
+    // Mode courant basé sur le profit flottant SS (calculé à chaque tick)
+    TrailMode  dualTrailMode_       = TrailMode::NATURAL;
+    // Cible progressive du BS en mode AGGRESSIVE (glisse par steps)
+    double     aggressiveBsTarget_  = 0.0;
+    // Verrou activé : BS a atteint ss_entry + bsOvershootPips
+    bool       vLockActive_         = false;
+    // Prix du verrou (= ss_entry + bsOvershootPips * point)
+    double     vLockPrice_          = 0.0;
+    // Dernier profit SS en points (mis à jour dans ensureBuyStop, pour dashboard)
+    double     ssProfitPipsCache_   = 0.0;
+
     // ─── Profit réalisé dans le cycle en cours ───────────────
     // Quand V-SS ou V-BS verrouille et ferme un côté en cours de cycle,
     // le profit encaissé est mémorisé ici.  Le test de target basket

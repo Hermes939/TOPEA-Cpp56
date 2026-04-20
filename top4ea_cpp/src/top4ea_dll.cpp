@@ -95,6 +95,13 @@ static top4ea::Config loadConfig(const char* path) {
             else if (key=="vl_enabled")         cfg.vlEnabled        = (val=="true"||val=="1");
             else if (key=="vl_activation_pts")  cfg.vlActivationPts  = std::stoi(val);
             else if (key=="vl_trail_pts")        cfg.vlTrailPts       = std::stoi(val);
+            // Dual Trail NATURAL / AGGRESSIVE
+            else if (key=="trail_mode_auto")     cfg.trailModeAuto     = (val=="true"||val=="1");
+            else if (key=="x_lock_pips")         cfg.xLockPips         = std::stoi(val);
+            else if (key=="bs_overshoot_pips")   cfg.bsOvershootPips   = std::stoi(val);
+            else if (key=="aggressive_step_pts") cfg.aggressiveStepPts = std::stoi(val);
+            else if (key=="natural_bs_dist_pts") cfg.naturalBsDistPts  = std::stoi(val);
+            else if (key=="natural_ss_dist_pts") cfg.naturalSsDistPts  = std::stoi(val);
             // Rétrocompatibilité anciens fichiers .conf (be_ → vl_)
             else if (key=="be_enabled")    cfg.vlEnabled   = (val=="true"||val=="1");
             else if (key=="be_buffer_pts") cfg.vlTrailPts  = std::stoi(val);

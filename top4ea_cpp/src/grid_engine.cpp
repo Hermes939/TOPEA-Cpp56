@@ -102,12 +102,20 @@ bool GridEngine::isPriceValid(double price, double minDist,
     return true;
 }
 
+TrailMode GridEngine::getTrailMode(double ss_profit_pips) const noexcept {
+    if (!cfg_.trailModeAuto) return TrailMode::NATURAL;
+    return (ss_profit_pips >= (double)cfg_.xLockPips)
+           ? TrailMode::AGGRESSIVE
+           : TrailMode::NATURAL;
+}
+
 StopPlacement GridEngine::computeSellStop(
     int    currentTicket,
     double currentLevel,
     double /*anchorPrice*/,
     int    /*recovDepth*/,
-    double gapFactor) const noexcept
+    double gapFactor,
+    int    distOverridePts) const noexcept
 {
     std::lock_guard lk(mu_);
     StopPlacement sp;
@@ -115,11 +123,13 @@ StopPlacement GridEngine::computeSellStop(
     double bid = lastBid_.load(std::memory_order_relaxed);
 
     // ── Calcul de la distance SS/bid ──────────────────────────
+    // distOverridePts > 0 : override explicite (mode NATURAL asymétrique)
     // Mode fixe (trailFixedDistPts > 0) : distance exacte en points
     // Mode adaptatif (défaut)            : demi-gap × facteur intel
     double step;
-    if (cfg_.trailFixedDistPts > 0) {
-        step = (double)cfg_.trailFixedDistPts * pointSize();
+    int effectiveDist = (distOverridePts > 0) ? distOverridePts : cfg_.trailFixedDistPts;
+    if (effectiveDist > 0) {
+        step = (double)effectiveDist * pointSize();
     } else {
         step = halfGap() * gapFactor;
     }
@@ -140,11 +150,11 @@ StopPlacement GridEngine::computeSellStop(
         // ── RATCHET HAUT + seuil de réactivité ─────────────────
         // trailMinChangePts = 0  → réactif à chaque tick (1 point mini)
         // trailMinChangePts > 0  → bouge seulement si delta > seuil
-        // Mode fixe              → seuil = 1 pt par défaut (quasi-continu)
+        // Mode fixe ou override  → seuil = 1 pt par défaut (quasi-continu)
         double minChange;
         if (cfg_.trailMinChangePts > 0) {
             minChange = (double)cfg_.trailMinChangePts * pointSize();
-        } else if (cfg_.trailFixedDistPts > 0) {
+        } else if (effectiveDist > 0) {
             minChange = pointSize();            // 1 point → trail quasi-continu
         } else {
             minChange = halfGap() / 10.0;      // comportement original
@@ -159,7 +169,8 @@ StopPlacement GridEngine::computeBuyStop(
     double currentLevel,
     double /*anchorPrice*/,
     int    /*recovDepth*/,
-    double gapFactor) const noexcept
+    double gapFactor,
+    int    distOverridePts) const noexcept
 {
     std::lock_guard lk(mu_);
     StopPlacement sp;
@@ -167,11 +178,13 @@ StopPlacement GridEngine::computeBuyStop(
     double ask = lastAsk_.load(std::memory_order_relaxed);
 
     // ── Calcul de la distance BS/ask ──────────────────────────
+    // distOverridePts > 0 : override explicite (mode NATURAL asymétrique)
     // Mode fixe (trailFixedDistPts > 0) : distance exacte en points
     // Mode adaptatif (défaut)            : demi-gap × facteur intel
     double step;
-    if (cfg_.trailFixedDistPts > 0) {
-        step = (double)cfg_.trailFixedDistPts * pointSize();
+    int effectiveDist = (distOverridePts > 0) ? distOverridePts : cfg_.trailFixedDistPts;
+    if (effectiveDist > 0) {
+        step = (double)effectiveDist * pointSize();
     } else {
         step = halfGap() * gapFactor;
     }
@@ -192,11 +205,11 @@ StopPlacement GridEngine::computeBuyStop(
         // ── RATCHET BAS + seuil de réactivité ──────────────────
         // trailMinChangePts = 0  → réactif à chaque tick (1 point mini)
         // trailMinChangePts > 0  → bouge seulement si delta > seuil
-        // Mode fixe              → seuil = 1 pt par défaut (quasi-continu)
+        // Mode fixe ou override  → seuil = 1 pt par défaut (quasi-continu)
         double minChange;
         if (cfg_.trailMinChangePts > 0) {
             minChange = (double)cfg_.trailMinChangePts * pointSize();
-        } else if (cfg_.trailFixedDistPts > 0) {
+        } else if (effectiveDist > 0) {
             minChange = pointSize();            // 1 point → trail quasi-continu
         } else {
             minChange = halfGap() / 10.0;      // comportement original

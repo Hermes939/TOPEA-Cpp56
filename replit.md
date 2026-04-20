@@ -71,6 +71,19 @@ Variables d'environnement requises :
 
 Tous les paramètres configurables sans recompilation, incluant `platform = auto|mt4|mt5`.
 
+## Dual Trail NATURAL / AGGRESSIVE avec verrouillage profit (v3.2)
+
+Logique de trail à deux modes activée par `trail_mode_auto = true` dans `top4ea.conf` :
+
+- **NATURAL** : trail fixe symétrique ou asymétrique (`natural_ss_dist_pts` / `natural_bs_dist_pts`). Comportement identique au mode fixe existant.
+- **AGGRESSIVE** : déclenché quand le profit flottant des positions Sell ≥ `x_lock_pips`. Le BuyStop glisse progressivement vers le niveau de verrou (`ss_entry + bs_overshoot_pips`) par steps de `aggressive_step_pts` points par tick.
+- **VERROU** : une fois le BS à `ss_entry + bs_overshoot_pips`, il se verrouille (`[LOCK]`), garantissant un profit minimum même si déclenché avant le target global.
+- **Réinitialisation** : à la fermeture du basket (closeBasketAtomic), tout l'état AGGRESSIVE est remis à zéro → nouveau cycle repart en NATURAL.
+
+Dashboard console : `Trail : ACTIF [MODE: NATURAL]` / `ACTIF [MODE: AGGRESSIVE 🔒]` / `ACTIF [VERROU OK +Xpts]`
+
+Nouveaux paramètres `top4ea.conf` : `trail_mode_auto`, `x_lock_pips`, `bs_overshoot_pips`, `aggressive_step_pts`, `natural_bs_dist_pts`, `natural_ss_dist_pts`
+
 ## Système de Verrouillage Profit Trailing (V-SS / V-BS)
 
 Remplace l'ancien système break-even. Fonctionnement :

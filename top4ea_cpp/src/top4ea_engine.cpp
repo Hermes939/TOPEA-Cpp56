@@ -171,6 +171,12 @@ void TOP4EA_Engine::applySymbolSpec(const SymbolSpec& spec) {
         cfg_.vlTrailPts      = (int)std::round((double)cfg_.vlTrailPts * scale);
         // Rescale aussi trail_fixed_dist_pts et cascade_dispatch_pips
         cfg_.trailFixedDistPts = (int)std::round((double)cfg_.trailFixedDistPts * scale);
+        // Rescale dual trail pts (cohérence avec gridGap après changement de digits)
+        cfg_.xLockPips         = (int)std::round((double)cfg_.xLockPips         * scale);
+        cfg_.bsOvershootPips   = (int)std::round((double)cfg_.bsOvershootPips   * scale);
+        cfg_.aggressiveStepPts = (int)std::round((double)cfg_.aggressiveStepPts * scale);
+        cfg_.naturalBsDistPts  = (int)std::round((double)cfg_.naturalBsDistPts  * scale);
+        cfg_.naturalSsDistPts  = (int)std::round((double)cfg_.naturalSsDistPts  * scale);
         log("[BrokerSpec] Rescale grille ×" + std::to_string(scale)
             + " (digits " + std::to_string(oldDigits)
             + "→" + std::to_string(spec.digits)
@@ -942,7 +948,11 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
 
     // Ancrage géométrique pur : passe gridOrigin_ comme référence fixe
     // Le niveau est toujours à origin - (depth+1) × GridGap × factor
-    auto pl = grid_->computeSellStop(ss, ssLevel_.load(), gridOrigin_, recovDepth, gapFactor);
+    // Mode NATURAL asymétrique : utilise naturalSsDistPts si trailModeAuto activé
+    int ssDistOverride = -1;
+    if (cfg_.trailModeAuto && cfg_.naturalSsDistPts > 0)
+        ssDistOverride = cfg_.naturalSsDistPts;
+    auto pl = grid_->computeSellStop(ss, ssLevel_.load(), gridOrigin_, recovDepth, gapFactor, ssDistOverride);
 
     if (pl.needsCreate) {
         double curBid  = grid_->bid();
@@ -1040,9 +1050,121 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
         }
     }
 
+    // ── Dual Trail NATURAL / AGGRESSIVE ─────────────────────────
+    // Si trailModeAuto activé : calcule le profit SS flottant et choisit le mode
+    if (cfg_.trailModeAuto) {
+        // Calculer le profit flottant des positions Sell (en points)
+        std::vector<OrderInfo> ordSnapshot;
+        { std::lock_guard lk2(ordersMu_); ordSnapshot = orders_; }
+
+        double ssAvgEntry = 0.0, ssLots = 0.0;
+        for (const auto& o : ordSnapshot) {
+            if (o.type == OrderType::Sell && o.lots > 0.0) {
+                ssAvgEntry += o.openPrice * o.lots;
+                ssLots += o.lots;
+            }
+        }
+        if (ssLots > 1e-6) ssAvgEntry /= ssLots;
+
+        double curAsk       = grid_->ask();
+        double ssProfitPips = (ssLots > 1e-6)
+                              ? (ssAvgEntry - curAsk) / cfg_.point
+                              : 0.0;
+        ssProfitPipsCache_ = ssProfitPips;
+        dualTrailMode_     = grid_->getTrailMode(ssProfitPips);
+
+        if (dualTrailMode_ == TrailMode::AGGRESSIVE && ssLots > 1e-6) {
+            // ── Mode AGGRESSIVE : glisser BS progressivement vers le verrou ──
+            double lockLevel = ssAvgEntry + (double)cfg_.bsOvershootPips * cfg_.point;
+            double stepSize  = (double)cfg_.aggressiveStepPts * cfg_.point;
+
+            // Initialiser la cible progressive au niveau BS courant
+            if (aggressiveBsTarget_ <= 0.0 || aggressiveBsTarget_ < lockLevel) {
+                if (bsLevel_.load() > lockLevel)
+                    aggressiveBsTarget_ = bsLevel_.load();
+                else
+                    aggressiveBsTarget_ = lockLevel;
+            }
+
+            // Glisser vers le bas par un step par tick
+            if (!vLockActive_) {
+                aggressiveBsTarget_ -= stepSize;
+                if (aggressiveBsTarget_ <= lockLevel) {
+                    aggressiveBsTarget_ = lockLevel;
+                    if (!vLockActive_) {
+                        vLockActive_ = true;
+                        vLockPrice_  = lockLevel;
+                        log("[AGGRESSIVE] Verrou BS activé @ "
+                            + std::to_string(lockLevel)
+                            + " [ss_entry=" + std::to_string(ssAvgEntry)
+                            + " +overshoot=" + std::to_string(cfg_.bsOvershootPips) + "pts]");
+                    }
+                }
+            }
+
+            double aggressTarget = vLockActive_ ? vLockPrice_ : aggressiveBsTarget_;
+
+            // Garde broker : respecter STOPLEVEL minimum
+            double mdist = grid_->minDistPts();
+            if ((aggressTarget - curAsk) < mdist)
+                aggressTarget = math::normalize(curAsk + mdist, cfg_.digits);
+
+            // Modifier le BS si nécessaire (avec garde ratchet bas)
+            if (bs > 0 && !trailFrozen) {
+                double curBsLevel = bsLevel_.load();
+                double delta      = curBsLevel - aggressTarget;
+                if (delta > cfg_.point && aggressTarget > curAsk) {
+                    TradeCmd cmd;
+                    cmd.op     = TradeCmd::Op::ModifyOrder;
+                    cmd.ticket = bs;
+                    cmd.price  = math::normalize(aggressTarget, cfg_.digits);
+                    cmd.sl     = 0.0; cmd.tp = 0.0;
+                    auto res = bridge_->sendCommand(cmd);
+                    if (res.success) {
+                        bsLevel_.store(cmd.price);
+                        log("BS AGGRESSIVE ↓ → "
+                            + std::to_string(cmd.price)
+                            + (vLockActive_ ? " [LOCK]" : "")
+                            + " [-" + std::to_string(delta / cfg_.point) + "pts]"
+                            + " SS profit=" + std::to_string((int)ssProfitPips) + "pts");
+                    }
+                }
+            } else if (bs <= 0) {
+                // BS absent : créer à la cible aggressive
+                if ((aggressTarget - curAsk) >= mdist) {
+                    TradeCmd cmd = makeBuyStop(lot, math::normalize(aggressTarget, cfg_.digits), comment);
+                    auto res = bridge_->sendCommand(cmd);
+                    if (res.success) {
+                        bsTicket_.store(res.ticket);
+                        bsLevel_.store(aggressTarget);
+                        bsCreatedAt_ = Clock::now();
+                        log("BS AGGRESSIVE créé @ " + std::to_string(aggressTarget)
+                            + (vLockActive_ ? " [LOCK]" : ""));
+                    }
+                }
+            }
+            return;   // traitement AGGRESSIVE terminé — ne pas appeler computeBuyStop
+        }
+
+        // Passage de AGGRESSIVE → NATURAL : réinitialiser l'état agressif
+        if (dualTrailMode_ == TrailMode::NATURAL) {
+            bool hadLock = vLockActive_;
+            aggressiveBsTarget_ = 0.0;
+            vLockActive_        = false;
+            vLockPrice_         = 0.0;
+            if (hadLock)
+                log("[AGGRESSIVE→NATURAL] Cycle réinitialisé — profit SS sous seuil "
+                    + std::to_string(cfg_.xLockPips) + "pts");
+        }
+    }
+
+    // ── Mode NATURAL (ou trailModeAuto=false) ────────────────────
     // Ancrage géométrique pur : passe gridOrigin_ comme référence fixe
     // Le niveau est toujours à origin + (depth+1) × GridGap × factor
-    auto pl = grid_->computeBuyStop(bs, bsLevel_.load(), gridOrigin_, recovDepth, gapFactor);
+    int bsDistOverride = -1;
+    if (cfg_.trailModeAuto && cfg_.naturalBsDistPts > 0)
+        bsDistOverride = cfg_.naturalBsDistPts;
+    auto pl = grid_->computeBuyStop(bs, bsLevel_.load(), gridOrigin_, recovDepth, gapFactor, bsDistOverride);
 
     if (pl.needsCreate) {
         double curAsk  = grid_->ask();
@@ -1348,6 +1470,12 @@ void TOP4EA_Engine::closeBasketAtomic() {
     vlMgr_.reset();           // effacer tous les niveaux VL du cycle terminé
     waveState_.store(0);      // remettre à zéro le suivi des vagues pour le prochain cycle
     cycleRealizedPnL_ = 0.0;  // remettre à zéro le profit encaissé (VL partiels)
+    // ── Dual Trail : réinitialiser l'état AGGRESSIVE ──────────
+    dualTrailMode_      = TrailMode::NATURAL;
+    aggressiveBsTarget_ = 0.0;
+    vLockActive_        = false;
+    vLockPrice_         = 0.0;
+    ssProfitPipsCache_  = 0.0;
 
     // ── FIX CRITIQUE : vider le cache d'ordres immédiatement ────
     // Sans ce vidage, le tick suivant lit le cache périmé (7 ordres, P&L=+10$),
@@ -1932,8 +2060,35 @@ std::string TOP4EA_Engine::dashboard() const {
     }
     oss << "║  Vélocité  : " << basketMon_->velocity() << " $/tick\n";
     oss << "╠═══════════════════════════════════╣\n";
-    // Affichage du mode trail : fixe ou adaptatif
-    if (cfg_.trailFixedDistPts > 0) {
+    // Affichage du mode trail : fixe, adaptatif, ou NATURAL/AGGRESSIVE
+    if (cfg_.trailModeAuto) {
+        // ── Mode Dual Trail NATURAL / AGGRESSIVE ───────────────
+        std::string modeLabel;
+        if (vLockActive_) {
+            int profPips = (int)ssProfitPipsCache_;
+            modeLabel = "ACTIF [VERROU OK +" + std::to_string(profPips) + "pts]";
+        } else if (dualTrailMode_ == TrailMode::AGGRESSIVE) {
+            modeLabel = "ACTIF [MODE: AGGRESSIVE 🔒]";
+        } else {
+            modeLabel = "ACTIF [MODE: NATURAL]";
+        }
+        if (dashFrozen) modeLabel = "❄FIGÉ (zone TP)";
+
+        oss << "║  Trail  : " << modeLabel << "\n";
+        oss << "║  SS dist: " << cfg_.naturalSsDistPts << "pts"
+            << "  BS dist: ";
+        if (vLockActive_) {
+            oss << std::setprecision(5) << vLockPrice_ << " [LOCK]";
+        } else if (dualTrailMode_ == TrailMode::AGGRESSIVE && aggressiveBsTarget_ > 0.0) {
+            oss << std::setprecision(5) << aggressiveBsTarget_ << "→lock";
+        } else {
+            oss << cfg_.naturalBsDistPts << "pts";
+        }
+        oss << "\n";
+        oss << "║  SS profit: " << std::setprecision(1) << ssProfitPipsCache_
+            << "pts (seuil=" << cfg_.xLockPips << "pts)\n";
+        oss << std::setprecision(2);
+    } else if (cfg_.trailFixedDistPts > 0) {
         int pipSize = (cfg_.digits >= 3) ? 10 : 10;   // 1 pip = 10 points
         double pips = (double)cfg_.trailFixedDistPts / pipSize;
         oss << "║  Trail  : " << (dashFrozen ? "❄FIGÉ (zone TP)" : "ACTIF")

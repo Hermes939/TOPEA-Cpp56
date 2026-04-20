@@ -253,6 +253,24 @@ struct Config {
     int         vlActivationPts  = 50;   // profit minimum en pts avant activation du trailing
     int         vlTrailPts       = 30;   // distance trailing en pts (ex: 30 pts = 3 pips XAU)
 
+    // ─── Dual Trail NATURAL / AGGRESSIVE ─────────────────────────
+    // Quand trailModeAuto = true, le moteur surveille le profit flottant de la
+    // Sell Stop active et bascule en mode AGGRESSIVE quand profit >= xLockPips.
+    //
+    // NATURAL  : comportement symétrique existant (distances naturalSsDistPts / naturalBsDistPts)
+    // AGGRESSIVE : le BS glisse vers ss_entry + bsOvershootPips par steps de aggressiveStepPts/tick
+    //   → une fois le verrou atteint, le BS garantit un profit minimum même si déclenché avant target
+    //
+    // Les 6 paramètres correspondants dans top4ea.conf :
+    //   trail_mode_auto, x_lock_pips, bs_overshoot_pips,
+    //   aggressive_step_pts, natural_bs_dist_pts, natural_ss_dist_pts
+    bool        trailModeAuto      = false; // false = off (comportement actuel conservé)
+    int         xLockPips          = 500;   // pts profit SS → passage AGGRESSIVE
+    int         bsOvershootPips    = 500;   // verrou BS = ss_entry + n pts au-dessus
+    int         aggressiveStepPts  = 200;   // glissement BS par tick en mode AGGRESSIVE
+    int         naturalBsDistPts   = 600;   // distance BS NATURAL (0 = trailFixedDistPts)
+    int         naturalSsDistPts   = 600;   // distance SS NATURAL (0 = trailFixedDistPts)
+
     // ─── Connexion MetaApi ───────────────────────────────────
     // token et accountId lus depuis METAAPI_TOKEN / METAAPI_ACCOUNT_ID
     // region lue depuis METAAPI_REGION (défaut : new-york)
