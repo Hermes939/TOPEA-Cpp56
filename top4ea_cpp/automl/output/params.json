@@ -1,11 +1,11 @@
 {
-  "atr_mult": 0.5739,
-  "kelly_frac": 0.2934,
-  "gap_expansion": 0.0372,
-  "trail_asym": 0.1651,
-  "vel_trigger": 0.8366,
-  "cppi_mult": 3.0147,
-  "vabt_coeff": 0.1814,
-  "ou_theta": 0.1076,
-  "timestamp": 1776668907
+  "atr_mult": 0.3595,
+  "kelly_frac": 0.2946,
+  "gap_expansion": 0.0175,
+  "trail_asym": 0.1047,
+  "vel_trigger": 0.8214,
+  "cppi_mult": 3.0277,
+  "vabt_coeff": 0.1667,
+  "ou_theta": 0.0921,
+  "timestamp": 1776670261
 }
