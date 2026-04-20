@@ -256,7 +256,17 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
 
     // 0. Visual AI — mise à jour iniMTA + décision marché temps réel
     //    Appelé avant toute logique de grille pour nourrir l'orchestrateur
-    marketIntel_->update(tick, cfg_.point);
+    {
+        // Contexte panier pour prompt DeepSeek — lire cache sans fetch réseau
+        std::vector<OrderInfo> cached;
+        { std::lock_guard lk(ordersMu_); cached = orders_; }
+        double bPnl = basketProfit(cached);
+        int    nMkt = (int)std::count_if(cached.begin(), cached.end(),
+            [](const OrderInfo& o){
+                return o.type == OrderType::Buy || o.type == OrderType::Sell;
+            });
+        marketIntel_->update(tick, cfg_.point, bPnl, nMkt);
+    }
     {
         VisualDecision vd = marketIntel_->analyze();
         orchestrator_.applyDecision(vd);
@@ -586,15 +596,42 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
     auto pl = grid_->computeSellStop(ss, ssLevel_, gridOrigin_, recovDepth, gapFactor);
 
     if (pl.needsCreate) {
+        double curBid  = grid_->bid();
+        double minDist = grid_->effectiveGridGap() * cfg_.point;  // 1 gap complet
+
+        // ── Garde distance géométrique ─────────────────────────
+        // Le SS doit être strictement à ≥1 GridGap sous le bid courant.
+        // Sans cela, le stop s'exécute immédiatement → cascade infinie.
+        if ((curBid - pl.targetPrice) < minDist) {
+            log("[Guard-SS] trop proche bid " + std::to_string(curBid)
+                + " | target=" + std::to_string(pl.targetPrice)
+                + " | dist=" + std::to_string((curBid - pl.targetPrice) / cfg_.point)
+                + "pts < " + std::to_string(minDist / cfg_.point) + "pts min — rejeté");
+            return;
+        }
+
+        // ── Cooldown post-déclenchement (3 s) ──────────────────
+        // Après qu'un SS se déclenche, on attend avant de placer le suivant.
+        auto now = Clock::now();
+        static TimePoint ssCoolUntil{};
+        if (now < ssCoolUntil) {
+            auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            ssCoolUntil - now).count();
+            log("[Guard-SS] cooldown " + std::to_string(left) + "ms restants — rejeté");
+            return;
+        }
+
         log("SS absent → création @ " + std::to_string(pl.targetPrice)
             + " [origin=" + std::to_string(gridOrigin_)
             + " recov=" + std::to_string(recovDepth)
-            + " gap×" + std::to_string(gapFactor) + "]");
+            + " gap×" + std::to_string(gapFactor)
+            + " dist=" + std::to_string((curBid - pl.targetPrice) / cfg_.point) + "pts]");
         TradeCmd cmd = makeSellStop(lot, pl.targetPrice, comment);
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             ssTicket_.store(res.ticket);
             ssLevel_ = pl.targetPrice;
+            ssCoolUntil = Clock::now() + std::chrono::seconds(3);
             log("SS créé ticket=" + std::to_string(res.ticket)
                 + " @ " + std::to_string(ssLevel_));
             // Enregistrement sous-agent L(sellCount)
@@ -604,10 +641,10 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
                 bsTicket_.load(), bsLevel_, 0.0);
         }
     } else if (pl.needsModify && ss > 0 && !trailFrozen) {
-        // Modification uniquement si le gap ATR a changé le niveau géométrique
+        // Ratchet haut : target > ssLevel_ garanti par computeSellStop
         double curBid = grid_->bid();
         if (pl.targetPrice >= curBid) {
-            log("[Guard] SS: niveau géom. " + std::to_string(pl.targetPrice)
+            log("[Guard-SS] trail: cible " + std::to_string(pl.targetPrice)
                 + " >= bid " + std::to_string(curBid) + " — ignoré");
             return;
         }
@@ -619,8 +656,8 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             ssLevel_ = pl.targetPrice;
-            log("SS niveau mis à jour → " + std::to_string(pl.targetPrice)
-                + " [delta=" + std::to_string(pl.delta / cfg_.point) + "pts / ATR]");
+            log("SS ↑ ratchet → " + std::to_string(pl.targetPrice)
+                + " [+" + std::to_string(pl.delta / cfg_.point) + "pts]");
         }
     }
 }
@@ -635,15 +672,40 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
     auto pl = grid_->computeBuyStop(bs, bsLevel_, gridOrigin_, recovDepth, gapFactor);
 
     if (pl.needsCreate) {
+        double curAsk  = grid_->ask();
+        double minDist = grid_->effectiveGridGap() * cfg_.point;  // 1 gap complet
+
+        // ── Garde distance géométrique ─────────────────────────
+        // Le BS doit être strictement à ≥1 GridGap AU-DESSUS du ask courant.
+        if ((pl.targetPrice - curAsk) < minDist) {
+            log("[Guard-BS] trop proche ask " + std::to_string(curAsk)
+                + " | target=" + std::to_string(pl.targetPrice)
+                + " | dist=" + std::to_string((pl.targetPrice - curAsk) / cfg_.point)
+                + "pts < " + std::to_string(minDist / cfg_.point) + "pts min — rejeté");
+            return;
+        }
+
+        // ── Cooldown post-déclenchement (3 s) ──────────────────
+        auto now = Clock::now();
+        static TimePoint bsCoolUntil{};
+        if (now < bsCoolUntil) {
+            auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            bsCoolUntil - now).count();
+            log("[Guard-BS] cooldown " + std::to_string(left) + "ms restants — rejeté");
+            return;
+        }
+
         log("BS absent → création @ " + std::to_string(pl.targetPrice)
             + " [origin=" + std::to_string(gridOrigin_)
             + " recov=" + std::to_string(recovDepth)
-            + " gap×" + std::to_string(gapFactor) + "]");
+            + " gap×" + std::to_string(gapFactor)
+            + " dist=" + std::to_string((pl.targetPrice - curAsk) / cfg_.point) + "pts]");
         TradeCmd cmd = makeBuyStop(lot, pl.targetPrice, comment);
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             bsTicket_.store(res.ticket);
             bsLevel_ = pl.targetPrice;
+            bsCoolUntil = Clock::now() + std::chrono::seconds(3);
             log("BS créé ticket=" + std::to_string(res.ticket)
                 + " @ " + std::to_string(bsLevel_));
             // Enregistrement sous-agent L(buyCount)
@@ -653,9 +715,10 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
                 res.ticket, pl.targetPrice, lot);
         }
     } else if (pl.needsModify && bs > 0 && !trailFrozen) {
+        // Ratchet bas : target < bsLevel_ garanti par computeBuyStop
         double curAsk = grid_->ask();
         if (pl.targetPrice <= curAsk) {
-            log("[Guard] BS: niveau géom. " + std::to_string(pl.targetPrice)
+            log("[Guard-BS] trail: cible " + std::to_string(pl.targetPrice)
                 + " <= ask " + std::to_string(curAsk) + " — ignoré");
             return;
         }
@@ -667,8 +730,8 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             bsLevel_ = pl.targetPrice;
-            log("BS niveau mis à jour → " + std::to_string(pl.targetPrice)
-                + " [delta=" + std::to_string(pl.delta / cfg_.point) + "pts / ATR]");
+            log("BS ↓ ratchet → " + std::to_string(pl.targetPrice)
+                + " [-" + std::to_string(pl.delta / cfg_.point) + "pts]");
         }
     }
 }
@@ -1171,6 +1234,20 @@ std::string TOP4EA_Engine::dashboard() const {
         oss << "║  iniMTA H1  ATR=" << vd.h1.atr
             << "  MACD=" << std::setprecision(4) << vd.h1.macdHist
             << (vd.h1.macdBullish()?" ↑":" ↓") << "\n";
+        // ── Couche DeepSeek LLM ───────────────────────────────
+        if (vd.dsSignal.signal != DSSignal::UNKNOWN) {
+            oss << std::setprecision(0);
+            oss << "║  DeepSeek  : " << vd.dsSignal.signalName()
+                << " [" << (int)vd.dsSignal.confidence << "%]"
+                << (vd.dsOverride ? " ★OVERRIDE" : "")
+                << (vd.dsSignal.fresh ? "" : " [stale]") << "\n";
+            if (!vd.dsSignal.reason.empty()) {
+                std::string ds_r = vd.dsSignal.reason.substr(0,50);
+                oss << "║   " << ds_r << "\n";
+            }
+        } else {
+            oss << "║  DeepSeek  : en attente...\n";
+        }
         // Slots actifs
         auto snap = orchestrator_.snapshot();
         int activeN = 0;

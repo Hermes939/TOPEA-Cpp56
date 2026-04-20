@@ -1,7 +1,7 @@
 #pragma once
 // ============================================================
 //  TOP4EA — metaapi_bridge.hpp  C++20
-//  Connexion MetaApi REST (libcurl)
+//  Connexion MetaApi REST (libcurl) — Compatible MT4 ET MT5
 //  Auth    : env METAAPI_TOKEN
 //  Account : env METAAPI_ACCOUNT_ID
 //  Region  : env METAAPI_REGION (défaut: new-york)
@@ -9,6 +9,13 @@
 //  Ordres  : REST polling /positions + /orders
 //  Trades  : REST POST /trade
 //  Specs   : REST /symbols/{sym} — auto-adaptation broker
+//
+//  Adaptations MT5 (vs MT4) :
+//   - Paramètre "deviation" (points) au lieu de "slippage" (ticks)
+//   - Champ "fillingMode" requis pour ordres marché MT5
+//   - POSITION_MODIFY + positionId (MT5) vs ORDER_MODIFY (MT4)
+//     pour la modification du SL/TP de positions ouvertes
+//   - Plateforme détectée automatiquement depuis accountInformation
 // ============================================================
 #include "types.hpp"
 #include <functional>
@@ -111,20 +118,22 @@ struct TradeCmd {
         DeletePending,
         CloseOrder,
         CloseBy,
-        ModifyOrder
+        ModifyOrder,    // Ordre pending (BuyStop/SellStop/Limit)
+        ModifyPosition  // Position ouverte (SL/TP) — MT5 : POSITION_MODIFY
     };
-    Op          op       = Op::MarketOrder;
-    OrderType   type     = OrderType::Buy;
-    int         ticket   = -1;
-    int         ticket2  = -1;
-    double      lots     = 0.0;
-    double      price    = 0.0;
-    double      sl       = 0.0;
-    double      tp       = 0.0;
-    int         slippage = 3;
-    int         magic    = 0;
-    std::string comment  = {};
-    std::string symbol   = {};
+    Op          op              = Op::MarketOrder;
+    OrderType   type            = OrderType::Buy;
+    int         ticket          = -1;
+    int         ticket2         = -1;
+    double      lots            = 0.0;
+    double      price           = 0.0;
+    double      sl              = 0.0;
+    double      tp              = 0.0;
+    int         slippage        = 3;     // MT4 : slippage ticks
+                                         // MT5 : deviation points (renommé dans JSON)
+    int         magic           = 0;
+    std::string comment         = {};    // Tronqué à 31 chars pour MT5
+    std::string symbol          = {};
 };
 
 struct BridgeResponse {
@@ -171,6 +180,15 @@ public:
     // ── Met à jour la config interne (digits → precision JSON) ─
     void updateConfig(const Config& cfg) noexcept { cfg_ = cfg; }
 
+    // ── Plateforme détectée (MT4 ou MT5) ────────────────────
+    // Disponible après start() — basé sur accountInformation.platform
+    [[nodiscard]] PlatformType detectedPlatform() const noexcept {
+        return platform_.load();
+    }
+    [[nodiscard]] bool isMT5() const noexcept {
+        return platform_.load() == PlatformType::MT5;
+    }
+
 private:
     void tickLoop();
     void stateLoop();
@@ -214,8 +232,9 @@ private:
     std::string accountId_;
     std::string baseUrl_;
 
-    std::atomic<bool> connected_ { false };
-    std::atomic<bool> running_   { false };
+    std::atomic<bool>         connected_ { false };
+    std::atomic<bool>         running_   { false };
+    std::atomic<PlatformType> platform_  { PlatformType::Auto };
 
     std::jthread tickThread_;
     std::jthread stateThread_;

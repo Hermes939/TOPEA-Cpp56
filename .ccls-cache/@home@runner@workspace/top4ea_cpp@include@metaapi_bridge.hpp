@@ -1,7 +1,7 @@
 #pragma once
 // ============================================================
 //  TOP4EA — metaapi_bridge.hpp  C++20
-//  Connexion MetaApi REST (libcurl)
+//  Connexion MetaApi REST (libcurl) — Compatible MT4 ET MT5
 //  Auth    : env METAAPI_TOKEN
 //  Account : env METAAPI_ACCOUNT_ID
 //  Region  : env METAAPI_REGION (défaut: new-york)
@@ -9,6 +9,13 @@
 //  Ordres  : REST polling /positions + /orders
 //  Trades  : REST POST /trade
 //  Specs   : REST /symbols/{sym} — auto-adaptation broker
+//
+//  Adaptations MT5 (vs MT4) :
+//   - Paramètre "deviation" (points) au lieu de "slippage" (ticks)
+//   - Champ "fillingMode" requis pour ordres marché MT5
+//   - POSITION_MODIFY + positionId (MT5) vs ORDER_MODIFY (MT4)
+//     pour la modification du SL/TP de positions ouvertes
+//   - Plateforme détectée automatiquement depuis accountInformation
 // ============================================================
 #include "types.hpp"
 #include <functional>
@@ -18,6 +25,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <cmath>
 #include <sstream>
 #include <iomanip>
@@ -110,25 +118,28 @@ struct TradeCmd {
         DeletePending,
         CloseOrder,
         CloseBy,
-        ModifyOrder
+        ModifyOrder,    // Ordre pending (BuyStop/SellStop/Limit)
+        ModifyPosition  // Position ouverte (SL/TP) — MT5 : POSITION_MODIFY
     };
-    Op          op       = Op::MarketOrder;
-    OrderType   type     = OrderType::Buy;
-    int         ticket   = -1;
-    int         ticket2  = -1;
-    double      lots     = 0.0;
-    double      price    = 0.0;
-    double      sl       = 0.0;
-    double      tp       = 0.0;
-    int         slippage = 3;
-    int         magic    = 0;
-    std::string comment  = {};
-    std::string symbol   = {};
+    Op          op              = Op::MarketOrder;
+    OrderType   type            = OrderType::Buy;
+    int         ticket          = -1;
+    int         ticket2         = -1;
+    double      lots            = 0.0;
+    double      price           = 0.0;
+    double      sl              = 0.0;
+    double      tp              = 0.0;
+    int         slippage        = 3;     // MT4 : slippage ticks
+                                         // MT5 : deviation points (renommé dans JSON)
+    int         magic           = 0;
+    std::string comment         = {};    // Tronqué à 31 chars pour MT5
+    std::string symbol          = {};
 };
 
 struct BridgeResponse {
     bool        success = false;
-    int         ticket  = -1;
+    int         ticket  = -1;   // int synthétique stable (peut être un hash)
+    std::string orderId = {};   // ID MetaApi brut — utilisé pour modify/delete
     int         error   = 0;
     double      price   = 0.0;
     std::string msg     = {};
@@ -169,6 +180,15 @@ public:
     // ── Met à jour la config interne (digits → precision JSON) ─
     void updateConfig(const Config& cfg) noexcept { cfg_ = cfg; }
 
+    // ── Plateforme détectée (MT4 ou MT5) ────────────────────
+    // Disponible après start() — basé sur accountInformation.platform
+    [[nodiscard]] PlatformType detectedPlatform() const noexcept {
+        return platform_.load();
+    }
+    [[nodiscard]] bool isMT5() const noexcept {
+        return platform_.load() == PlatformType::MT5;
+    }
+
 private:
     void tickLoop();
     void stateLoop();
@@ -182,11 +202,12 @@ private:
     static bool        jsonGetB   (const std::string& json, const std::string& key);
     static std::string jsonGetNested(const std::string& json, const std::string& key);
 
+    // ── Parseurs (non-static pour accéder à idMap_) ──────────
     static Tick            parseTick        (const std::string& json);
-    static OrderInfo       parsePosition    (const std::string& json);
-    static OrderInfo       parsePendingOrder(const std::string& json);
+    OrderInfo              parsePosition    (const std::string& json);
+    OrderInfo              parsePendingOrder(const std::string& json);
     static AccountSnapshot parseAccount     (const std::string& json);
-    static BridgeResponse  parseTradeResult (const std::string& json);
+    BridgeResponse         parseTradeResult (const std::string& json);
     static SymbolSpec      parseSymbolSpec  (const std::string& json,
                                              const std::string& symbol);
 
@@ -194,13 +215,26 @@ private:
 
     static std::vector<std::string> parseJsonArray(const std::string& json);
 
+    // ── Table de correspondance ID MetaApi ↔ int synthétique ─
+    // MetaApi retourne des UUIDs ou IDs alphanumériques impossibles
+    // à convertir via stoi(). On génère un int synthétique stable
+    // basé sur std::hash, et on maintient la table inverse pour
+    // pouvoir résoudre la vraie string ID lors des modify/delete.
+    int  registerOrFindId(const std::string& realId);
+    std::string resolveId(int syntheticTicket) const;
+
+    mutable std::mutex                  idMapMu_;
+    mutable std::unordered_map<int, std::string> idMap_;  // synth → real string
+    std::atomic<int>                    syntheticCounter_{ 1'000'000 };
+
     Config      cfg_;
     std::string token_;
     std::string accountId_;
     std::string baseUrl_;
 
-    std::atomic<bool> connected_ { false };
-    std::atomic<bool> running_   { false };
+    std::atomic<bool>         connected_ { false };
+    std::atomic<bool>         running_   { false };
+    std::atomic<PlatformType> platform_  { PlatformType::Auto };
 
     std::jthread tickThread_;
     std::jthread stateThread_;

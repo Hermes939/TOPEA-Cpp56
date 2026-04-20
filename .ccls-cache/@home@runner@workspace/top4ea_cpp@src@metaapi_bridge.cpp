@@ -539,13 +539,14 @@ std::string MetaApiBridge::cmdToJson(const TradeCmd& cmd) const {
         oss << ",\"slippage\":"   << cmd.slippage;
     } else if (cmd.op == TradeCmd::Op::CloseOrder ||
                cmd.op == TradeCmd::Op::CloseBy) {
-        oss << ",\"positionId\":\"" << cmd.ticket << "\"";
+        // Résolution ID MetaApi réel (UUID ou numérique) depuis la table idMap_
+        oss << ",\"positionId\":\"" << resolveId(cmd.ticket) << "\"";
     } else if (cmd.op == TradeCmd::Op::DeletePending) {
-        oss << ",\"orderId\":\"" << cmd.ticket << "\"";
+        oss << ",\"orderId\":\"" << resolveId(cmd.ticket) << "\"";
     } else if (cmd.op == TradeCmd::Op::ModifyOrder) {
         // Ordres pending (SellStop / BuyStop) → orderId + openPrice obligatoire
         // Précision broker correcte — CRITIQUE pour les ordres Exness 3-digit
-        oss << ",\"orderId\":\"" << cmd.ticket << "\"";
+        oss << ",\"orderId\":\"" << resolveId(cmd.ticket) << "\"";
         if (cmd.price > 0.0)
             oss << ",\"openPrice\":" << priceFmt(cmd.price);
         if (cmd.sl > 0.0)
@@ -556,6 +557,52 @@ std::string MetaApiBridge::cmdToJson(const TradeCmd& cmd) const {
 
     oss << "}";
     return oss.str();
+}
+
+// ────────────────────────────────────────────────────────────
+//  Table de correspondance ID MetaApi ↔ int synthétique
+//
+//  MetaApi retourne des IDs UUID-like (ex: "8f3a1b2c-...") ou
+//  des IDs numériques formatés en string ("12345678").
+//  stoi() échoue sur les UUIDs → ticket = -1 → boucle infinie.
+//
+//  registerOrFindId() garantit :
+//   - Si l'ID est déjà connu, retourne le même int synthétique
+//   - Sinon génère un nouvel int unique ≥ 1'000'001
+//   - La table inverse permet de résoudre le vrai ID MetaApi
+//     lors des appels modify/delete (cmdToJson → orderId/positionId)
+// ────────────────────────────────────────────────────────────
+int MetaApiBridge::registerOrFindId(const std::string& realId) {
+    if (realId.empty()) return -1;
+
+    // Essai d'abord une conversion directe (ID purement numérique)
+    try {
+        int numId = std::stoi(realId);
+        if (numId > 0) {
+            std::lock_guard lk(idMapMu_);
+            idMap_[numId] = realId;
+            return numId;
+        }
+    } catch (...) {}
+
+    // UUID / alphanumerique → chercher dans la table existante
+    {
+        std::lock_guard lk(idMapMu_);
+        for (const auto& [k, v] : idMap_) {
+            if (v == realId) return k;
+        }
+        // Générer un nouvel int synthétique unique
+        int synth = ++syntheticCounter_;
+        idMap_[synth] = realId;
+        return synth;
+    }
+}
+
+std::string MetaApiBridge::resolveId(int syntheticTicket) const {
+    if (syntheticTicket <= 0) return std::to_string(syntheticTicket);
+    std::lock_guard lk(idMapMu_);
+    auto it = idMap_.find(syntheticTicket);
+    return (it != idMap_.end()) ? it->second : std::to_string(syntheticTicket);
 }
 
 // ────────────────────────────────────────────────────────────
@@ -573,9 +620,8 @@ Tick MetaApiBridge::parseTick(const std::string& j) {
 
 OrderInfo MetaApiBridge::parsePosition(const std::string& j) {
     OrderInfo o;
-    std::string idStr = jsonGet(j, "id");
-    try { o.ticket = idStr.empty() ? -1 : std::stoi(idStr); }
-    catch (...) { o.ticket = -1; }
+    o.id     = jsonGet(j, "id");
+    o.ticket = registerOrFindId(o.id);   // int synthétique stable ≥ 1
 
     std::string typeStr = jsonGet(j, "type");
     if      (typeStr == "POSITION_TYPE_BUY")  o.type = OrderType::Buy;
@@ -595,9 +641,8 @@ OrderInfo MetaApiBridge::parsePosition(const std::string& j) {
 
 OrderInfo MetaApiBridge::parsePendingOrder(const std::string& j) {
     OrderInfo o;
-    std::string idStr = jsonGet(j, "id");
-    try { o.ticket = idStr.empty() ? -1 : std::stoi(idStr); }
-    catch (...) { o.ticket = -1; }
+    o.id     = jsonGet(j, "id");
+    o.ticket = registerOrFindId(o.id);   // int synthétique stable ≥ 1
 
     std::string typeStr = jsonGet(j, "type");
     if      (typeStr == "ORDER_TYPE_BUY_STOP")   o.type = OrderType::BuyStop;
@@ -635,11 +680,21 @@ BridgeResponse MetaApiBridge::parseTradeResult(const std::string& j) {
                  strCode == "TRADE_RETCODE_DONE" ||
                  r.error == 0);
 
+    // MetaApi peut retourner un orderId (pending) ou positionId (market)
+    // Ces IDs peuvent être des UUIDs impossibles à convertir via stoi().
+    // registerOrFindId() garantit un int synthétique positif stable.
     std::string ordId = jsonGet(j, "orderId");
     std::string posId = jsonGet(j, "positionId");
     std::string idStr = posId.empty() ? ordId : posId;
-    try { r.ticket = idStr.empty() ? -1 : std::stoi(idStr); }
-    catch (...) { r.ticket = -1; }
+
+    r.orderId = idStr;
+    r.ticket  = registerOrFindId(idStr);  // ≥ 1 si ID valide, -1 si vide
+
+    // Diagnostic : afficher correspondance UUID ↔ int synthétique
+    if (!idStr.empty() && r.ticket > 0) {
+        std::cout << "[ID] " << idStr
+                  << " → ticket synthétique #" << r.ticket << "\n";
+    }
 
     r.msg = jsonGet(j, "message");
     return r;

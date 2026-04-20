@@ -2,6 +2,7 @@
 // ============================================================
 //  TOP4EA — types.hpp
 //  Définitions centrales partagées — C++20
+//  Compatible MT4 et MT5 via MetaApi REST
 // ============================================================
 #include <cstdint>
 #include <string>
@@ -17,7 +18,17 @@ using TimePoint = std::chrono::time_point<Clock>;
 using Ms        = std::chrono::milliseconds;
 using Us        = std::chrono::microseconds;
 
-// ─── Types de marché MT4 ────────────────────────────────────
+// ─── Plateforme MetaTrader ───────────────────────────────────
+// Auto : détection depuis l'info compte MetaApi au démarrage
+// MT4  : forcer comportement MT4 (slippage, pas de fillingMode)
+// MT5  : forcer comportement MT5 (deviation, fillingMode, POSITION_MODIFY)
+enum class PlatformType : uint8_t {
+    Auto = 0,
+    MT4  = 4,
+    MT5  = 5
+};
+
+// ─── Types de marché MT4/MT5 ─────────────────────────────────
 enum class OrderType : int {
     Buy       = 0,
     Sell      = 1,
@@ -71,17 +82,24 @@ struct Tick {
 
 // ─── Snapshot complet du compte ─────────────────────────────
 struct AccountSnapshot {
-    double balance      = 0.0;
-    double equity       = 0.0;
-    double freeMargin   = 0.0;
-    double marginLevel  = 0.0;
-    double marginReq    = 0.0;     // par lot
-    int    leverage     = 0;
-    std::string currency = {};
+    double       balance      = 0.0;
+    double       equity       = 0.0;
+    double       freeMargin   = 0.0;
+    double       marginLevel  = 0.0;
+    double       marginReq    = 0.0;     // par lot
+    int          leverage     = 0;
+    std::string  currency     = {};
+    PlatformType platform     = PlatformType::Auto;  // détecté depuis MetaApi
 };
 
 // ─── Paramètres configurables (équivalent extern MQL4) ──────
 struct Config {
+    // ─── Plateforme ──────────────────────────────────────────
+    // Auto : détecté depuis le compte MetaApi au démarrage
+    // MT4  : forcer MT4 (slippage, pas de fillingMode)
+    // MT5  : forcer MT5 (deviation, fillingMode FOK, POSITION_MODIFY)
+    PlatformType platform       = PlatformType::Auto;
+
     std::string symbol          = "XAUUSDm";
     double      baseLot         = 0.10;
     double      lotMultiplier   = 1.15;

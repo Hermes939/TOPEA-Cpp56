@@ -14,8 +14,13 @@
 //    CONTINUE, TRAIL_AGGRESSIVE, TRAIL_NATURAL, TRAIL_FREEZE,
 //    ADD_ORDER, REMOVE_TRAIL, NO_TRADE, OBSERVE,
 //    LOCK_WAIT, STOP_ORDERS
+//
+//  COUCHE IA : DeepSeekVision — confirmation LLM async
+//    Signal DeepSeek enrichit la décision locale (boost confiance
+//    ou surcharge en cas de signal fort désaccordé)
 // ============================================================
 #include "types.hpp"
+#include "deepseek_vision.hpp"
 #include <deque>
 #include <mutex>
 #include <string>
@@ -79,17 +84,25 @@ struct VisualDecision {
 
     // iniMTA snapshot
     IndiSet m1, m5, m15, h1;
+
+    // ── Couche DeepSeek LLM ───────────────────────────────────
+    DeepSeekSignal  dsSignal;              // dernier signal LLM (UNKNOWN si inactif)
+    bool            dsOverride = false;    // true si DeepSeek a surpassé l'analyse locale
 };
 
 // ============================================================
-//  MarketIntelligence — Visual AI + iniMTA
+//  MarketIntelligence — Visual AI + iniMTA + DeepSeek LLM
 // ============================================================
 class MarketIntelligence {
 public:
     explicit MarketIntelligence() { resetPartials(); }
 
     // ─── Feed — appelé à chaque tick ─────────────────────────
-    void update(const Tick& tick, double pointSize = 0.01) noexcept;
+    // basketPnl / openOrders : contexte panier pour prompt DeepSeek
+    void update(const Tick& tick,
+                double pointSize   = 0.01,
+                double basketPnl   = 0.0,
+                int    openOrders  = 0) noexcept;
 
     // ─── Analyse complète — thread-safe ──────────────────────
     [[nodiscard]] VisualDecision analyze() const;
@@ -161,6 +174,9 @@ private:
     mutable VisualDecision lastDecision_;
 
     int tickCount_ = 0;
+
+    // ── Couche DeepSeek LLM (async, non-bloquant) ─────────────
+    mutable DeepSeekVision deepseek_;
 };
 
 } // namespace top4ea

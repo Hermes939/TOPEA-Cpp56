@@ -86,10 +86,17 @@ static top4ea::Config loadConfig(const char* path) {
             else if (key=="reconnect_ms")     cfg.reconnectMs       = std::stoi(val);
         } catch (...) {}
     }
-    cfg.point = std::pow(10.0, -(double)cfg.digits);
-    std::cout << "[DLL] Config chargé : " << path
-              << " | digits=" << cfg.digits
-              << " point=" << cfg.point << "\n";
+    // digits=0 → auto-détection broker au démarrage
+    // digits>0 → surcharge manuelle — on calcule le point ici
+    if (cfg.digits > 0) {
+        cfg.point = std::pow(10.0, -(double)cfg.digits);
+        std::cout << "[DLL] Config chargé : " << path
+                  << " | digits=" << cfg.digits
+                  << " (surcharge manuelle) point=" << cfg.point << "\n";
+    } else {
+        std::cout << "[DLL] Config chargé : " << path
+                  << " | digits=0 → auto-détection broker activée\n";
+    }
     return cfg;
 }
 
