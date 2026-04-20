@@ -2165,8 +2165,12 @@ std::string TOP4EA_Engine::dashboard() const {
             oss << cfg_.naturalBsDistPts << "pts";
         }
         oss << "\n";
+        // ssProfitPipsCache_ est en POINTS (= price_diff / point)
+        // 1 pip XAU (2 décimales) = 10 pts → afficher les deux pour clarté opérateur
+        int pipSize = (cfg_.digits >= 3) ? 10 : 10;
+        double ssPips = ssProfitPipsCache_ / pipSize;
         oss << "║  SS profit: " << std::setprecision(1) << ssProfitPipsCache_
-            << "pts (seuil=" << cfg_.xLockPips << "pts)\n";
+            << "pts (" << ssPips << "pips) seuil=" << cfg_.xLockPips << "pts\n";
         oss << std::setprecision(2);
     } else if (cfg_.trailFixedDistPts > 0) {
         int pipSize = (cfg_.digits >= 3) ? 10 : 10;   // 1 pip = 10 points
