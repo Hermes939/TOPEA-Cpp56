@@ -85,6 +85,14 @@ struct VisualDecision {
     // iniMTA snapshot
     IndiSet m1, m5, m15, m30;
 
+    // ── Audit Recovery — score mathématique ──────────────────
+    // Chaque facteur contribue à recoveryScore (0–100).
+    // allowRecovery = true  → le moteur PEUT déclencher un ordre recovery stop.
+    // allowRecovery = false → le déclenchement est bloqué (mauvaises conditions).
+    bool   allowRecovery  = true;   // autorisation d'ajouter un ordre recovery
+    double recoveryScore  = 50.0;   // qualité multi-facteur du signal (0=non / 100=parfait)
+    std::string recoveryReason;     // explication lisible du score
+
     // ── Couche DeepSeek LLM ───────────────────────────────────
     DeepSeekSignal  dsSignal;              // dernier signal LLM (UNKNOWN si inactif)
     bool            dsOverride = false;    // true si DeepSeek a surpassé l'analyse locale
@@ -108,8 +116,13 @@ public:
     [[nodiscard]] VisualDecision analyze() const;
 
     // ─── Accès rapide decision courante ──────────────────────
-    [[nodiscard]] MarketDecision decision()  const noexcept;
-    [[nodiscard]] std::string    reasoning() const;
+    [[nodiscard]] MarketDecision decision()         const noexcept;
+    [[nodiscard]] std::string    reasoning()        const;
+    // Retourne la dernière VisualDecision complète (thread-safe)
+    [[nodiscard]] VisualDecision getLastDecision()  const noexcept {
+        std::lock_guard lk(mu_);
+        return lastDecision_;
+    }
 
     // ─── Vérifie si la clé API DeepSeek est configurée ───────
     [[nodiscard]] bool hasDeepSeekKey() const noexcept {
@@ -156,7 +169,9 @@ private:
         const IndiSet& m15, const IndiSet& m30,
         MarketStructure structure,
         TradingSession  session,
-        double spreadRatio) const noexcept;
+        double spreadRatio,
+        double basketPnl  = 0.0,
+        int    openOrders = 0) const noexcept;
 
     // ── Stockage barres (FIFO) ────────────────────────────────
     static constexpr int MAX_M1  = 200;
@@ -174,6 +189,10 @@ private:
     // Spread courant et EWMA (pour spreadRatio)
     double spreadEwma_    = 0.0;
     double curSpread_     = 0.0;  // spread du dernier tick
+
+    // Cache contexte panier (mis à jour via update())
+    double basketPnlCache_  = 0.0;
+    int    openOrdersCache_ = 0;
 
     // Cache décision courante (thread-safe)
     mutable std::mutex   mu_;

@@ -76,6 +76,8 @@ top4ea::Config loadConfig(const std::string& path) {
             else if (key == "trail_freeze_zone")    cfg.trailFreezeZone     = std::stod(val);
             else if (key == "gap_expansion_factor") cfg.gapExpansionFactor  = std::stod(val);
             else if (key == "trail_asymmetry_factor") cfg.trailAsymmetryFactor = std::stod(val);
+            else if (key == "trail_fixed_dist_pts") cfg.trailFixedDistPts    = std::stoi(val);
+            else if (key == "trail_min_change_pts") cfg.trailMinChangePts    = std::stoi(val);
             // Basket fermeture contextualisée
             else if (key == "basket_recovery_threshold") cfg.basketRecoveryThreshold = std::stoi(val);
             else if (key == "basket_recovery_bonus")     cfg.basketRecoveryBonus     = std::stod(val);

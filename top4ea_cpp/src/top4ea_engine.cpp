@@ -1172,9 +1172,19 @@ std::string TOP4EA_Engine::dashboard() const {
     oss << "║  Target    : " << cfg_.basketTarget << " $\n";
     oss << "║  Vélocité  : " << basketMon_->velocity() << " $/tick\n";
     oss << "╠═══════════════════════════════════╣\n";
-    oss << "║  Trail  : " << (dashFrozen ? "❄FIGÉ (zone TP)" : "ACTIF") << "\n";
-    oss << "║  SS gap : ×" << std::setprecision(3) << dashSsGap
-        << "  BS gap : ×" << dashBsGap << "\n";
+    // Affichage du mode trail : fixe ou adaptatif
+    if (cfg_.trailFixedDistPts > 0) {
+        int pipSize = (cfg_.digits >= 3) ? 10 : 10;   // 1 pip = 10 points
+        double pips = (double)cfg_.trailFixedDistPts / pipSize;
+        oss << "║  Trail  : " << (dashFrozen ? "❄FIGÉ (zone TP)" : "ACTIF")
+            << " [FIXE " << cfg_.trailFixedDistPts << "pts≈" << pips << "pips]\n";
+        oss << "║  SS dist: " << cfg_.trailFixedDistPts << "pts"
+            << "  BS dist: " << cfg_.trailFixedDistPts << "pts\n";
+    } else {
+        oss << "║  Trail  : " << (dashFrozen ? "❄FIGÉ (zone TP)" : "ACTIF") << "\n";
+        oss << "║  SS gap : ×" << std::setprecision(3) << dashSsGap
+            << "  BS gap : ×" << dashBsGap << "\n";
+    }
     oss << "╠═══════════════════════════════════╣\n";
     oss << "║  SS Recovery: " << recovery_->sellCount() << " / " << cfg_.maxRecovery << "\n";
     oss << "║  BS Recovery: " << recovery_->buyCount()  << " / " << cfg_.maxRecovery << "\n";
@@ -1193,8 +1203,8 @@ std::string TOP4EA_Engine::dashboard() const {
     oss << "║  Marge lib : " << freePct << "%\n";
     oss << "║  SS @ " << std::setprecision(5) << ssLevel_ << "\n";
     oss << "║  BS @ " << bsLevel_ << "\n";
-    // Cascade guard
-    auto cg = recovery_->lastCascadeCheck();
+    // Cascade guard — statut live basé sur le tick courant
+    auto cg = recovery_->liveCheck(grid_->effectiveGridGap());
     oss << std::setprecision(1);
     oss << "╠═══════════════════════════════════╣\n";
     oss << "║  [1]Déplacement: " << (cg.priceDispatchOk?"✓":"✗")
@@ -1218,11 +1228,17 @@ std::string TOP4EA_Engine::dashboard() const {
             oss << "║  Δ Delta   : " << (ia.netDelta>=0?"+":"") << ia.netDelta
                 << " lots  (B=" << ia.buyLots << " S=" << ia.sellLots << ")\n";
             oss << "║  Pression  : " << (ia.hedgePressure*100.0) << "% ";
-            if (ia.needsHedge)
+            if (ia.needsHedge) {
                 oss << "→ ⚠ HEDGE "
                     << (ia.hedgeType==0?"BUY":"SELL") << " " << ia.hedgeLot << "L";
-            else
-                oss << "→ ✓ neutre";
+            } else {
+                // Label basé sur le niveau de pression réel (pas seulement hedge on/off)
+                double p = ia.hedgePressure;
+                if      (p < 0.20) oss << "→ ✓ neutre";
+                else if (p < 0.50) oss << "→ ~ modéré";
+                else if (p < 0.80) oss << "→ ⚡ élevée";
+                else               oss << "→ ⚠ critique";
+            }
             oss << "\n";
             oss << "║  Risque    : " << (int)ia.riskScore << "/100"
                 << "  DD=" << ia.drawdownPct << "%";

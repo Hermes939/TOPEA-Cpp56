@@ -179,6 +179,7 @@ void TOP4EA_OnTick(void* handle,
                    long long time_ms) {
     if (!handle) return;
     (void)symbol;
+    (void)time_ms;  // serverTime est steady_clock, non convertible depuis Unix ms
     auto* h = static_cast<TOP4EA_Handle*>(handle);
     top4ea::Tick t;
     t.bid       = bid;

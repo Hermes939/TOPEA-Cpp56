@@ -138,6 +138,16 @@ std::pair<double,double> IntelligenceEngine::computeGapFactors(
         }
     }
 
+    // Resserrement progressif du trail quand le P&L approche du target
+    // Au-delà de 50% du target, le trail commence à se resserrer pour
+    // verrouiller les gains. À 100% du target → facteur réduit de 25%.
+    if (pnlRatio > 0.5) {
+        double tightening = 1.0 - 0.25 * ((pnlRatio - 0.5) / 0.5);
+        tightening = std::clamp(tightening, 0.75, 1.0);
+        ss *= tightening;
+        bs *= tightening;
+    }
+
     ss = std::clamp(ss, 0.50, 3.0);
     bs = std::clamp(bs, 0.50, 3.0);
     return {ss, bs};
@@ -156,7 +166,7 @@ std::pair<double,double> IntelligenceEngine::fuseGapFactors(
     std::pair<double,double> regimeFact,
     std::pair<double,double> deltaFact,
     double                   imbalanceMult,
-    double /*pnlRatio*/) const noexcept
+    double                   pnlRatio) const noexcept
 {
     // Pondération institutionnelle
     static constexpr double W_REGIME   = 0.35;
@@ -173,6 +183,15 @@ std::pair<double,double> IntelligenceEngine::fuseGapFactors(
                + W_DELTA   * deltaFact.second
                + W_IMBAL   * imbalanceMult
                + W_NEUTRAL * 1.0;
+
+    // Correction finale selon ratio P&L : resserrement additionnel
+    // au-delà de 70% du target pour sécuriser les gains (verrou final).
+    if (pnlRatio > 0.70) {
+        double finalTight = 1.0 - 0.15 * ((pnlRatio - 0.70) / 0.30);
+        finalTight = std::clamp(finalTight, 0.85, 1.0);
+        ssF *= finalTight;
+        bsF *= finalTight;
+    }
 
     ssF = std::clamp(ssF, 0.50, 3.0);
     bsF = std::clamp(bsF, 0.50, 3.0);

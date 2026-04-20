@@ -457,7 +457,11 @@ IntelligenceEngine::Analysis IntelligenceEngine::analyze(
     double vel = pnlVel_.update(basketPnL);
     a.pnlVelocity = vel;
 
-    if (vel > 0.0 && basketTarget > basketPnL) {
+    if (basketTarget > 1e-6 && basketPnL >= basketTarget) {
+        // Target déjà atteint ou dépassé → probabilité 100%
+        a.estimatedTicksTarget = 0;
+        a.closeProbPct         = 100.0;
+    } else if (vel > 0.0 && basketTarget > basketPnL) {
         double ticksEst = (basketTarget - basketPnL) / vel;
         a.estimatedTicksTarget = (int)std::clamp(ticksEst, 1.0, 9999.0);
         a.closeProbPct = std::max(0.0, 100.0 * std::exp(-ticksEst / 10.0));

@@ -450,6 +450,9 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
     int bs = bsTicket_.load();
     int gap = grid_->effectiveGridGap();
 
+    // ── Lecture décision Visual AI (thread-safe via getter) ───
+    VisualDecision vdNow = marketIntel_->getLastDecision();
+
     // ── SellStop : bid franchit ssLevel_ à la baisse ─────────
     // Le broker a déjà exécuté l'ordre → on met à jour l'état interne
     // immédiatement sans attendre le polling HTTP.
@@ -461,13 +464,20 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
         ssTicket_.store(-1);  // empêche tout re-déclenchement sur le tick suivant
         ssLevel_ = 0.0;       // sera recalculé géométriquement par trailGrid()
 
-        auto res = recovery_->onSellStopTriggered(triggeredAt, gap);
-        if (res.action == TriggerResult::Action::NewRecovery)
-            state_.store(EAState::Recovery);
-        else if (res.action == TriggerResult::Action::CloseOneSide)
-            closeOneSide(0);
-        // Si Blocked par CascadeGuard : état recovery inchangé,
-        // trailGrid() recréera le SS au même niveau géométrique
+        // ── Audit Visual AI — autorisation recovery ────────────
+        if (!vdNow.allowRecovery) {
+            log("[AUDIT] Recovery SS bloqué par Visual AI"
+                " score=" + std::to_string((int)vdNow.recoveryScore)
+                + " raison=" + vdNow.recoveryReason);
+        } else {
+            auto res = recovery_->onSellStopTriggered(triggeredAt, gap);
+            if (res.action == TriggerResult::Action::NewRecovery)
+                state_.store(EAState::Recovery);
+            else if (res.action == TriggerResult::Action::CloseOneSide)
+                closeOneSide(0);
+            // Si Blocked par CascadeGuard : état recovery inchangé,
+            // trailGrid() recréera le SS au même niveau géométrique
+        }
     }
 
     // ── BuyStop : ask franchit bsLevel_ à la hausse ──────────
@@ -479,11 +489,18 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
         bsTicket_.store(-1);
         bsLevel_ = 0.0;
 
-        auto res = recovery_->onBuyStopTriggered(triggeredAt, gap);
-        if (res.action == TriggerResult::Action::NewRecovery)
-            state_.store(EAState::Recovery);
-        else if (res.action == TriggerResult::Action::CloseOneSide)
-            closeOneSide(1);
+        // ── Audit Visual AI — autorisation recovery ────────────
+        if (!vdNow.allowRecovery) {
+            log("[AUDIT] Recovery BS bloqué par Visual AI"
+                " score=" + std::to_string((int)vdNow.recoveryScore)
+                + " raison=" + vdNow.recoveryReason);
+        } else {
+            auto res = recovery_->onBuyStopTriggered(triggeredAt, gap);
+            if (res.action == TriggerResult::Action::NewRecovery)
+                state_.store(EAState::Recovery);
+            else if (res.action == TriggerResult::Action::CloseOneSide)
+                closeOneSide(1);
+        }
     }
 }
 
@@ -1257,6 +1274,15 @@ std::string TOP4EA_Engine::dashboard() const {
             }
         } else {
             oss << "║  DeepSeek  : en attente réponse API...\n";
+        }
+        // ── Audit Recovery ────────────────────────────────────
+        oss << std::setprecision(0);
+        oss << "║  Recovery  : "
+            << (vd.allowRecovery ? "✓ AUTORISÉ" : "✗ BLOQUÉ  ")
+            << "  score=" << (int)vd.recoveryScore << "/100\n";
+        if (!vd.recoveryReason.empty()) {
+            std::string rr = vd.recoveryReason.substr(0, 58);
+            oss << "║   " << rr << "\n";
         }
         // Slots actifs
         auto snap = orchestrator_.snapshot();

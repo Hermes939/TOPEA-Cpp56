@@ -48,6 +48,10 @@ TriggerResult RecoveryEngine::checkAndIncrement(
 {
     std::lock_guard lk(mu_);
 
+    // Mémoriser pour liveCheck() (affichage en temps réel)
+    lastSide_         = side;
+    lastTriggerPrice_ = triggerPrice;
+
     // ── 3 conditions de qualité marché ───────────────────────
     auto chk = guard_.check(side, triggerPrice, (double)gridGap);
     lastCheck_ = chk;

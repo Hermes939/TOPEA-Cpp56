@@ -152,6 +152,18 @@ struct Config {
     //     Le côté en deep recovery est plus conservateur
     double      trailAsymmetryFactor = 0.15;
 
+    // [5] Trail fixe en points (0 = désactivé → utilise demi-GridGap × facteur)
+    //     Quand > 0 : SS/BS placés à exactement cette distance du prix courant.
+    //     Ex: 100 pts = 10 pips sur XAUUSDm (1 pip = 10 pts / 2 décimales)
+    //     Limité par le STOPLEVEL broker (minDistPts) si valeur trop faible.
+    int         trailFixedDistPts    = 0;
+
+    // [6] Seuil minimum de déplacement avant de mettre à jour le trail (en points)
+    //     0 = réactif à chaque tick (1 pt minimum interne)
+    //     Ex: 25 pts = trail recalculé seulement si prix bouge de 25 pts
+    //     Avec trailFixedDistPts > 0 : mettre à 1 pour un suivi quasi-continu
+    int         trailMinChangePts    = 0;
+
     // ─── 5 fonctionnalités académiques ──────────────────────
     // [A] Gap OU Optimal (Avellaneda-Lee 2010)
     //     Priorité sur ATR si le marché est mean-reverting (ρ₁ < 0)

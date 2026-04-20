@@ -270,6 +270,7 @@ public:
             cov += (r[i] - meanR) * (r[i+1] - meanR);
         cov /= (N - 1);
         double rho = cov / varR;
+        lastRho_ = rho;               // mémoriser le ρ₁ réel pour rho1()
 
         if (rho >= 0.0) return 0.0;   // trending → pas de OU
 

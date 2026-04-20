@@ -61,6 +61,16 @@ public:
         std::lock_guard lk(mu_);
         return lastCheck_;
     }
+
+    // ─── Statut live pour affichage (données du tick courant) ─
+    // Utilise les données tick les plus récentes de l'EWMA spread
+    // et la dernière position de déclenchement pour calculer un
+    // résultat frais sans attendre un trigger de recovery.
+    [[nodiscard]] CascadeCheckResult liveCheck(double gridGap) const noexcept {
+        std::lock_guard lk(mu_);
+        return guard_.check(lastSide_, lastTriggerPrice_, gridGap);
+    }
+
     // Spread moyen de référence pour affichage
     [[nodiscard]] double avgSpreadPts() const noexcept {
         return guard_.avgSpreadRaw() / cfg_.point;
@@ -99,6 +109,8 @@ private:
     std::atomic<int>    sellCount_ { 0 };
     std::atomic<int>    buyCount_  { 0 };
     CascadeCheckResult  lastCheck_;
+    double              lastTriggerPrice_ = 0.0;  // dernier prix de trigger (pour liveCheck)
+    int                 lastSide_         = 0;    // dernier côté déclenché (0=BUY/1=SELL)
     mutable std::mutex  mu_;
 };
 
