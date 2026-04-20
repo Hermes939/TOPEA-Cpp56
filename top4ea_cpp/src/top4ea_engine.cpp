@@ -896,19 +896,7 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
             return;
         }
 
-        // ── Cooldown post-déclenchement (20 s) ─────────────────
-        // Après qu'un SS se déclenche, on attend 20s avant de placer le suivant.
-        // Cela donne au CascadeGuard le temps de mesurer le déplacement réel.
-        auto now = Clock::now();
-        static TimePoint ssCoolUntil{};
-        if (now < ssCoolUntil) {
-            auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            ssCoolUntil - now).count();
-            log("[Guard-SS] cooldown " + std::to_string(left) + "ms restants — rejeté");
-            return;
-        }
-
-        // ── CascadeGuard : bloquer si déplacement insuffisant (recovery) ───
+        // ── CascadeGuard : seul critère institutionnel de placement recovery ──
         // Ne s'applique qu'aux recovery stops (recovDepth > 0).
         // Les SS_GRID initiaux (recovDepth = 0) sont toujours autorisés.
         if (recovDepth > 0) {
@@ -933,7 +921,6 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
             ssTicket_.store(res.ticket);
             ssLevel_     = pl.targetPrice;
             ssCreatedAt_ = Clock::now();   // horodatage anti-doublon
-            ssCoolUntil  = ssCreatedAt_ + std::chrono::seconds(20);
             log("SS créé ticket=" + std::to_string(res.ticket)
                 + " @ " + std::to_string(ssLevel_));
             // Enregistrement sous-agent L(sellCount)
@@ -1009,17 +996,7 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
             return;
         }
 
-        // ── Cooldown post-déclenchement (20 s) ─────────────────
-        auto now = Clock::now();
-        static TimePoint bsCoolUntil{};
-        if (now < bsCoolUntil) {
-            auto left = std::chrono::duration_cast<std::chrono::milliseconds>(
-                            bsCoolUntil - now).count();
-            log("[Guard-BS] cooldown " + std::to_string(left) + "ms restants — rejeté");
-            return;
-        }
-
-        // ── CascadeGuard : bloquer si déplacement insuffisant (recovery) ───
+        // ── CascadeGuard : seul critère institutionnel de placement recovery ──
         // Ne s'applique qu'aux recovery stops (recovDepth > 0).
         // Les BS_GRID initiaux (recovDepth = 0) sont toujours autorisés.
         if (recovDepth > 0) {
@@ -1044,7 +1021,6 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
             bsTicket_.store(res.ticket);
             bsLevel_     = pl.targetPrice;
             bsCreatedAt_ = Clock::now();   // horodatage anti-doublon
-            bsCoolUntil  = bsCreatedAt_ + std::chrono::seconds(20);
             log("BS créé ticket=" + std::to_string(res.ticket)
                 + " @ " + std::to_string(bsLevel_));
             // Enregistrement sous-agent L(buyCount)
