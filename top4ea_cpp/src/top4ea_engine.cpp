@@ -243,7 +243,12 @@ void TOP4EA_Engine::onError(int code, const std::string& msg) {
 
 void TOP4EA_Engine::onConnect(bool connected) {
     if (connected) {
-        log("MetaApi connecté");
+        log("MetaApi connecté/reconnecté");
+        // Effacer les tickets SS/BS stale pour éviter tout faux
+        // déclenchement géométrique pendant la fenêtre de reconnexion.
+        // restoreState() les rétablira proprement depuis le broker.
+        ssTicket_.store(-1);  bsTicket_.store(-1);
+        ssLevel_ = 0.0;       bsLevel_ = 0.0;
         state_.store(EAState::Init);
     } else {
         log("MetaApi déconnecté — en attente de reconnexion");
@@ -378,9 +383,8 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
         initOrRestore();
     }
 
-    // 7. Cohérence tickets (fallback sync — s'assure que les tickets
-    //    correspondent à des ordres réels côté broker, sans déclencher recovery)
-    checkConsistency(orders);
+    // 7. Sync fallback — vérifie que les tickets internes correspondent
+    //    à des ordres réels côté broker, corrige silencieusement si décalage.
     syncTriggersFallback(orders);
 
     // 8. Analyse intelligence profonde (1×/seconde — données fraîches)
@@ -573,25 +577,6 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
                 closeOneSide(1);
         }
     }
-}
-
-// ────────────────────────────────────────────────────────────
-//  Cohérence tickets — vérification fallback 1×/10s
-//  S'assure uniquement que les tickets internes existent bien
-//  côté broker. Ne déclenche PAS de recovery (rôle de detectGeometricTriggers).
-// ────────────────────────────────────────────────────────────
-void TOP4EA_Engine::checkConsistency(const std::vector<OrderInfo>& orders) {
-    static TimePoint lastCheck = Clock::now();
-    if (std::chrono::duration_cast<std::chrono::seconds>(
-            Clock::now() - lastCheck).count() < 10) return;
-    lastCheck = Clock::now();
-
-    int ss = ssTicket_.load();
-    int bs = bsTicket_.load();
-    bool ssOk = ticketStillPending(ss, orders);
-    bool bsOk = ticketStillPending(bs, orders);
-    if (!ssOk && ss > 0) { ssTicket_.store(-1); ssLevel_ = 0.0; }
-    if (!bsOk && bs > 0) { bsTicket_.store(-1); bsLevel_ = 0.0; }
 }
 
 // ────────────────────────────────────────────────────────────
@@ -1209,10 +1194,18 @@ void TOP4EA_Engine::checkDailyTarget() {
 // ────────────────────────────────────────────────────────────
 std::vector<OrderInfo> TOP4EA_Engine::fetchOrders() {
     auto orders = bridge_->requestOrders(2000);
-    // Filtrer par magic + symbol
+    // Filtrer uniquement les ordres appartenant à cet EA.
+    // Double compatibilité :
+    //   - Nouveau format : "XAUUSDm:SS_GRID #5"  → contient cfg_.symbol
+    //   - Ancien format  : "SS_GRID #5"           → contient "SS_" ou "BS_"
     std::vector<OrderInfo> filtered;
+    filtered.reserve(orders.size());
     for (const auto& o : orders) {
-        if (o.comment.find(cfg_.symbol) != std::string::npos || true)
+        bool ownedByThisEA =
+            o.comment.find(cfg_.symbol) != std::string::npos ||
+            o.comment.find("SS_")       != std::string::npos ||
+            o.comment.find("BS_")       != std::string::npos;
+        if (ownedByThisEA)
             filtered.push_back(o);
     }
     return filtered;
@@ -1254,7 +1247,8 @@ TradeCmd TOP4EA_Engine::makeSellStop(double lot, double price, const std::string
     cmd.slippage= cfg_.slippage;
     cmd.magic   = cfg_.magic;
     cmd.symbol  = cfg_.symbol;
-    cmd.comment = comment + " #" + std::to_string(++orderCounter_);
+    // Préfixe symbole pour le filtre fetchOrders() : "XAUUSDm:SS_GRID #5"
+    cmd.comment = cfg_.symbol + ":" + comment + " #" + std::to_string(++orderCounter_);
     return cmd;
 }
 
@@ -1267,7 +1261,8 @@ TradeCmd TOP4EA_Engine::makeBuyStop(double lot, double price, const std::string&
     cmd.slippage= cfg_.slippage;
     cmd.magic   = cfg_.magic;
     cmd.symbol  = cfg_.symbol;
-    cmd.comment = comment + " #" + std::to_string(++orderCounter_);
+    // Préfixe symbole pour le filtre fetchOrders() : "XAUUSDm:BS_GRID #6"
+    cmd.comment = cfg_.symbol + ":" + comment + " #" + std::to_string(++orderCounter_);
     return cmd;
 }
 

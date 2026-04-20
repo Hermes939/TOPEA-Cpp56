@@ -45,16 +45,33 @@ public:
 
     // ─── Lots recovery ──────────────────────────────────────
     // useFixedLotSchedule=true  → schedule fixe [0.10, 0.10, 0.20, 0.30, 0.40]
-    // useFixedLotSchedule=false → géométrique baseLot × mult^n (Kelly-cappé)
+    // useFixedLotSchedule=false + lotMultiplierMax > lotMultiplier
+    //                           → gradient x1.15 à x1.66 selon profondeur
+    // useFixedLotSchedule=false + lotMultiplierMax == lotMultiplier
+    //                           → géométrique baseLot × mult^n (Kelly-cappé)
     [[nodiscard]] double sellLot() const noexcept {
         if (cfg_.useFixedLotSchedule)
             return math::recovLotFixed(cfg_.baseLot, sellCount_.load());
+        if (cfg_.lotMultiplierMax > cfg_.lotMultiplier)
+            return math::recovLotGradient(cfg_.baseLot,
+                                          cfg_.lotMultiplier,
+                                          cfg_.lotMultiplierMax,
+                                          sellCount_.load(),
+                                          cfg_.maxRecovery,
+                                          cfg_.kellyMaxFraction);
         return math::recovLot(cfg_.baseLot, cfg_.lotMultiplier,
                               sellCount_.load(), cfg_.kellyMaxFraction);
     }
     [[nodiscard]] double buyLot() const noexcept {
         if (cfg_.useFixedLotSchedule)
             return math::recovLotFixed(cfg_.baseLot, buyCount_.load());
+        if (cfg_.lotMultiplierMax > cfg_.lotMultiplier)
+            return math::recovLotGradient(cfg_.baseLot,
+                                          cfg_.lotMultiplier,
+                                          cfg_.lotMultiplierMax,
+                                          buyCount_.load(),
+                                          cfg_.maxRecovery,
+                                          cfg_.kellyMaxFraction);
         return math::recovLot(cfg_.baseLot, cfg_.lotMultiplier,
                               buyCount_.load(), cfg_.kellyMaxFraction);
     }

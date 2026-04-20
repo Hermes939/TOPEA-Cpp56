@@ -102,7 +102,8 @@ struct Config {
 
     std::string symbol          = "XAUUSDm";
     double      baseLot         = 0.10;
-    double      lotMultiplier   = 1.15;
+    double      lotMultiplier   = 1.15;   // multiplicateur min (recovery 1)
+    double      lotMultiplierMax = 1.66;  // multiplicateur max (recovery maxN)
     int         gridGap         = 500;          // points – valeur initiale
     double      basketTarget    = 7.0;          // $ fixe
     int         maxRecovery     = 20;

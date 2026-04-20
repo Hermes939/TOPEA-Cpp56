@@ -105,7 +105,6 @@ private:
     void closeBasketAtomic();
     void closeWavePartial(int wave);  // wave 0=Wave1(50%) wave 1=Wave2(30%)
     void closeOneSide(int sideType);
-    void checkConsistency(const std::vector<OrderInfo>& orders);
 
     [[nodiscard]] std::vector<OrderInfo> fetchOrders();
     [[nodiscard]] double basketProfit(

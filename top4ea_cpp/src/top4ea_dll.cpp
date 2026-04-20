@@ -57,8 +57,9 @@ static top4ea::Config loadConfig(const char* path) {
                 else                             cfg.platform = top4ea::PlatformType::Auto;
             }
             else if (key=="symbol")           cfg.symbol            = val;
-            else if (key=="base_lot")         cfg.baseLot           = std::stod(val);
-            else if (key=="lot_multiplier")   cfg.lotMultiplier     = std::stod(val);
+            else if (key=="base_lot")          cfg.baseLot            = std::stod(val);
+            else if (key=="lot_multiplier")    cfg.lotMultiplier      = std::stod(val);
+            else if (key=="lot_multiplier_max") cfg.lotMultiplierMax  = std::stod(val);
             else if (key=="grid_gap")         cfg.gridGap           = std::stoi(val);
             else if (key=="basket_target")    cfg.basketTarget      = std::stod(val);
             else if (key=="max_recovery")     cfg.maxRecovery       = std::stoi(val);

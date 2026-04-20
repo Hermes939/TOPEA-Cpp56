@@ -152,6 +152,45 @@ private:
 }
 
 // ────────────────────────────────────────────────────────────
+//  Lot de récupération avec multiplicateur gradient [min, max]
+//  Interpole linéairement le multiplicateur selon la profondeur
+//  de recovery : mult(0) = 1.0, mult(1) = multMin, mult(maxN) = multMax
+//
+//  Exemple : baseLot=0.10, multMin=1.15, multMax=1.66, maxN=5
+//    L0 :  0.10 (entrée initiale)
+//    L1 :  0.10 × 1.15 = 0.12
+//    L2 :  0.12 × 1.27 = 0.15
+//    L3 :  0.15 × 1.38 = 0.21
+//    L4 :  0.21 × 1.50 = 0.31
+//    L5 :  0.31 × 1.61 = 0.50  (proche multMax)
+// ────────────────────────────────────────────────────────────
+[[nodiscard]] inline double recovLotGradient(
+    double baseLot,
+    double multMin,          // multiplicateur min (ex: 1.15 au recovery 1)
+    double multMax,          // multiplicateur max (ex: 1.66 au dernier niveau)
+    int    count,
+    int    maxRecovery,
+    double kellyMaxFraction = 0.25) noexcept
+{
+    if (count <= 0) return baseLot;
+    if (maxRecovery < 1)  maxRecovery = 1;
+
+    double lot = baseLot;
+    for (int i = 1; i <= count; ++i) {
+        // Interpolation linéaire : i=1 → multMin, i=maxRecovery → multMax
+        double t    = (maxRecovery > 1)
+                      ? std::clamp((double)(i - 1) / (double)(maxRecovery - 1), 0.0, 1.0)
+                      : 1.0;
+        double mult = multMin + t * (multMax - multMin);
+        lot *= mult;
+    }
+
+    double kellyCap = baseLot * (1.0 + kellyMaxFraction * count);
+    lot = std::min(lot, kellyCap);
+    return std::max(std::round(lot * 100.0) / 100.0, 0.01);
+}
+
+// ────────────────────────────────────────────────────────────
 //  Schedule de lots FIXE — Grille recovery XAUUSDm
 //  Spécification utilisateur :
 //    Niveau 1 (count=0) : 0.10 lot — entrée initiale

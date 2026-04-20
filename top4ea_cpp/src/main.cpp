@@ -49,8 +49,9 @@ top4ea::Config loadConfig(const std::string& path) {
                 else                                   cfg.platform = top4ea::PlatformType::Auto;
             }
             else if (key == "symbol")           cfg.symbol           = val;
-            else if (key == "base_lot")         cfg.baseLot          = std::stod(val);
-            else if (key == "lot_multiplier")   cfg.lotMultiplier    = std::stod(val);
+            else if (key == "base_lot")          cfg.baseLot           = std::stod(val);
+            else if (key == "lot_multiplier")    cfg.lotMultiplier     = std::stod(val);
+            else if (key == "lot_multiplier_max") cfg.lotMultiplierMax = std::stod(val);
             else if (key == "grid_gap")         cfg.gridGap          = std::stoi(val);
             else if (key == "basket_target")    cfg.basketTarget     = std::stod(val);
             else if (key == "cascade_price_dispatch_pct")  cfg.cascadePriceDispatchPct  = std::stod(val);
@@ -118,7 +119,8 @@ void printBanner(const top4ea::Config& cfg) {
    << "║  Digits    : " << (cfg.digits==0 ? "0 (AUTO-DÉTECTION BROKER)" :
                              std::to_string(cfg.digits) + " (surcharge manuelle)") << "\n"
    << "║  BaseLot   : " << cfg.baseLot      << "\n"
-   << "║  LotMult   : " << cfg.lotMultiplier<< "\n"
+   << "║  LotMult   : " << cfg.lotMultiplier << " → " << cfg.lotMultiplierMax
+      << (cfg.useFixedLotSchedule ? " [schedule fixe]" : " [gradient actif]") << "\n"
    << "║  GridGap   : " << cfg.gridGap      << " pts (sera rescalé si broker 3-digit)\n"
    << "║  ATRGrid   : " << (cfg.useAtrGrid?"ON":"OFF") << "\n"
    << "║  Target    : " << cfg.basketTarget << " $\n"
