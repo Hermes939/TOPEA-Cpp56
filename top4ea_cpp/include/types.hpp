@@ -108,9 +108,10 @@ struct Config {
     int         maxRecovery     = 20;
 
     // Garde cascade professionnel (3 conditions de qualité marché)
-    double      cascadePriceDispatchPct = 0.50; // [1] 50% du GridGap comme déplacement min
-    double      cascadeSpreadMaxMult    = 2.5;  // [2] spread max = 2.5× spread moyen EWMA
-    double      cascadeSpreadEwmaAlpha  = 0.05; // lissage spread référence EWMA
+    double      cascadePriceDispatchPct  = 0.50; // [1] 50% du GridGap comme déplacement min
+    int         cascadePriceDispatchPips = 15;   // [1b] déplacement fixe en pips (0=utilise pct)
+    double      cascadeSpreadMaxMult     = 2.5;  // [2] spread max = 2.5× spread moyen EWMA
+    double      cascadeSpreadEwmaAlpha   = 0.05; // lissage spread référence EWMA
     // [3] Anti-whipsaw : automatique, pas de paramètre
     int         magic           = 10300;
     int         slippage        = 3;

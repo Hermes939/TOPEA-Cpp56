@@ -82,7 +82,8 @@ static top4ea::Config loadConfig(const char* path) {
             else if (key=="trail_asymmetry_factor") cfg.trailAsymmetryFactor= std::stod(val);
             else if (key=="trail_fixed_dist_pts") cfg.trailFixedDistPts   = std::stoi(val);
             else if (key=="trail_min_change_pts") cfg.trailMinChangePts   = std::stoi(val);
-            else if (key=="cascade_price_dispatch_pct") cfg.cascadePriceDispatchPct = std::stod(val);
+            else if (key=="cascade_price_dispatch_pct")  cfg.cascadePriceDispatchPct  = std::stod(val);
+            else if (key=="cascade_price_dispatch_pips") cfg.cascadePriceDispatchPips = std::stoi(val);
             else if (key=="cascade_spread_max_mult")    cfg.cascadeSpreadMaxMult    = std::stod(val);
             else if (key=="cascade_spread_ewma_alpha")  cfg.cascadeSpreadEwmaAlpha  = std::stod(val);
             // Basket fermeture contextualisée

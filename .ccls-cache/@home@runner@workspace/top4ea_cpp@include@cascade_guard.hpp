@@ -69,9 +69,12 @@ struct CascadeCheckResult {
 
 // ─── Paramètres du CascadeGuard (défini avant la classe) ────
 struct CascadeGuardParams {
-    double priceDispatchPct = 0.50;  // 50% du GridGap requis comme déplacement min
-    double spreadMaxMult    = 2.5;   // spread max = 2.5× spread moyen EWMA
-    double spreadEwmaAlpha  = 0.05;  // lissage très lent pour spread de référence
+    double priceDispatchPct  = 0.50;  // 50% du GridGap requis comme déplacement min
+    int    priceDispatchPips = 15;    // déplacement fixe en pips (0 = utilise pct)
+    //   XAUUSDm digits=2 : 1 pip = 10 points → 15 pips = 150 points
+    //   Forex   digits=5 : 1 pip = 10 points → 15 pips = 150 points
+    double spreadMaxMult    = 2.5;    // spread max = 2.5× spread moyen EWMA
+    double spreadEwmaAlpha  = 0.05;   // lissage très lent pour spread de référence
 };
 
 // ============================================================
@@ -113,7 +116,11 @@ public:
         r.currentPrice = lastBid_;
 
         // ── [1] Déplacement depuis le dernier trigger ─────────
-        double requiredPts = gridGap * params_.priceDispatchPct;
+        // Mode pips fixe (prioritaire) : 1 pip = 10 points (tous symboles)
+        // Mode % GridGap (fallback)    : gridGap × priceDispatchPct
+        double requiredPts = (params_.priceDispatchPips > 0)
+            ? params_.priceDispatchPips * 10.0
+            : gridGap * params_.priceDispatchPct;
         double displacement = (lastTriggerPrice_ > 0.0 && pointSize_ > 0.0)
             ? std::abs(lastBid_ - lastTriggerPrice_) / pointSize_
             : requiredPts; // premier trigger → toujours ok
