@@ -3,6 +3,7 @@
 //  Assistante Visuelle AI + iniMTA Multi-Timeframe
 // ============================================================
 #include "../include/market_intelligence.hpp"
+#include <iostream>
 #include <numeric>
 #include <ctime>
 #include <cassert>
@@ -59,6 +60,90 @@ void MarketIntelligence::resetPartials() noexcept {
 }
 
 // ============================================================
+//  warmUp — réchauffement synthétique (cold-start fix)
+//  Pré-popule les déques de barres M5 / M15 / M30 avec des
+//  bougies synthétiques réalistes pour que les indicateurs
+//  (ATR, RSI, MACD, BB) soient opérationnels dès le 1er tick.
+//
+//  Modèle : marche aléatoire centrée avec volatilité ≈ atrPrice.
+//  Les barres synthétiques sont moins précises que les vraies,
+//  mais garantissent des valeurs non-nulles immédiatement.
+//  Elles sont progressivement remplacées par des barres réelles.
+// ============================================================
+void MarketIntelligence::warmUp(double price, double atrPrice, int nBars) noexcept {
+    if (price <= 0.0 || atrPrice <= 0.0 || nBars <= 0) return;
+
+    // Pseudo-générateur déterministe (reproductible, sans <random>)
+    // LCG léger — suffisant pour les barres synthétiques
+    uint64_t seed = 123456789ULL + (uint64_t)(price * 100.0);
+    auto rng = [&]() -> double {
+        seed = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+        return (double)(seed >> 33) / (double)(1ULL << 31) - 1.0; // [-1, +1]
+    };
+
+    // Génère nBars bougies cohérentes (chaque close est l'open de la suivante)
+    double cur = price;
+    auto now   = std::chrono::system_clock::now();
+
+    // Remplir M5, M15, M30 simultanément (même jeu de bougies synthétiques)
+    // M30 est la priorité pour activer DeepSeek rapidement
+    for (int i = 0; i < nBars; ++i) {
+        double drift   = rng() * atrPrice * 0.15;   // légère tendance aléatoire
+        double intraVol= atrPrice * (0.4 + std::abs(rng()) * 0.6);
+
+        Bar b;
+        b.open  = cur;
+        b.close = cur + drift;
+        b.high  = std::max(b.open, b.close) + std::abs(rng()) * intraVol * 0.5;
+        b.low   = std::min(b.open, b.close) - std::abs(rng()) * intraVol * 0.5;
+        b.ticks = 10;  // marqué comme barre avec données
+        // Timestamp décroissant (la barre la plus ancienne en premier)
+        b.time  = now - std::chrono::minutes((nBars - i) * 30);
+
+        m30Bars_.push_back(b);
+        if ((int)m30Bars_.size() > MAX_M30) m30Bars_.pop_front();
+
+        // M15 : 2 barres par barre M30
+        for (int j = 0; j < 2; ++j) {
+            Bar b15;
+            double m = (j == 0) ? b.open : ((b.open + b.close) * 0.5);
+            double e = (j == 0) ? ((b.open + b.close) * 0.5) : b.close;
+            b15.open  = m;
+            b15.close = e;
+            b15.high  = std::max(m, e) + std::abs(rng()) * intraVol * 0.25;
+            b15.low   = std::min(m, e) - std::abs(rng()) * intraVol * 0.25;
+            b15.ticks = 5;
+            b15.time  = b.time + std::chrono::minutes(j * 15);
+            m15Bars_.push_back(b15);
+            if ((int)m15Bars_.size() > MAX_M15) m15Bars_.pop_front();
+        }
+
+        // M5 : 6 barres par barre M30
+        for (int j = 0; j < 6; ++j) {
+            Bar b5;
+            double frac   = (double)j / 6.0;
+            double fracN  = (double)(j+1) / 6.0;
+            b5.open  = b.open  + (b.close - b.open) * frac;
+            b5.close = b.open  + (b.close - b.open) * fracN;
+            b5.high  = std::max(b5.open, b5.close) + std::abs(rng()) * intraVol * 0.1;
+            b5.low   = std::min(b5.open, b5.close) - std::abs(rng()) * intraVol * 0.1;
+            b5.ticks = 3;
+            b5.time  = b.time + std::chrono::minutes(j * 5);
+            m5Bars_.push_back(b5);
+            if ((int)m5Bars_.size() > MAX_M5) m5Bars_.pop_front();
+        }
+
+        cur = b.close;  // enchaîner les barres
+    }
+
+    std::cout << "[WarmUp] " << nBars << " bougies synthétiques injectées"
+              << " | prix=" << price << " | ATR≈" << atrPrice
+              << " | M5=" << m5Bars_.size()
+              << " M15=" << m15Bars_.size()
+              << " M30=" << m30Bars_.size() << "\n";
+}
+
+// ============================================================
 //  update — appelé à chaque tick
 // ============================================================
 void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
@@ -87,8 +172,9 @@ void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
 
     // ── Appel DeepSeek LLM — toutes les 50 ticks (non-bloquant) ──
     // Lance un thread détaché → résultat disponible ~1s plus tard
-    // Garde : requiert au moins 26 barres M30 pour un MACD M30 valide
-    bool m30Ready = ((int)m30Bars_.size() >= 26);
+    // Garde : requiert au moins 5 barres M30 (réduit de 26 → accélère le démarrage)
+    // Les premières analyses utilisent les barres synthétiques du warmUp()
+    bool m30Ready = ((int)m30Bars_.size() >= 5);
     if (deepseek_.hasApiKey() && (tickCount_ % 50 == 1) && m30Ready) {
         // Snapshot indicateurs pour le prompt
         std::deque<Bar> bM5, bM30;

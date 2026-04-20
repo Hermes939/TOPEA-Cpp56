@@ -65,8 +65,8 @@ struct IndiSet {
     int    barCount   = 0;     // nombre de barres disponibles
 
     [[nodiscard]] bool  ready()          const noexcept { return barCount >= 14; }
-    [[nodiscard]] bool  rsiOverbought()  const noexcept { return rsi >= 70.0;    }
-    [[nodiscard]] bool  rsiOversold()    const noexcept { return rsi <= 30.0;    }
+    [[nodiscard]] bool  rsiOverbought()  const noexcept { return rsi >= 85.0;    }
+    [[nodiscard]] bool  rsiOversold()    const noexcept { return rsi <= 15.0;    }
     [[nodiscard]] bool  macdBullish()    const noexcept { return macdHist > 0.0; }
     [[nodiscard]] bool  bbNarrow()       const noexcept { return bbWidth < 0.003;}// < 0.3%
 };

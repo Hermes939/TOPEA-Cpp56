@@ -592,9 +592,12 @@ VisualDecision MarketIntelligence::computeDecision(
     bool rsiExtreme = (m5.rsiOverbought() && (m15.rsiOverbought() || m30.rsiOverbought())) ||
                       (m5.rsiOversold()   && (m15.rsiOversold()   || m30.rsiOversold()));
 
-    // ── [6] RSI extrême → gel des stops ───────────────────────
-    if (rsiExtreme) {
-        reason += "[RSI extrême M5+M15/M30 → zone retournement] ";
+    // ── [6] RSI extrême → gel des stops (seulement si profit à protéger)
+    // Seuil 85/15 : évite les faux gels en tendance forte normale
+    // Condition profit : geler sans P&L positif ne protège rien et
+    //                    empêche le trail de suivre le marché inutilement
+    if (rsiExtreme && basketPnl > 1.0) {
+        reason += "[RSI extrême M5+M15/M30 + profit → gel protecteur] ";
         conf += 20.0;
         vd.decision  = MarketDecision::TRAIL_FREEZE;
         vd.reasoning = reason + "Gel des stops — retournement imminent";
