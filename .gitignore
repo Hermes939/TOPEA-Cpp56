@@ -1,32 +1,49 @@
-# Prerequisites
+# ── Compilateur C++ ──────────────────────────────────────────
 *.d
-
-# Compiled Object files
 *.slo
 *.lo
 *.o
 *.obj
-
-# Precompiled Headers
 *.gch
 *.pch
-
-# Compiled Dynamic libraries
 *.so
 *.dylib
 *.dll
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
 *.lai
 *.la
 *.a
 *.lib
-
-# Executables
 *.exe
 *.out
 *.app
+
+# ── TOP4EA — Build artifacts ─────────────────────────────────
+top4ea_cpp/build/
+
+# ── TOP4EA — Données runtime (générées en live) ──────────────
+top4ea_cpp/data/automl_training.csv
+top4ea_cpp/data/automl_server.log
+top4ea_cpp/data/error_log.csv
+top4ea_cpp/data/calibration_state.json
+
+# ── TOP4EA — Modèle entraîné + sorties AutoML ────────────────
+top4ea_cpp/automl/checkpoints/
+top4ea_cpp/automl/output/
+
+# ── IDE / Éditeur ─────────────────────────────────────────────
+.ccls-cache/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pythonlibs/
+
+# ── Replit ────────────────────────────────────────────────────
+.upm/
+uv.lock
