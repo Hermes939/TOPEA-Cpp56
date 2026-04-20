@@ -46,17 +46,18 @@ enum class VolRegime : uint8_t {
 
 // ─── Ticket + métadonnées d'un ordre ────────────────────────
 struct OrderInfo {
-    int        ticket     = -1;
-    OrderType  type       = OrderType::None;
-    double     lots       = 0.0;
-    double     openPrice  = 0.0;
-    double     sl         = 0.0;
-    double     tp         = 0.0;
-    double     profit     = 0.0;    // P&L courant (profit+swap+commission)
-    double     swap       = 0.0;
-    double     commission = 0.0;
-    TimePoint  openTime   = {};
-    std::string comment   = {};
+    int         ticket     = -1;   // int synthétique stable (hash ou stoi)
+    std::string id         = {};   // ID MetaApi brut (UUID ou numérique string)
+    OrderType   type       = OrderType::None;
+    double      lots       = 0.0;
+    double      openPrice  = 0.0;
+    double      sl         = 0.0;
+    double      tp         = 0.0;
+    double      profit     = 0.0;  // P&L courant (profit+swap+commission)
+    double      swap       = 0.0;
+    double      commission = 0.0;
+    TimePoint   openTime   = {};
+    std::string comment    = {};
 };
 
 // ─── Tick de marché reçu depuis MT4 ─────────────────────────

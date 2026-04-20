@@ -139,11 +139,12 @@ StopPlacement GridEngine::computeSellStop(
         sp.needsCreate = true;
     } else {
         sp.delta = target - currentLevel;
-        // Modification uniquement si le niveau géométrique a changé
-        // (gap ATR recalculé ou facteur intelligence modifié)
-        // Seuil = 1 point pour éviter oscillations numériques
-        double minChange = pointSize();
-        sp.needsModify = (std::abs(sp.delta) > minChange);
+        // ── RATCHET HAUT UNIQUEMENT ────────────────────────────
+        // Un SellStop ne se déplace QUE vers le haut (jamais vers le bas).
+        // Si target < currentLevel → stop trop bas, on garde le niveau actuel
+        // plus élevé (protège mieux). Seuil = 1 grid-gap entier (anti-bruit).
+        double minChange = effectiveGridGap() * pointSize();
+        sp.needsModify = (sp.delta > minChange);   // delta > 0 = monte seulement
     }
     return sp;
 }
@@ -182,9 +183,14 @@ StopPlacement GridEngine::computeBuyStop(
     if (currentTicket <= 0) {
         sp.needsCreate = true;
     } else {
-        sp.delta = currentLevel - target;
-        double minChange = pointSize();
-        sp.needsModify = (std::abs(sp.delta) > minChange);
+        sp.delta = currentLevel - target;  // > 0 = currentLevel monte au-dessus de target
+        // ── RATCHET BAS UNIQUEMENT ─────────────────────────────
+        // Un BuyStop ne se déplace QUE vers le bas (jamais vers le haut).
+        // target < currentLevel → descend → OK.
+        // target > currentLevel → le stop montait vers le prix → refusé.
+        // Seuil = 1 grid-gap entier (anti-bruit).
+        double minChange = effectiveGridGap() * pointSize();
+        sp.needsModify = (sp.delta > minChange);  // delta>0 = currentLevel > target = BS descend
     }
     return sp;
 }

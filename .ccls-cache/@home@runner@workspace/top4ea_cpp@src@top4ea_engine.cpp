@@ -11,6 +11,7 @@
 #include <thread>
 #include <future>
 #include <ctime>
+#include <cmath>
 
 namespace top4ea {
 
@@ -53,8 +54,13 @@ TOP4EA_Engine::~TOP4EA_Engine() {
 void TOP4EA_Engine::start() {
     running_.store(true);
     log("TOP4EA C++20 démarré — " + cfg_.symbol
-        + " | Target=" + std::to_string(cfg_.basketTarget) + "$"
-        + " | DailyPct=" + std::to_string(cfg_.dailyTargetPct) + "%");
+        + " | digits(config)=" + std::to_string(cfg_.digits)
+        + " | Target=" + std::to_string(cfg_.basketTarget) + "$");
+
+    // ── [1] Auto-détection broker AVANT les threads de polling ─
+    // Appel HTTP synchrone brut — ne dépend pas de bridge_->start()
+    // Si échoue (weekend/offline) → conserve config fichier (fallback safe)
+    detectAndApplyBrokerSpec();
 
     bridge_->start();
 
@@ -77,6 +83,118 @@ void TOP4EA_Engine::start() {
             std::this_thread::sleep_for(Ms(500));
         }
     });
+}
+
+// ============================================================
+//  detectAndApplyBrokerSpec
+//  Interroge MetaApi /symbols/{sym} avant le démarrage des threads.
+//  Applique les specs si détectées, sinon conserve config fichier.
+// ============================================================
+void TOP4EA_Engine::detectAndApplyBrokerSpec() {
+    log("[BrokerSpec] Détection spécifications broker " + cfg_.symbol + " ...");
+
+    SymbolSpec spec = bridge_->requestSymbolSpec(cfg_.symbol, 8000);
+
+    if (spec.detected) {
+        // Vérifier si la config fichier surcharge manuellement (digits != 0)
+        // digits=0 dans top4ea.conf = auto-détection pure
+        // digits>0 = surcharge manuelle (ex: test ou broker exotique)
+        bool manualOverride = (cfg_.digits > 0) &&
+                              (cfg_.digits != spec.digits);
+        if (manualOverride) {
+            log("[BrokerSpec] SURCHARGE MANUELLE : config fichier digits="
+                + std::to_string(cfg_.digits)
+                + " vs broker digits=" + std::to_string(spec.digits)
+                + " → config fichier utilisée");
+            // On stocke la spec détectée mais on n'applique que les champs
+            // non-critiques (volumes, stopLevel) sans changer digits/point
+            symbolSpec_           = spec;
+            cfg_.tickValue        = spec.tickValue;    // toujours prendre
+            cfg_.volumeMin        = spec.volumeMin;
+            cfg_.volumeMax        = spec.volumeMax;
+            cfg_.volumeStep       = spec.volumeStep;
+            cfg_.stopLevelPoints  = spec.stopLevelPoints;
+            bridge_->updateConfig(cfg_);               // sync précision JSON
+        } else {
+            applySymbolSpec(spec);
+        }
+    } else {
+        log("[BrokerSpec] Détection échouée — config fichier conservée"
+            " (digits=" + std::to_string(cfg_.digits) + ","
+            " point=" + std::to_string(cfg_.point) + ","
+            " tickValue=" + std::to_string(cfg_.tickValue) + ")");
+    }
+}
+
+// ────────────────────────────────────────────────────────────
+//  applySymbolSpec
+//  Applique la spec broker à cfg_ puis recrée tous les sous-systèmes.
+//  Doit être appelé AVANT bridge_->start() (pas de threads actifs).
+// ────────────────────────────────────────────────────────────
+void TOP4EA_Engine::applySymbolSpec(const SymbolSpec& spec) {
+    const int oldDigits  = cfg_.digits;
+    const double oldPt   = cfg_.point;
+
+    // ── Précision & valeur de tick ───────────────────────────
+    cfg_.digits      = spec.digits;
+    cfg_.point       = spec.point;
+    cfg_.tickValue   = spec.tickValue;
+
+    // ── Volumes & stop level ─────────────────────────────────
+    cfg_.volumeMin       = spec.volumeMin;
+    cfg_.volumeMax       = spec.volumeMax;
+    cfg_.volumeStep      = spec.volumeStep;
+    cfg_.stopLevelPoints = spec.stopLevelPoints;
+    cfg_.contractSize    = (spec.contractSize > 0.0) ? spec.contractSize
+                                                      : cfg_.contractSize;
+
+    // ── Rescale des paramètres grille en points ──────────────
+    // Les valeurs dans top4ea.conf (grid_gap=500, atr_grid_min=200…)
+    // sont définies pour un broker 2-digit (point=0.01).
+    // Pour Exness 3-digit (point=0.001) :
+    //   500 pts @ 2d = 500 × 0.01 = 5.00$ de déplacement prix
+    //   500 pts @ 3d = 500 × 0.001 = 0.50$ → il faut 5000 pts
+    // On rescale pour conserver la même amplitude en $ du prix réel.
+    if (oldDigits > 0 && spec.digits != oldDigits) {
+        double scale = std::pow(10.0, (double)(spec.digits - oldDigits));
+        cfg_.gridGap    = (int)std::round((double)cfg_.gridGap * scale);
+        cfg_.atrGridMin = cfg_.atrGridMin * scale;  // double
+        cfg_.atrGridMax = cfg_.atrGridMax * scale;  // double
+        log("[BrokerSpec] Rescale grille ×" + std::to_string(scale)
+            + " (digits " + std::to_string(oldDigits)
+            + "→" + std::to_string(spec.digits)
+            + ") gridGap=" + std::to_string(cfg_.gridGap)
+            + " atrMin=" + std::to_string(cfg_.atrGridMin)
+            + " atrMax=" + std::to_string(cfg_.atrGridMax));
+    }
+
+    // ── Sync bridge JSON (précision prix dans cmdToJson) ─────
+    bridge_->updateConfig(cfg_);
+
+    // ── Recréer tous les sous-systèmes avec la config corrigée ─
+    rebuildSubsystems();
+
+    symbolSpec_ = spec;
+
+    log("[BrokerSpec] APPLIQUÉ : digits=" + std::to_string(cfg_.digits)
+        + " point=" + std::to_string(cfg_.point)
+        + " (était " + std::to_string(oldPt) + ")"
+        + " tickValue=" + std::to_string(cfg_.tickValue) + "$/lot/pt"
+        + " | " + spec.report());
+}
+
+// ────────────────────────────────────────────────────────────
+//  rebuildSubsystems
+//  Recrée grid, basket, recovery, intel avec cfg_ mis à jour.
+//  Appelé uniquement avant bridge_->start() — pas de lock requis.
+// ────────────────────────────────────────────────────────────
+void TOP4EA_Engine::rebuildSubsystems() {
+    grid_        = std::make_unique<GridEngine>       (cfg_);
+    basketMon_   = std::make_unique<BasketMonitor>    (cfg_);
+    recovery_    = std::make_unique<RecoveryEngine>   (cfg_);
+    intel_       = std::make_unique<IntelligenceEngine>(cfg_);
+    marketIntel_ = std::make_unique<MarketIntelligence>();
+    log("[BrokerSpec] Sous-systèmes recréés avec config broker détectée");
 }
 
 void TOP4EA_Engine::stop() {
@@ -234,6 +352,33 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
 //  Init / Restauration
 // ────────────────────────────────────────────────────────────
 void TOP4EA_Engine::initOrRestore() {
+    // ── Retry détection broker si échec initial (ex: weekend) ─
+    // Quand le marché se rouvre, le premier tick passe ici.
+    // Si la spec n'a pas été détectée au démarrage (broker offline),
+    // on réessaie maintenant avec une connexion disponible.
+    if (!symbolSpec_.detected) {
+        log("[BrokerSpec] Retry détection au premier tick de marché...");
+        SymbolSpec spec = bridge_->requestSymbolSpec(cfg_.symbol, 5000);
+        if (spec.detected) {
+            bool manualOverride = (cfg_.digits > 0) && (cfg_.digits != spec.digits);
+            if (manualOverride) {
+                symbolSpec_          = spec;
+                cfg_.tickValue       = spec.tickValue;
+                cfg_.volumeMin       = spec.volumeMin;
+                cfg_.volumeMax       = spec.volumeMax;
+                cfg_.volumeStep      = spec.volumeStep;
+                cfg_.stopLevelPoints = spec.stopLevelPoints;
+                bridge_->updateConfig(cfg_);
+                log("[BrokerSpec] Retry OK — surcharge manuelle digits="
+                    + std::to_string(cfg_.digits));
+            } else {
+                applySymbolSpec(spec);
+            }
+        } else {
+            log("[BrokerSpec] Retry échoué — config fichier conservée");
+        }
+    }
+
     auto orders = fetchOrders();
     bool hasMkt = std::any_of(orders.begin(), orders.end(), [](const OrderInfo& o){
         return o.type == OrderType::Buy || o.type == OrderType::Sell; });
@@ -918,6 +1063,26 @@ std::string TOP4EA_Engine::dashboard() const {
     oss << "╠═══════════════════════════════════╣\n";
     oss << "║  Symbole   : " << cfg_.symbol << "\n";
     oss << "║  État      : " << stateStr << "\n";
+    // ── Panneau BrokerSpec ─────────────────────────────────────
+    if (symbolSpec_.detected) {
+        oss << "║  Broker    : " << cfg_.digits << "d"
+            << "  pt=" << std::setprecision(symbolSpec_.digits) << cfg_.point
+            << "  tv=" << std::setprecision(2) << cfg_.tickValue << "$/lot/pt"
+            << "  cs=" << (int)cfg_.contractSize << "\n";
+        oss << "║  Vol[" << cfg_.volumeMin << "/"
+            << cfg_.volumeMax << "/" << cfg_.volumeStep << "]"
+            << "  StpLvl=" << (int)cfg_.stopLevelPoints << "pts"
+            << (symbolSpec_.brokerName.empty() ? "" : "  ["+symbolSpec_.brokerName+"]")
+            << "\n";
+    } else {
+        int showPrec = (cfg_.digits > 0) ? cfg_.digits : 5;
+        oss << "║  Broker    : " << (cfg_.digits > 0
+                                     ? std::to_string(cfg_.digits) + "d [config manuel]"
+                                     : "auto-detect en attente")
+            << "  pt=" << std::setprecision(showPrec) << cfg_.point
+            << std::setprecision(2) << "\n";
+    }
+    oss << std::setprecision(2);
     oss << "║  Bid/Ask   : " << tick.bid << " / " << tick.ask << "\n";
     oss << "╠═══════════════════════════════════╣\n";
     oss << "║  Basket P&L: " << (pnl>=0?"+":"") << pnl << " $\n";

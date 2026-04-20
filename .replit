@@ -96,3 +96,8 @@ args = "cd top4ea_cpp && make clean && make all && ./build/top4ea top4ea.conf"
 
 [deployment]
 deploymentTarget = "cloudrun"
+
+[userenv]
+
+[userenv.shared]
+DEEPSEEK_API_KEY = "sk-11ba38451e414ce484a1fe7a5ea64e36"

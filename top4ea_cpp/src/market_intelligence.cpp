@@ -61,7 +61,8 @@ void MarketIntelligence::resetPartials() noexcept {
 // ============================================================
 //  update — appelé à chaque tick
 // ============================================================
-void MarketIntelligence::update(const Tick& tick, double /*pointSize*/) noexcept {
+void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
+                                 double basketPnl, int openOrders) noexcept {
     if (tick.bid <= 0.0 || tick.ask <= 0.0) return;
 
     // Spread EWMA
@@ -77,6 +78,52 @@ void MarketIntelligence::update(const Tick& tick, double /*pointSize*/) noexcept
         VisualDecision vd = analyze();
         std::lock_guard lk(mu_);
         lastDecision_ = vd;
+    }
+
+    // ── Appel DeepSeek LLM — toutes les 50 ticks (non-bloquant) ──
+    // Lance un thread détaché → résultat disponible ~1s plus tard
+    if (deepseek_.hasApiKey() && (tickCount_ % 50 == 1)) {
+        // Snapshot indicateurs pour le prompt
+        std::deque<Bar> bM5, bH1;
+        double se;
+        {
+            std::lock_guard lk(mu_);
+            bM5 = m5Bars_;
+            bH1 = h1Bars_;
+            se  = spreadEwma_;
+        }
+        Bar c5, cH;
+        { std::lock_guard lk(mu_); c5 = curM5_; cH = curH1_; }
+        if (c5.ticks > 0) bM5.push_back(c5);
+        if (cH.ticks > 0) bH1.push_back(cH);
+
+        IndiSet im5 = computeIndicators(bM5);
+        IndiSet ih1 = computeIndicators(bH1);
+        TradingSession ses = detectSession();
+        MarketStructure st = analyzeStructure(bM5);
+
+        DSMarketContext ctx;
+        ctx.session     = sessionName(ses);
+        ctx.structure   = structureName(st);
+        ctx.bid         = tick.bid;
+        ctx.ask         = tick.ask;
+        ctx.spreadRatio = (se > 1e-10 && im5.atr > 0.0)
+                          ? (se / (se * 0.95 + 1e-10)) : 1.0;
+        ctx.m5Atr      = im5.atr;
+        ctx.m5Rsi      = im5.rsi;
+        ctx.m5Macd     = im5.macdLine;
+        ctx.m5MacdHist = im5.macdHist;
+        ctx.m5BbWidth  = im5.bbWidth * 100.0;
+        ctx.m5Momentum = im5.momentum;
+        ctx.h1Atr      = ih1.atr;
+        ctx.h1Rsi      = ih1.rsi;
+        ctx.h1Macd     = ih1.macdLine;
+        ctx.h1MacdHist = ih1.macdHist;
+        ctx.basketPnl  = basketPnl;
+        ctx.openOrders = openOrders;
+
+        try { deepseek_.requestAnalysis(ctx); }
+        catch (...) { /* thread non-créé — pas critique */ }
     }
 }
 
@@ -496,7 +543,59 @@ VisualDecision MarketIntelligence::analyze() const {
     if (se > 1e-10 && indM1.atr > 0.0)
         spreadRatio = se / (se * 0.95 + 1e-10);  // toujours ~1 sans données news
 
-    return computeDecision(indM1, indM5, indM15, indH1, st, ses, spreadRatio);
+    VisualDecision vd = computeDecision(indM1, indM5, indM15, indH1, st, ses, spreadRatio);
+
+    // ── Couche DeepSeek LLM — enrichissement de la décision ──
+    DeepSeekSignal ds = deepseek_.getLastSignal();
+    vd.dsSignal = ds;
+
+    if (ds.fresh && ds.signal != DSSignal::UNKNOWN) {
+        // ── Accord DeepSeek + local → boost confiance ──────────
+        bool localBullish = (vd.decision == MarketDecision::TRAIL_AGGRESSIVE &&
+                             st == MarketStructure::BULLISH_TREND);
+        bool localBearish = (vd.decision == MarketDecision::TRAIL_AGGRESSIVE &&
+                             st == MarketStructure::BEARISH_TREND);
+
+        bool dsAgreesBull = (ds.signal == DSSignal::BUY_BIAS);
+        bool dsAgreesBear = (ds.signal == DSSignal::SELL_BIAS);
+
+        if ((localBullish && dsAgreesBull) || (localBearish && dsAgreesBear)) {
+            double boost = ds.confidence * 0.15;  // max +15% si conf=100
+            vd.confidence = std::min(vd.confidence + boost, 100.0);
+            vd.reasoning += " | DS:" + ds.signalName()
+                          + "(" + std::to_string((int)ds.confidence) + "%)";
+        }
+
+        // ── LOCK fort DeepSeek → surcharge locale ──────────────
+        // Seulement si signal LOCK avec confiance ≥ 85%
+        if (ds.signal == DSSignal::LOCK && ds.confidence >= 85.0) {
+            if (vd.decision != MarketDecision::NO_TRADE &&
+                vd.decision != MarketDecision::STOP_ORDERS) {
+                vd.decision   = MarketDecision::LOCK_WAIT;
+                vd.reasoning  = "[DS-LOCK] " + ds.reason;
+                vd.confidence = ds.confidence;
+                vd.dsOverride = true;
+            }
+        }
+
+        // ── Désaccord majeur → gel préventif ───────────────────
+        // Si DeepSeek est très sûr dans la direction opposée
+        if (ds.confidence >= 90.0) {
+            if (localBullish && ds.signal == DSSignal::SELL_BIAS) {
+                vd.decision   = MarketDecision::TRAIL_FREEZE;
+                vd.reasoning  = "[DS-DÉSACCORD FORT] " + ds.reason;
+                vd.confidence = (vd.confidence + ds.confidence) * 0.5;
+                vd.dsOverride = true;
+            } else if (localBearish && ds.signal == DSSignal::BUY_BIAS) {
+                vd.decision   = MarketDecision::TRAIL_FREEZE;
+                vd.reasoning  = "[DS-DÉSACCORD FORT] " + ds.reason;
+                vd.confidence = (vd.confidence + ds.confidence) * 0.5;
+                vd.dsOverride = true;
+            }
+        }
+    }
+
+    return vd;
 }
 
 // ============================================================

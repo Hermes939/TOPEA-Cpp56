@@ -18,6 +18,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <cmath>
 #include <sstream>
 #include <iomanip>
@@ -128,7 +129,8 @@ struct TradeCmd {
 
 struct BridgeResponse {
     bool        success = false;
-    int         ticket  = -1;
+    int         ticket  = -1;   // int synthétique stable (peut être un hash)
+    std::string orderId = {};   // ID MetaApi brut — utilisé pour modify/delete
     int         error   = 0;
     double      price   = 0.0;
     std::string msg     = {};
@@ -182,17 +184,30 @@ private:
     static bool        jsonGetB   (const std::string& json, const std::string& key);
     static std::string jsonGetNested(const std::string& json, const std::string& key);
 
+    // ── Parseurs (non-static pour accéder à idMap_) ──────────
     static Tick            parseTick        (const std::string& json);
-    static OrderInfo       parsePosition    (const std::string& json);
-    static OrderInfo       parsePendingOrder(const std::string& json);
+    OrderInfo              parsePosition    (const std::string& json);
+    OrderInfo              parsePendingOrder(const std::string& json);
     static AccountSnapshot parseAccount     (const std::string& json);
-    static BridgeResponse  parseTradeResult (const std::string& json);
+    BridgeResponse         parseTradeResult (const std::string& json);
     static SymbolSpec      parseSymbolSpec  (const std::string& json,
                                              const std::string& symbol);
 
     std::string cmdToJson(const TradeCmd& cmd) const;
 
     static std::vector<std::string> parseJsonArray(const std::string& json);
+
+    // ── Table de correspondance ID MetaApi ↔ int synthétique ─
+    // MetaApi retourne des UUIDs ou IDs alphanumériques impossibles
+    // à convertir via stoi(). On génère un int synthétique stable
+    // basé sur std::hash, et on maintient la table inverse pour
+    // pouvoir résoudre la vraie string ID lors des modify/delete.
+    int  registerOrFindId(const std::string& realId);
+    std::string resolveId(int syntheticTicket) const;
+
+    mutable std::mutex                  idMapMu_;
+    mutable std::unordered_map<int, std::string> idMap_;  // synth → real string
+    std::atomic<int>                    syntheticCounter_{ 1'000'000 };
 
     Config      cfg_;
     std::string token_;
