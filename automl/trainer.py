@@ -27,6 +27,7 @@ import os
 import json
 import time
 import logging
+import tempfile
 import numpy as np
 import pandas as pd
 import torch
@@ -120,7 +121,8 @@ def load_dataset(csv_path: Path = TRAINING_CSV) -> Optional[pd.DataFrame]:
     return df
 
 
-def compute_labels(df: pd.DataFrame) -> pd.DataFrame:
+def compute_labels(df: pd.DataFrame,
+                   sharpe_threshold: float | None = None) -> pd.DataFrame:
     """
     Construit les labels supervisés depuis les cycles réels.
 
@@ -128,16 +130,27 @@ def compute_labels(df: pd.DataFrame) -> pd.DataFrame:
     Les cycles du TOP 30% par Sharpe proxy (pnl / (drawdown + 1)) sont
     considérés comme "optimaux". Les paramètres utilisés dans ces cycles
     deviennent les cibles de régression (interpolation pour les autres).
+
+    FIX LOOKAHEAD BIAS :
+    Le paramètre sharpe_threshold DOIT être calculé uniquement sur les
+    données d'entraînement (df_train) avant d'appeler cette fonction sur
+    l'ensemble du dataset. Si None, il est calculé sur df lui-même
+    (usage interne ou mode autonome uniquement).
     """
     df = df.copy()
 
     # Sharpe proxy robuste (drawdown = 0 → dénominateur = 1)
     df["sharpe_proxy"] = df["pnl_result"] / (df["drawdown_pct"].abs() + 1.0)
 
-    # Top 30% — si toutes les valeurs identiques, threshold = médiane
-    threshold = df["sharpe_proxy"].quantile(0.70)
-    if threshold == df["sharpe_proxy"].quantile(0.0):
-        threshold = df["sharpe_proxy"].median()
+    # Utiliser le seuil fourni (calculé sur train) ou en calculer un local
+    if sharpe_threshold is None:
+        # Fallback : pas de lookahead connu — calculer sur df courant
+        threshold = df["sharpe_proxy"].quantile(0.70)
+        if threshold == df["sharpe_proxy"].quantile(0.0):
+            threshold = df["sharpe_proxy"].median()
+    else:
+        threshold = sharpe_threshold
+
     df["is_optimal"] = df["sharpe_proxy"] >= threshold
 
     optimal_mask = df["is_optimal"]
@@ -232,6 +245,28 @@ def build_tensors(df: pd.DataFrame) -> Tuple[torch.Tensor, torch.Tensor]:
 # ────────────────────────────────────────────────────────────
 #  Chargement sécurisé du checkpoint
 # ────────────────────────────────────────────────────────────
+def _atomic_torch_save(state: dict, dest: Path) -> None:
+    """
+    FIX ÉCRITURE ATOMIQUE : enregistre un state_dict PyTorch en deux étapes.
+      1. Écriture dans un fichier temporaire (même répertoire).
+      2. os.replace() atomique → le moteur C++ ne lira jamais un fichier partiel.
+    Le fichier temporaire est dans le même répertoire que dest pour garantir
+    que le rename ne traverse pas de systèmes de fichiers (sinon non-atomique).
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=dest.parent, suffix=".tmp")
+    try:
+        os.close(fd)
+        torch.save(state, tmp_path)
+        os.replace(tmp_path, dest)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
 def _load_checkpoint(model: nn.Module, path: Path) -> bool:
     """
     Charge un checkpoint avec weights_only=True (sécurité PyTorch 2.x).
@@ -275,23 +310,43 @@ def train(
     if df is None:
         return None
 
-    df = compute_labels(df)
-
-    # Séparation temporelle — val = derniers 20% (chronologique)
+    # FIX LOOKAHEAD BIAS : séparation temporelle AVANT le calcul des labels.
+    # Le seuil Sharpe est calculé sur df_train uniquement, puis appliqué à
+    # l'ensemble pour que la validation ne "voit" pas les futurs cycles.
     n_val    = max(1, int(len(df) * val_split))
-    df_train = df.iloc[:-n_val] if n_val < len(df) else df.copy()
-    df_val   = df.iloc[-n_val:]
+    df_train_raw = df.iloc[:-n_val] if n_val < len(df) else df.copy()
+    df_val_raw   = df.iloc[-n_val:]
 
-    if len(df_train) < 2:
-        logger.warning("Données train insuffisantes après séparation")
+    # FIX BATCH_SIZE=1 / BatchNorm crash : BatchNorm1d plante si un batch ne
+    # contient qu'un seul échantillon en mode train (variance indéfinie).
+    # Garantir au moins 2 échantillons dans le dataset d'entraînement.
+    if len(df_train_raw) < 2:
+        logger.warning("Dataset trop petit pour BatchNorm1d (< 2 échantillons train) — cycle ignoré")
         return None
+
+    # Calcul du seuil sur train uniquement (pas de lookahead)
+    sharpe_train = df_train_raw["pnl_result"] / (df_train_raw["drawdown_pct"].abs() + 1.0)
+    threshold_train = float(sharpe_train.quantile(0.70))
+    if threshold_train == float(sharpe_train.quantile(0.0)):
+        threshold_train = float(sharpe_train.median())
+
+    df_train = compute_labels(df_train_raw, sharpe_threshold=threshold_train)
+    df_val   = compute_labels(df_val_raw,   sharpe_threshold=threshold_train)
 
     X_train, Y_train = build_tensors(df_train)
     X_val,   Y_val   = build_tensors(df_val)
-    logger.info(f"Train: {len(X_train)} | Val: {len(X_val)}")
+    logger.info(f"Train: {len(X_train)} | Val: {len(X_val)} | Sharpe threshold (train): {threshold_train:.4f}")
 
-    # batch_size sécurisé : si moins de 2 samples, force batch=1 avec BN désactivé
-    effective_batch = min(batch_size, max(1, len(X_train)))
+    # FIX BATCH_SIZE=1 / BatchNorm crash :
+    # build_tensors peut filtrer des lignes NaN → vérifier à nouveau après conversion.
+    if len(X_train) < 2:
+        logger.warning("Tenseurs train insuffisants après build_tensors (< 2) — cycle ignoré")
+        return None
+
+    # effective_batch >= 2 : évite tout batch de taille 1 en mode train.
+    # Couplé à drop_last=True dans DataLoader, garantit que chaque batch
+    # a exactement effective_batch échantillons → BatchNorm1d ne plante jamais.
+    effective_batch = max(2, min(batch_size, len(X_train)))
 
     model     = TOP4EAParamNet()
     _load_checkpoint(model, model_path)
@@ -302,8 +357,13 @@ def train(
     criterion = CompositeLoss()
 
     train_ds = TensorDataset(X_train, Y_train)
+    # FIX BUG 6 — drop_last=True : le dernier mini-batch est éliminé s'il a
+    # moins de effective_batch échantillons, ce qui garantit que BatchNorm1d
+    # ne reçoit JAMAIS un batch de taille 1 (variance indéfinie → crash).
+    # drop_last peut réduire marginalement l'utilisation des données, mais
+    # effective_batch >= 2 et len(X_train) >= 2 assurent au moins 1 batch complet.
     train_dl = DataLoader(train_ds, batch_size=effective_batch,
-                          shuffle=True, drop_last=False)
+                          shuffle=True, drop_last=True)
 
     best_val_loss = float("inf")
     best_state    = None
@@ -356,7 +416,7 @@ def train(
         if epoch % CHECKPOINT_EVERY == 0 and best_state is not None:
             tmp_state = model.state_dict()
             model.load_state_dict(best_state)
-            torch.save(best_state, model_path)
+            _atomic_torch_save(best_state, model_path)  # FIX BUG 7 : écriture atomique
             model.load_state_dict(tmp_state)
 
         if no_improve >= patience:
@@ -366,7 +426,7 @@ def train(
     # Restaurer le meilleur modèle et sauvegarder définitivement
     if best_state is not None:
         model.load_state_dict(best_state)
-    torch.save(model.state_dict(), model_path)
+    _atomic_torch_save(model.state_dict(), model_path)  # FIX BUG 7 : écriture atomique
     logger.info(f"Modèle sauvegardé : {model_path} (val_loss={best_val_loss:.5f})")
 
     # ── Prédiction sur le contexte le plus récent ─────────────

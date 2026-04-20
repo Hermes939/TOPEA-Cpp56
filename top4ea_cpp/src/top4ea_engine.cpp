@@ -260,7 +260,7 @@ void TOP4EA_Engine::onConnect(bool connected) {
         // déclenchement géométrique pendant la fenêtre de reconnexion.
         // restoreState() les rétablira proprement depuis le broker.
         ssTicket_.store(-1);  bsTicket_.store(-1);
-        ssLevel_ = 0.0;       bsLevel_ = 0.0;
+        ssLevel_.store(0.0);  bsLevel_.store(0.0);
         state_.store(EAState::Init);
     } else {
         log("MetaApi déconnecté — en attente de reconnexion");
@@ -286,7 +286,7 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
                 + "s, basketClosing=" + (activeClose ? "OUI" : "NON")
                 + ") — force reset Init + vidage cache");
             ssTicket_.store(-1); bsTicket_.store(-1);
-            ssLevel_ = 0.0; bsLevel_ = 0.0;
+            ssLevel_.store(0.0); bsLevel_.store(0.0);
             recovery_->reset();
             basketMon_->reset();
             basketClosing_.store(false);
@@ -560,8 +560,8 @@ void TOP4EA_Engine::restoreState(const std::vector<OrderInfo>& orders) {
         if (o.type == OrderType::Sell) { ++sellCnt; sumPrice += o.openPrice; ++mktCount; }
         if (o.type == OrderType::Buy)  { ++buyCnt;  sumPrice += o.openPrice; ++mktCount; }
     }
-    ssTicket_.store(ssT);  ssLevel_ = ssLvl;
-    bsTicket_.store(bsT);  bsLevel_ = bsLvl;
+    ssTicket_.store(ssT);  ssLevel_.store(ssLvl);
+    bsTicket_.store(bsT);  bsLevel_.store(bsLvl);
     recovery_->restoreFromOrders(sellCnt, buyCnt);
 
     // Restaurer l'ancre géométrique depuis le prix moyen des ordres ouverts
@@ -628,13 +628,13 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
     // ── SellStop : bid franchit ssLevel_ à la baisse ─────────
     // Le broker a déjà exécuté l'ordre → on met à jour l'état interne
     // immédiatement sans attendre le polling HTTP.
-    if (ss > 0 && ssLevel_ > 0.0 && tick.bid <= ssLevel_) {
+    if (ss > 0 && ssLevel_.load() > 0.0 && tick.bid <= ssLevel_.load()) {
         log("[GEO] SS déclenché @ bid=" + std::to_string(tick.bid)
-            + " ≤ level=" + std::to_string(ssLevel_)
+            + " ≤ level=" + std::to_string(ssLevel_.load())
             + " [géométrie pure]");
-        double triggeredAt = ssLevel_;
+        double triggeredAt = ssLevel_.load();
         ssTicket_.store(-1);  // empêche tout re-déclenchement sur le tick suivant
-        ssLevel_ = 0.0;       // sera recalculé géométriquement par trailGrid()
+        ssLevel_.store(0.0);  // sera recalculé géométriquement par trailGrid()
 
         // ── BUG FIX MARTINGALE ────────────────────────────────
         // Le broker a TOUJOURS exécuté ce SS (position Sell ouverte).
@@ -672,13 +672,13 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
     }
 
     // ── BuyStop : ask franchit bsLevel_ à la hausse ──────────
-    if (bs > 0 && bsLevel_ > 0.0 && tick.ask >= bsLevel_) {
+    if (bs > 0 && bsLevel_.load() > 0.0 && tick.ask >= bsLevel_.load()) {
         log("[GEO] BS déclenché @ ask=" + std::to_string(tick.ask)
-            + " ≥ level=" + std::to_string(bsLevel_)
+            + " ≥ level=" + std::to_string(bsLevel_.load())
             + " [géométrie pure]");
-        double triggeredAt = bsLevel_;
+        double triggeredAt = bsLevel_.load();
         bsTicket_.store(-1);
-        bsLevel_ = 0.0;
+        bsLevel_.store(0.0);
 
         // ── BUG FIX MARTINGALE ────────────────────────────────
         // Même logique : le broker a toujours exécuté ce BS.
@@ -735,7 +735,7 @@ void TOP4EA_Engine::syncTriggersFallback(const std::vector<OrderInfo>& orders) {
             log("[SYNC] SS ticket=" + std::to_string(ss)
                 + " disparu sans crossing prix — sync fallback");
             ssTicket_.store(-1);
-            ssLevel_ = 0.0;
+            ssLevel_.store(0.0);
         }
     }
 
@@ -752,7 +752,7 @@ void TOP4EA_Engine::syncTriggersFallback(const std::vector<OrderInfo>& orders) {
             log("[SYNC] BS ticket=" + std::to_string(bs)
                 + " disparu sans crossing prix — sync fallback");
             bsTicket_.store(-1);
-            bsLevel_ = 0.0;
+            bsLevel_.store(0.0);
         }
     }
 }
@@ -904,7 +904,7 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
         for (const auto& o : ordCache) {
             if (o.type == OrderType::SellStop) {
                 ssTicket_.store(o.ticket);
-                ssLevel_     = o.openPrice;
+                ssLevel_.store(o.openPrice);
                 ssCreatedAt_ = Clock::now();   // réinitialiser le garde
                 log("[Guard-SS] Anti-doublon : SS existant restauré ticket="
                     + std::to_string(o.ticket)
@@ -917,7 +917,7 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
 
     // Ancrage géométrique pur : passe gridOrigin_ comme référence fixe
     // Le niveau est toujours à origin - (depth+1) × GridGap × factor
-    auto pl = grid_->computeSellStop(ss, ssLevel_, gridOrigin_, recovDepth, gapFactor);
+    auto pl = grid_->computeSellStop(ss, ssLevel_.load(), gridOrigin_, recovDepth, gapFactor);
 
     if (pl.needsCreate) {
         double curBid  = grid_->bid();
@@ -958,15 +958,15 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             ssTicket_.store(res.ticket);
-            ssLevel_     = pl.targetPrice;
+            ssLevel_.store(pl.targetPrice);
             ssCreatedAt_ = Clock::now();   // horodatage anti-doublon
             log("SS créé ticket=" + std::to_string(res.ticket)
-                + " @ " + std::to_string(ssLevel_));
+                + " @ " + std::to_string(ssLevel_.load()));
             // Enregistrement sous-agent L(sellCount)
             orchestrator_.armSlot(
                 recovery_->sellCount(),
                 res.ticket, pl.targetPrice, lot,
-                bsTicket_.load(), bsLevel_, 0.0);
+                bsTicket_.load(), bsLevel_.load(), 0.0);
         }
     } else if (pl.needsModify && ss > 0 && !trailFrozen) {
         // Ratchet haut : target > ssLevel_ garanti par computeSellStop
@@ -983,7 +983,7 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
         cmd.sl     = 0.0; cmd.tp = 0.0;
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
-            ssLevel_ = pl.targetPrice;
+            ssLevel_.store(pl.targetPrice);
             log("SS ↑ ratchet → " + std::to_string(pl.targetPrice)
                 + " [+" + std::to_string(pl.delta / cfg_.point) + "pts]");
         }
@@ -1004,7 +1004,7 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
         for (const auto& o : ordCache) {
             if (o.type == OrderType::BuyStop) {
                 bsTicket_.store(o.ticket);
-                bsLevel_     = o.openPrice;
+                bsLevel_.store(o.openPrice);
                 bsCreatedAt_ = Clock::now();
                 log("[Guard-BS] Anti-doublon : BS existant restauré ticket="
                     + std::to_string(o.ticket)
@@ -1017,7 +1017,7 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
 
     // Ancrage géométrique pur : passe gridOrigin_ comme référence fixe
     // Le niveau est toujours à origin + (depth+1) × GridGap × factor
-    auto pl = grid_->computeBuyStop(bs, bsLevel_, gridOrigin_, recovDepth, gapFactor);
+    auto pl = grid_->computeBuyStop(bs, bsLevel_.load(), gridOrigin_, recovDepth, gapFactor);
 
     if (pl.needsCreate) {
         double curAsk  = grid_->ask();
@@ -1058,14 +1058,14 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             bsTicket_.store(res.ticket);
-            bsLevel_     = pl.targetPrice;
+            bsLevel_.store(pl.targetPrice);
             bsCreatedAt_ = Clock::now();   // horodatage anti-doublon
             log("BS créé ticket=" + std::to_string(res.ticket)
-                + " @ " + std::to_string(bsLevel_));
+                + " @ " + std::to_string(bsLevel_.load()));
             // Enregistrement sous-agent L(buyCount)
             orchestrator_.armSlot(
                 recovery_->buyCount(),
-                ssTicket_.load(), ssLevel_, 0.0,
+                ssTicket_.load(), ssLevel_.load(), 0.0,
                 res.ticket, pl.targetPrice, lot);
         }
     } else if (pl.needsModify && bs > 0 && !trailFrozen) {
@@ -1083,7 +1083,7 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
         cmd.sl     = 0.0; cmd.tp = 0.0;
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
-            bsLevel_ = pl.targetPrice;
+            bsLevel_.store(pl.targetPrice);
             log("BS ↓ ratchet → " + std::to_string(pl.targetPrice)
                 + " [-" + std::to_string(pl.delta / cfg_.point) + "pts]");
         }
@@ -1166,15 +1166,35 @@ void TOP4EA_Engine::closeWavePartial(int wave) {
         return;
     }
 
-    // CORRECTION MATHÉMATIQUE — tri par P&L ascendant (losers en premier)
-    // Ancien code : tri par lots croissants → fermait les plus petites positions sans
-    //   considérer si elles étaient en profit ou en perte.
-    // Problème    : pouvait fermer des positions gagnantes avant les perdantes,
-    //   laissant le panier exposé aux plus grosses pertes.
-    // Correction  : fermer d'abord les losers pour réduire le risque global tout en
-    //   conservant les positions gagnantes qui peuvent continuer à progresser vers le target.
-    // Mathématique : si cyclePnL = +$8 (déclenche Wave1), fermer les losers en priorité
-    //   préserve le gain net car les winners restent ouverts.
+    // ── Logique de tri — justification explicite (Bug 3 audit) ──────────────
+    //
+    // STRATÉGIE ACTUELLE : tri par P&L net ascendant (losers en premier)
+    //
+    // Raisonnement :
+    //   L'objectif de Wave1/Wave2 est de sécuriser un profit partiel TOUT EN
+    //   réduisant l'exposition globale. Fermer les losers en premier :
+    //   (a) réduit le drawdown flottant immédiatement ;
+    //   (b) conserve les winners ouverts pour qu'ils continuent vers le target ;
+    //   (c) évite de cristalliser des pertes inutilement si la tendance tourne.
+    //
+    //   Ex : cyclePnL = +$8, positions = [-$3, -$1, +$6, +$12]
+    //     Tri P&L asc → ferme [-$3, -$1] → net restant = +$18 (réduction du risque)
+    //     Tri lots asc → ferme les petits lots, indépendamment du P&L → non-optimal
+    //
+    // Risque marge (hedge strategies) :
+    //   Dans un panier strictement hedgé (autant de lots Buy que Sell),
+    //   fermer uniquement les losers peut déséquilibrer temporairement la couverture
+    //   et augmenter la marge requise. Ce cas est atténué par :
+    //   • cfg_.basketMaxLoss → emergencyCloseAll() si marge critique
+    //   • basketMon_ → surveillance continue du ratio Buy/Sell
+    //   Le risque net reste inférieur à la stratégie "lots croissants" qui ignore
+    //   entièrement le P&L flottant.
+    //
+    // ALTERNATIVE (désactivée) : tri par lots croissants (strategy d'origine)
+    //   Avantage : préserve la couverture Buy/Sell en fermant proportionnellement.
+    //   Inconvénient : peut fermer des winners avant des losers → suboptimal.
+    //   Pour activer : remplacer le comparateur par (a.lots < b.lots).
+    //
     std::sort(mktOrders.begin(), mktOrders.end(),
               [](const OrderInfo& a, const OrderInfo& b){
                   return (a.profit + a.swap + a.commission) < (b.profit + b.swap + b.commission);
@@ -1290,9 +1310,14 @@ void TOP4EA_Engine::closeBasketAtomic() {
         intel_->applyCalibration(cfg_);
     }
 
-    // Reset complet
-    ssTicket_.store(-1); bsTicket_.store(-1);
-    ssLevel_ = 0.0; bsLevel_ = 0.0;
+    // Reset complet — atomique : tout le reset est réalisé sous le verrou mu_
+    // pour qu'aucun tick entrant ne puisse observer un état partiellement réinitialisé
+    // (ex: ssTicket_=-1 mais ssLevel_ encore valide).
+    {
+        std::lock_guard lk(mu_);
+        ssTicket_.store(-1); bsTicket_.store(-1);
+        ssLevel_.store(0.0); bsLevel_.store(0.0);
+    }
     recovery_->reset();
     basketMon_->reset();
     vlMgr_.reset();           // effacer tous les niveaux VL du cycle terminé
@@ -1345,7 +1370,7 @@ void TOP4EA_Engine::closeOneSide(int sideType) {
     int bs = bsTicket_.load();
     if (ss > 0) { bridge_->sendCommand(makeDelete(ss)); ssTicket_.store(-1); }
     if (bs > 0) { bridge_->sendCommand(makeDelete(bs)); bsTicket_.store(-1); }
-    ssLevel_ = 0.0; bsLevel_ = 0.0;
+    ssLevel_.store(0.0); bsLevel_.store(0.0);
 
     // ── [2] Reset des compteurs recovery (évite boucle CloseOneSide) ──────
     // Les positions marché restent ouvertes — seuls les compteurs sont remis à 0
@@ -1374,7 +1399,7 @@ void TOP4EA_Engine::emergencyCloseAll(double currentPnL) {
     int bs = bsTicket_.load();
     if (ss > 0) { bridge_->sendCommand(makeDelete(ss)); ssTicket_.store(-1); }
     if (bs > 0) { bridge_->sendCommand(makeDelete(bs)); bsTicket_.store(-1); }
-    ssLevel_ = 0.0; bsLevel_ = 0.0;
+    ssLevel_.store(0.0); bsLevel_.store(0.0);
 
     // Fermer toutes les positions au marché
     auto orders = fetchOrders();
@@ -1536,10 +1561,10 @@ void TOP4EA_Engine::closeSideAtVL(int side) {
     int bs = bsTicket_.load();
     if (side == 0) {
         // V-SS déclenché → Buy fermé → supprimer BS (plus d'entrées Buy), garder SS
-        if (bs > 0) { bridge_->sendCommand(makeDelete(bs)); bsTicket_.store(-1); bsLevel_ = 0.0; }
+        if (bs > 0) { bridge_->sendCommand(makeDelete(bs)); bsTicket_.store(-1); bsLevel_.store(0.0); }
     } else {
         // V-BS déclenché → Sell fermé → supprimer SS (plus d'entrées Sell), garder BS
-        if (ss > 0) { bridge_->sendCommand(makeDelete(ss)); ssTicket_.store(-1); ssLevel_ = 0.0; }
+        if (ss > 0) { bridge_->sendCommand(makeDelete(ss)); ssTicket_.store(-1); ssLevel_.store(0.0); }
     }
 
     auto orders = fetchOrders();
@@ -1632,7 +1657,7 @@ void TOP4EA_Engine::closeAllOrders() {
     }
     for (auto& f : stopFuts) f.get();
     ssTicket_.store(-1); bsTicket_.store(-1);
-    ssLevel_ = 0; bsLevel_ = 0;
+    ssLevel_.store(0.0); bsLevel_.store(0.0);
 
     // Phase 1 — fermeture positions marché en parallèle
     std::vector<std::future<bool>> closeFuts;
@@ -1911,8 +1936,8 @@ std::string TOP4EA_Engine::dashboard() const {
     oss << "╠═══════════════════════════════════╣\n";
     oss << "║  Balance   : " << acc.balance << " " << acc.currency << "\n";
     oss << "║  Marge lib : " << freePct << "%\n";
-    oss << "║  SS @ " << std::setprecision(5) << ssLevel_ << "\n";
-    oss << "║  BS @ " << bsLevel_ << "\n";
+    oss << "║  SS @ " << std::setprecision(5) << ssLevel_.load() << "\n";
+    oss << "║  BS @ " << bsLevel_.load() << "\n";
     // ── Verrouillage Profit Trailing (V-BS / V-SS) ────────────
     if (cfg_.vlEnabled) {
         oss << "╠══════ VERROUILLAGE PROFIT (V) ══════╣\n";

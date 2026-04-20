@@ -20,6 +20,8 @@ ROBUSTESSE PRODUCTION :
 
 import json
 import logging
+import os
+import tempfile
 import time
 from pathlib import Path
 from typing import Dict, Optional
@@ -36,6 +38,31 @@ logger = logging.getLogger("top4ea.optimizer")
 
 OPTUNA_STUDY_PATH = Path("automl/output/optuna_study.json")
 BEST_ARCH_PATH    = Path("automl/output/best_arch.json")
+
+
+# ────────────────────────────────────────────────────────────
+#  Écriture JSON atomique (Bug 9)
+# ────────────────────────────────────────────────────────────
+def _atomic_write_json(data: dict, path: Path) -> None:
+    """
+    FIX ÉCRITURE ATOMIQUE (Bug 9) : write-to-temp puis os.replace().
+    Le moteur C++ lit optuna_study.json et best_arch.json à la volée :
+    un fichier à moitié écrit peut le faire crasher ou lire des données
+    corrompues. Le rename POSIX est atomique sur le même système de fichiers.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        os.close(fd)
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp_path, path)
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 # ────────────────────────────────────────────────────────────
@@ -58,8 +85,11 @@ def evaluate_config(
     from torch.optim.lr_scheduler import CosineAnnealingLR
     import torch.nn as nn
 
-    # batch_size sécurisé
-    effective_batch = min(batch_size, max(1, len(X_train)))
+    # FIX BUG 6 — BatchNorm guard dans optimizer :
+    # effective_batch >= 2 + drop_last=True → jamais de batch de taille 1.
+    if len(X_train) < 2:
+        return float("inf")  # pas assez de données pour entraîner
+    effective_batch = max(2, min(batch_size, len(X_train)))
 
     model     = TOP4EAParamNet(
         hidden_dim   = hidden_dim,
@@ -72,8 +102,10 @@ def evaluate_config(
     criterion = CompositeLoss()
 
     train_ds = TensorDataset(X_train, Y_train)
+    # drop_last=True : élimine le dernier batch incomplet → BatchNorm1d ne
+    # reçoit jamais un batch de taille 1 (variance indéfinie → crash).
     train_dl = DataLoader(train_ds, batch_size=effective_batch,
-                          shuffle=True, drop_last=False)
+                          shuffle=True, drop_last=True)
 
     best_val = float("inf")
 
@@ -174,15 +206,15 @@ def run_optuna_search(
             }
             for t in study.trials if t.value is not None
         ]
-        OPTUNA_STUDY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(OPTUNA_STUDY_PATH, "w") as f:
-            json.dump({
-                "best":    best,
-                "best_val_loss": study.best_value,
-                "n_trials": len(study.trials),
-                "timestamp": int(time.time()),
-                "history": history,
-            }, f, indent=2)
+        # FIX BUG 9 : écriture atomique pour éviter que le C++ lise un JSON
+        # à moitié écrit (tmp → rename atomique POSIX).
+        _atomic_write_json({
+            "best":          best,
+            "best_val_loss": study.best_value,
+            "n_trials":      len(study.trials),
+            "timestamp":     int(time.time()),
+            "history":       history,
+        }, OPTUNA_STUDY_PATH)
     except Exception:
         pass
 
@@ -270,10 +302,8 @@ def optimize_and_train(
     )
     logger.info(f"Optimisation terminée en {time.time()-t0:.1f}s")
 
-    # Sauvegarde de la meilleure architecture
-    BEST_ARCH_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(BEST_ARCH_PATH, "w") as f:
-        json.dump(best_arch, f, indent=2)
+    # FIX BUG 9 : écriture atomique de la meilleure architecture
+    _atomic_write_json(best_arch, BEST_ARCH_PATH)
     logger.info(f"Architecture sauvegardée : {BEST_ARCH_PATH}")
 
     # Entraînement final avec les meilleurs hyperparams

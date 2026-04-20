@@ -153,6 +153,34 @@ def count_csv_lines(path: Path) -> int:
         return 0
 
 
+def get_file_stats(path: Path) -> tuple[str, int]:
+    """
+    FIX RACE CONDITION (Bug 8) :
+    Lit le fichier UNE SEULE FOIS et retourne (md5_hash, n_data_lines).
+    Auparavant, get_file_hash() et count_csv_lines() ouvraient le fichier
+    séparément : le moteur C++ pouvait écrire entre les deux lectures,
+    rendant hash et ligne-count incohérents (ex: file_changed=True avec
+    new_cycles<0 ou vice-versa).
+    """
+    if not path.exists():
+        return ("", 0)
+    try:
+        with open(path, "rb") as f:
+            data = f.read()
+        md5 = hashlib.md5(data).hexdigest()
+        # Compter les lignes de données (hors header) depuis les octets déjà lus.
+        # Méthode robuste : split sur \n et retirer les lignes vides et le header.
+        # data.count(b"\n") sous-compterait si la dernière ligne n'a pas de \n final.
+        lines = data.split(b"\n")
+        # Filtrer les lignes vides (dernière ligne vide si CSV se termine par \n)
+        non_empty = [ln for ln in lines if ln.strip()]
+        # -1 pour ignorer le header (première ligne)
+        n_lines = max(0, len(non_empty) - 1)
+        return (md5, n_lines)
+    except OSError:
+        return ("", 0)
+
+
 def safe_copy_csv(src: Path) -> Optional[Path]:
     """
     Copie atomique du CSV avant lecture pour éviter un crash
@@ -374,8 +402,8 @@ def watch_mode():
     logger.info(f"  Checkpoints  : {N_KEEP_CHECKPOINTS} générations conservées")
     logger.info("═══════════════════════════════════════════")
 
-    last_hash       = get_file_hash(TRAINING_CSV)
-    last_n_cycles   = count_csv_lines(TRAINING_CSV)
+    # FIX RACE CONDITION (Bug 8) : lecture atomique en une seule opération
+    last_hash, last_n_cycles = get_file_stats(TRAINING_CSV)
     last_train_time = datetime.utcnow()
     n_trains        = 0
 
@@ -392,9 +420,10 @@ def watch_mode():
             if _shutdown_requested:
                 break
 
-            current_hash = get_file_hash(TRAINING_CSV)
-            current_n    = count_csv_lines(TRAINING_CSV)
-            new_cycles   = current_n - last_n_cycles
+            # FIX RACE CONDITION (Bug 8) : snapshot atomique (hash + nb lignes)
+            # en une seule lecture pour éviter l'incohérence entre les deux valeurs.
+            current_hash, current_n = get_file_stats(TRAINING_CSV)
+            new_cycles = current_n - last_n_cycles
 
             # ── Calcul age avec total_seconds() (corrige le bug .seconds) ──
             age_min = (datetime.utcnow() - last_train_time).total_seconds() / 60.0
@@ -463,8 +492,9 @@ def watch_mode():
                     except OSError:
                         pass
 
-                last_hash       = get_file_hash(TRAINING_CSV)
-                last_n_cycles   = current_n
+                # Re-snapshot atomique pour éviter la dérive entre hash et n_cycles
+                last_hash, last_n_cycles_post = get_file_stats(TRAINING_CSV)
+                last_n_cycles   = max(current_n, last_n_cycles_post)
                 last_train_time = datetime.utcnow()
 
             elif file_changed and MODEL_PATH.exists():

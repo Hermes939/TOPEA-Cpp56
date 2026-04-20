@@ -169,10 +169,13 @@ private:
     std::atomic<EAState> state_ { EAState::Init };
     mutable std::mutex   mu_;
 
-    std::atomic<int> ssTicket_ { -1 };
-    std::atomic<int> bsTicket_ { -1 };
-    double  ssLevel_     = 0.0;
-    double  bsLevel_     = 0.0;
+    std::atomic<int>    ssTicket_ { -1 };
+    std::atomic<int>    bsTicket_ { -1 };
+    // FIX: Converties en atomic<double> pour éviter les torn read/write
+    // entre le thread tick (detectGeometricTriggers) et le thread state
+    // (onConnect). std::atomic<double> est garanti lock-free sur x86/x64.
+    std::atomic<double> ssLevel_ { 0.0 };
+    std::atomic<double> bsLevel_ { 0.0 };
 
     // ── Horodatages de création SS/BS (anti-doublon) ─────────
     // syncTriggersFallback n'invalide pas un ticket créé depuis

@@ -198,20 +198,52 @@ void MetaApiBridge::stateLoop() {
 
 // ────────────────────────────────────────────────────────────
 //  sendCommand — trade via REST POST
+//
+//  FIX : Retry avec backoff linéaire pour les commandes critiques
+//  (CloseOrder, CloseBy, DeletePending, ModifyOrder).
+//  Stratégie : 3 tentatives, délai 200ms → 400ms → 600ms.
+//  Les ordres d'ouverture (MarketOrder, BuyStop, SellStop) ne sont
+//  PAS retentés pour éviter la duplication de positions.
 // ────────────────────────────────────────────────────────────
 BridgeResponse MetaApiBridge::sendCommand(const TradeCmd& cmd, int /*timeoutMs*/) {
     std::string body = cmdToJson(cmd);
     std::string path = "/users/current/accounts/" + accountId_ + "/trade";
-    std::string resp = httpPost(path, body);
 
-    if (resp.empty()) {
-        BridgeResponse r;
-        r.success = false;
-        r.error   = -1;
-        r.msg     = "Pas de réponse MetaApi";
-        return r;
+    // Les commandes critiques (fermeture/modification) bénéficient du retry
+    bool isCritical = (cmd.op == TradeCmd::Op::CloseOrder  ||
+                       cmd.op == TradeCmd::Op::CloseBy     ||
+                       cmd.op == TradeCmd::Op::DeletePending||
+                       cmd.op == TradeCmd::Op::ModifyOrder);
+
+    static constexpr int MAX_RETRIES   = 3;
+    static constexpr int BACKOFF_MS    = 200;  // délai de base (linéaire)
+
+    int attempts = isCritical ? MAX_RETRIES : 1;
+
+    for (int attempt = 1; attempt <= attempts; ++attempt) {
+        std::string resp = httpPost(path, body);
+
+        if (!resp.empty()) {
+            BridgeResponse r = parseTradeResult(resp);
+            if (r.success || !isCritical) return r;
+            // Échec applicatif sur commande critique → retry
+            std::cerr << "[MetaApi] sendCommand échoué tentative " << attempt
+                      << "/" << attempts << " : " << r.msg << "\n";
+        } else {
+            std::cerr << "[MetaApi] sendCommand pas de réponse tentative " << attempt
+                      << "/" << attempts << "\n";
+        }
+
+        if (attempt < attempts) {
+            std::this_thread::sleep_for(Ms(BACKOFF_MS * attempt));
+        }
     }
-    return parseTradeResult(resp);
+
+    BridgeResponse r;
+    r.success = false;
+    r.error   = -1;
+    r.msg     = "Pas de réponse MetaApi après " + std::to_string(attempts) + " tentatives";
+    return r;
 }
 
 // ────────────────────────────────────────────────────────────
