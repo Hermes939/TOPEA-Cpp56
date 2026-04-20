@@ -5,7 +5,7 @@
 //  ASSISTANTE VISUELLE AI — Audit marché temps réel
 //  ─────────────────────────────────────────────────────────
 //  Analyse continue multi-timeframe (iniMTA) :
-//    • Barres synthétiques M1 / M5 / M15 / H1 depuis tick stream
+//    • Barres synthétiques M1 / M5 / M15 / M30 depuis tick stream
 //    • ATR(14), RSI(14), MACD(12-26-9), Bollinger(20), Momentum
 //    • Détection de session (Tokyo / London / NY / Overlap)
 //    • Analyse de structure (HH/HL/LH/LL, breakout, piège)
@@ -83,7 +83,7 @@ struct VisualDecision {
     std::string     reasoning;             // explication lisible
 
     // iniMTA snapshot
-    IndiSet m1, m5, m15, h1;
+    IndiSet m1, m5, m15, m30;
 
     // ── Couche DeepSeek LLM ───────────────────────────────────
     DeepSeekSignal  dsSignal;              // dernier signal LLM (UNKNOWN si inactif)
@@ -153,7 +153,7 @@ private:
     // ── Decision engine (Visual AI) ───────────────────────────
     [[nodiscard]] VisualDecision computeDecision(
         const IndiSet& m1, const IndiSet& m5,
-        const IndiSet& m15, const IndiSet& h1,
+        const IndiSet& m15, const IndiSet& m30,
         MarketStructure structure,
         TradingSession  session,
         double spreadRatio) const noexcept;
@@ -162,14 +162,14 @@ private:
     static constexpr int MAX_M1  = 200;
     static constexpr int MAX_M5  = 200;
     static constexpr int MAX_M15 = 100;
-    static constexpr int MAX_H1  = 100;
+    static constexpr int MAX_M30 = 200;  // 200 × 30min = ~100h d'historique
 
-    std::deque<Bar> m1Bars_, m5Bars_, m15Bars_, h1Bars_;
+    std::deque<Bar> m1Bars_, m5Bars_, m15Bars_, m30Bars_;
 
     // Barres en construction
-    Bar curM1_, curM5_, curM15_, curH1_;
+    Bar curM1_, curM5_, curM15_, curM30_;
     std::chrono::system_clock::time_point
-        m1Start_, m5Start_, m15Start_, h1Start_;
+        m1Start_, m5Start_, m15Start_, m30Start_;
 
     // Spread courant et EWMA (pour spreadRatio)
     double spreadEwma_    = 0.0;

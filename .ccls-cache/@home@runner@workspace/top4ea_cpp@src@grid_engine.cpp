@@ -156,10 +156,10 @@ StopPlacement GridEngine::computeBuyStop(
 
     double ask = lastAsk_.load(std::memory_order_relaxed);
 
-    // ── Ancrage flottant : toujours 1 GridGap au-dessus du ask courant ─
-    // La profondeur de récupération (recovDepth) n'affecte PAS le
-    // niveau géométrique — elle pilote uniquement le lot via Kelly.
-    double step = effectiveGridGap() * gapFactor * pointSize();
+    // ── Ancrage flottant : toujours 1 demi-gap au-dessus du ask courant ─
+    // Symétrique au SS : halfGap côté BS + halfGap côté SS = 1 GridGap
+    // total entre les deux stops.
+    double step = halfGap() * gapFactor;   // demi-gap × facteur intel
     double target = math::normalize(ask + step, cfg_.digits);
 
     // Garde broker : respect du STOPLEVEL minimum
@@ -174,9 +174,10 @@ StopPlacement GridEngine::computeBuyStop(
         sp.needsCreate = true;
     } else {
         sp.delta = currentLevel - target;
-        // ── RATCHET BAS UNIQUEMENT ─────────────────────────────
-        // Le BS ne descend que si le ask a baissé d'au moins 1 gap entier.
-        double minChange = effectiveGridGap() * pointSize();
+        // ── RATCHET BAS UNIQUEMENT + trail réactif ─────────────
+        // Seuil = 10% du demi-gap (~25 pts pour gridGap=500).
+        // Le BS descend dès que le ask baisse d'au moins 25 pts.
+        double minChange = halfGap() / 10.0;
         sp.needsModify = (sp.delta > minChange);
     }
     return sp;

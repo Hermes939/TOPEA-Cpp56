@@ -77,11 +77,11 @@ struct DSMarketContext {
     double m5BbWidth  = 0.0;
     double m5Momentum = 0.0;
 
-    // H1 indicateurs
-    double h1Atr      = 0.0;
-    double h1Rsi      = 50.0;
-    double h1Macd     = 0.0;
-    double h1MacdHist = 0.0;
+    // M30 indicateurs
+    double m30Atr      = 0.0;
+    double m30Rsi      = 50.0;
+    double m30Macd     = 0.0;
+    double m30MacdHist = 0.0;
 
     // Context basket
     double basketPnl  = 0.0;

@@ -16,7 +16,7 @@ using SysTP    = std::chrono::time_point<SysClock>;
 static constexpr int TF_M1  = 60;
 static constexpr int TF_M5  = 300;
 static constexpr int TF_M15 = 900;
-static constexpr int TF_H1  = 3600;
+static constexpr int TF_M30 = 1800;
 
 // ============================================================
 //  Helpers statistiques internes
@@ -54,8 +54,8 @@ double stddev(const std::vector<double>& v, double mean) noexcept {
 // ============================================================
 void MarketIntelligence::resetPartials() noexcept {
     auto now = SysClock::now();
-    curM1_ = curM5_ = curM15_ = curH1_ = Bar{};
-    m1Start_ = m5Start_ = m15Start_ = h1Start_ = now;
+    curM1_ = curM5_ = curM15_ = curM30_ = Bar{};
+    m1Start_ = m5Start_ = m15Start_ = m30Start_ = now;
 }
 
 // ============================================================
@@ -65,7 +65,8 @@ void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
                                  double basketPnl, int openOrders) noexcept {
     if (tick.bid <= 0.0 || tick.ask <= 0.0) return;
 
-    // Spread EWMA
+    // Spread courant + EWMA
+    curSpread_ = tick.spread;
     if (spreadEwma_ <= 0.0) spreadEwma_ = tick.spread;
     else spreadEwma_ = 0.05 * tick.spread + 0.95 * spreadEwma_;
 
@@ -82,45 +83,47 @@ void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
 
     // ── Appel DeepSeek LLM — toutes les 50 ticks (non-bloquant) ──
     // Lance un thread détaché → résultat disponible ~1s plus tard
-    if (deepseek_.hasApiKey() && (tickCount_ % 50 == 1)) {
+    // Garde : requiert au moins 26 barres M30 pour un MACD M30 valide
+    bool m30Ready = ((int)m30Bars_.size() >= 26);
+    if (deepseek_.hasApiKey() && (tickCount_ % 50 == 1) && m30Ready) {
         // Snapshot indicateurs pour le prompt
-        std::deque<Bar> bM5, bH1;
+        std::deque<Bar> bM5, bM30;
         double se;
         {
             std::lock_guard lk(mu_);
-            bM5 = m5Bars_;
-            bH1 = h1Bars_;
-            se  = spreadEwma_;
+            bM5  = m5Bars_;
+            bM30 = m30Bars_;
+            se   = spreadEwma_;
         }
-        Bar c5, cH;
-        { std::lock_guard lk(mu_); c5 = curM5_; cH = curH1_; }
-        if (c5.ticks > 0) bM5.push_back(c5);
-        if (cH.ticks > 0) bH1.push_back(cH);
+        Bar c5, cM30;
+        { std::lock_guard lk(mu_); c5 = curM5_; cM30 = curM30_; }
+        if (c5.ticks  > 0) bM5.push_back(c5);
+        if (cM30.ticks > 0) bM30.push_back(cM30);
 
-        IndiSet im5 = computeIndicators(bM5);
-        IndiSet ih1 = computeIndicators(bH1);
+        IndiSet im5  = computeIndicators(bM5);
+        IndiSet im30 = computeIndicators(bM30);
         TradingSession ses = detectSession();
         MarketStructure st = analyzeStructure(bM5);
 
         DSMarketContext ctx;
-        ctx.session     = sessionName(ses);
-        ctx.structure   = structureName(st);
-        ctx.bid         = tick.bid;
-        ctx.ask         = tick.ask;
-        ctx.spreadRatio = (se > 1e-10 && im5.atr > 0.0)
-                          ? (se / (se * 0.95 + 1e-10)) : 1.0;
-        ctx.m5Atr      = im5.atr;
-        ctx.m5Rsi      = im5.rsi;
-        ctx.m5Macd     = im5.macdLine;
-        ctx.m5MacdHist = im5.macdHist;
-        ctx.m5BbWidth  = im5.bbWidth * 100.0;
-        ctx.m5Momentum = im5.momentum;
-        ctx.h1Atr      = ih1.atr;
-        ctx.h1Rsi      = ih1.rsi;
-        ctx.h1Macd     = ih1.macdLine;
-        ctx.h1MacdHist = ih1.macdHist;
-        ctx.basketPnl  = basketPnl;
-        ctx.openOrders = openOrders;
+        ctx.session      = sessionName(ses);
+        ctx.structure    = structureName(st);
+        ctx.bid          = tick.bid;
+        ctx.ask          = tick.ask;
+        ctx.spreadRatio  = (se > 1e-10 && curSpread_ > 0.0)
+                           ? curSpread_ / se : 1.0;
+        ctx.m5Atr       = im5.atr;
+        ctx.m5Rsi       = im5.rsi;
+        ctx.m5Macd      = im5.macdLine;
+        ctx.m5MacdHist  = im5.macdHist;
+        ctx.m5BbWidth   = im5.bbWidth * 100.0;
+        ctx.m5Momentum  = im5.momentum;
+        ctx.m30Atr      = im30.atr;
+        ctx.m30Rsi      = im30.rsi;
+        ctx.m30Macd     = im30.macdLine;
+        ctx.m30MacdHist = im30.macdHist;
+        ctx.basketPnl   = basketPnl;
+        ctx.openOrders  = openOrders;
 
         try { deepseek_.requestAnalysis(ctx); }
         catch (...) { /* thread non-créé — pas critique */ }
@@ -147,7 +150,7 @@ void MarketIntelligence::pushTick(const Tick& tick) noexcept {
     update_bar(curM1_);
     update_bar(curM5_);
     update_bar(curM15_);
-    update_bar(curH1_);
+    update_bar(curM30_);
 }
 
 // ============================================================
@@ -175,7 +178,7 @@ void MarketIntelligence::closeBars(const Tick& /*tick*/) noexcept {
     if (secs(m1Start_,  TF_M1))  push(m1Bars_,  curM1_,  m1Start_,  TF_M1,  MAX_M1);
     if (secs(m5Start_,  TF_M5))  push(m5Bars_,  curM5_,  m5Start_,  TF_M5,  MAX_M5);
     if (secs(m15Start_, TF_M15)) push(m15Bars_, curM15_, m15Start_, TF_M15, MAX_M15);
-    if (secs(h1Start_,  TF_H1))  push(h1Bars_,  curH1_,  h1Start_,  TF_H1,  MAX_H1);
+    if (secs(m30Start_, TF_M30)) push(m30Bars_, curM30_, m30Start_, TF_M30, MAX_M30);
 }
 
 // ============================================================
@@ -385,14 +388,14 @@ MarketStructure MarketIntelligence::analyzeStructure(
 //    1. Session filter (liquidité)
 //    2. Spread filter (news/spike)
 //    3. Structure (trend / range / trap)
-//    4. Multi-TF confirmation (M5 + H1)
+//    4. Multi-TF confirmation (M5 + M30)
 //    5. RSI + MACD cross-TF
 //    6. BB squeeze
 //    7. Décision finale avec score de confiance
 // ============================================================
 VisualDecision MarketIntelligence::computeDecision(
     const IndiSet& m1, const IndiSet& m5,
-    const IndiSet& m15, const IndiSet& h1,
+    const IndiSet& m15, const IndiSet& m30,
     MarketStructure structure,
     TradingSession  session,
     double spreadRatio) const noexcept
@@ -400,7 +403,7 @@ VisualDecision MarketIntelligence::computeDecision(
     VisualDecision vd;
     vd.structure = structure;
     vd.session   = session;
-    vd.m1 = m1; vd.m5 = m5; vd.m15 = m15; vd.h1 = h1;
+    vd.m1 = m1; vd.m5 = m5; vd.m15 = m15; vd.m30 = m30;
 
     std::string reason;
     double conf = 0.0;
@@ -510,40 +513,41 @@ VisualDecision MarketIntelligence::computeDecision(
 // ============================================================
 VisualDecision MarketIntelligence::analyze() const {
     // Snapshots des barres (lecture sous verrou minimal)
-    std::deque<Bar> bM1, bM5, bM15, bH1;
-    Bar c1, c5, c15, cH;
+    std::deque<Bar> bM1, bM5, bM15, bM30;
+    Bar c1, c5, c15, cM30;
     double se;
     {
         std::lock_guard lk(mu_);
-        bM1 = m1Bars_;  c1  = curM1_;
-        bM5 = m5Bars_;  c5  = curM5_;
-        bM15 = m15Bars_; c15 = curM15_;
-        bH1 = h1Bars_;  cH  = curH1_;
+        bM1  = m1Bars_;   c1   = curM1_;
+        bM5  = m5Bars_;   c5   = curM5_;
+        bM15 = m15Bars_;  c15  = curM15_;
+        bM30 = m30Bars_;  cM30 = curM30_;
         se   = spreadEwma_;
     }
 
     // Ajoute la barre partielle courante (si des ticks existent)
-    if (c1.ticks  > 0) bM1.push_back(c1);
-    if (c5.ticks  > 0) bM5.push_back(c5);
-    if (c15.ticks > 0) bM15.push_back(c15);
-    if (cH.ticks  > 0) bH1.push_back(cH);
+    if (c1.ticks   > 0) bM1.push_back(c1);
+    if (c5.ticks   > 0) bM5.push_back(c5);
+    if (c15.ticks  > 0) bM15.push_back(c15);
+    if (cM30.ticks > 0) bM30.push_back(cM30);
 
     IndiSet indM1  = computeIndicators(bM1);
     IndiSet indM5  = computeIndicators(bM5);
     IndiSet indM15 = computeIndicators(bM15);
-    IndiSet indH1  = computeIndicators(bH1);
+    IndiSet indM30 = computeIndicators(bM30);
 
     MarketStructure st = analyzeStructure(bM5);
     TradingSession  ses = detectSession();
 
     // SpreadRatio = spread courant / spread EWMA
-    double spreadRatio = (se > 1e-10) ? (se / se) : 1.0; // identité avant données
-    // Note : se est l'EWMA, pas le courant — utilise la barre M1 courante
-    // Ratio approximé via bbWidth M1 en proxy de volatilité intraday
-    if (se > 1e-10 && indM1.atr > 0.0)
-        spreadRatio = se / (se * 0.95 + 1e-10);  // toujours ~1 sans données news
+    // Un ratio > 2 indique un spike (news, manque de liquidité)
+    double curSpreadSnap;
+    { std::lock_guard lk(mu_); curSpreadSnap = curSpread_; }
+    double spreadRatio = (se > 1e-10 && curSpreadSnap > 0.0)
+                       ? curSpreadSnap / se
+                       : 1.0;
 
-    VisualDecision vd = computeDecision(indM1, indM5, indM15, indH1, st, ses, spreadRatio);
+    VisualDecision vd = computeDecision(indM1, indM5, indM15, indM30, st, ses, spreadRatio);
 
     // ── Couche DeepSeek LLM — enrichissement de la décision ──
     DeepSeekSignal ds = deepseek_.getLastSignal();

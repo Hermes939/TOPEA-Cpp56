@@ -70,6 +70,10 @@ void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
     if (spreadEwma_ <= 0.0) spreadEwma_ = tick.spread;
     else spreadEwma_ = 0.05 * tick.spread + 0.95 * spreadEwma_;
 
+    // Cache contexte panier (thread-safe : écrit avant pushTick/closeBars)
+    basketPnlCache_  = basketPnl;
+    openOrdersCache_ = openOrders;
+
     pushTick(tick);
     closeBars(tick);
     ++tickCount_;
@@ -388,17 +392,28 @@ MarketStructure MarketIntelligence::analyzeStructure(
 //    1. Session filter (liquidité)
 //    2. Spread filter (news/spike)
 //    3. Structure (trend / range / trap)
-//    4. Multi-TF confirmation (M5 + M30)
+//    4. Multi-TF confirmation M5 + M15 + M30 (3 TF requis)
 //    5. RSI + MACD cross-TF
 //    6. BB squeeze
-//    7. Décision finale avec score de confiance
+//    7. Décision trailing (Aggressive / Natural / Freeze)
+//    8. ── AUDIT RECOVERY MATHÉMATIQUE ──────────────────────────
+//       Score 0–100 sur 5 facteurs indépendants :
+//         F1 (+25) Spread normal (ratio ≤ 1.5)
+//         F2 (+20) Structure non-piège
+//         F3 (+25) Momentum suffisant (marché en mouvement)
+//         F4 (+15) M30 non compressé (BB non-squeeze)
+//         F5 (+15) RSI M5+M30 non extrême (pas en retournement)
+//       seuil : allowRecovery = (score ≥ 55)
+//       Surcharge basket : si openOrders ≥ 4 → seuil rehaussé à 70
 // ============================================================
 VisualDecision MarketIntelligence::computeDecision(
     const IndiSet& m1, const IndiSet& m5,
     const IndiSet& m15, const IndiSet& m30,
     MarketStructure structure,
     TradingSession  session,
-    double spreadRatio) const noexcept
+    double spreadRatio,
+    double basketPnl,
+    int    openOrders) const noexcept
 {
     VisualDecision vd;
     vd.structure = structure;
@@ -413,6 +428,9 @@ VisualDecision MarketIntelligence::computeDecision(
         vd.decision  = MarketDecision::NO_TRADE;
         vd.reasoning = "Session fermée — aucun trade";
         vd.confidence = 100.0;
+        vd.allowRecovery = false;
+        vd.recoveryScore = 0.0;
+        vd.recoveryReason = "Session fermée";
         return vd;
     }
     if (session == TradingSession::TOKYO) {
@@ -423,12 +441,15 @@ VisualDecision MarketIntelligence::computeDecision(
         conf += 20.0;
     }
 
-    // ── [2] Spread anormal — bloque tout ──────────────────────
+    // ── [2] Spread anormal — bloque tout + bloque recovery ────
     if (spreadRatio > 4.0) {
         vd.decision  = MarketDecision::STOP_ORDERS;
         vd.reasoning = "Spread x" + std::to_string((int)spreadRatio)
                      + " normal — news/spike détecté";
         vd.confidence = 95.0;
+        vd.allowRecovery = false;
+        vd.recoveryScore = 0.0;
+        vd.recoveryReason = "Spread critique x" + std::to_string((int)spreadRatio);
         return vd;
     }
     if (spreadRatio > 2.5) {
@@ -436,16 +457,23 @@ VisualDecision MarketIntelligence::computeDecision(
         vd.reasoning = "Spread élargi x" + std::to_string((int)spreadRatio)
                      + " — attente normalisation";
         vd.confidence = 80.0;
+        vd.allowRecovery = false;
+        vd.recoveryScore = 0.0;
+        vd.recoveryReason = "Spread élargi x" + std::to_string((int)spreadRatio);
         return vd;
     }
 
     // ── [3] Structure pièges → verrouillage ───────────────────
-    if (structure == MarketStructure::TRAP_BULL ||
-        structure == MarketStructure::TRAP_BEAR) {
+    bool isTrap = (structure == MarketStructure::TRAP_BULL ||
+                   structure == MarketStructure::TRAP_BEAR);
+    if (isTrap) {
         vd.decision  = MarketDecision::LOCK_WAIT;
         vd.reasoning = "Structure piège détectée ("
                      + structureName(structure) + ") — verrouillage";
         vd.confidence = 82.0;
+        vd.allowRecovery = false;
+        vd.recoveryScore = 5.0;
+        vd.recoveryReason = "Piège " + structureName(structure) + " — recovery bloqué";
         return vd;
     }
 
@@ -454,57 +482,132 @@ VisualDecision MarketIntelligence::computeDecision(
         vd.decision  = MarketDecision::LOCK_WAIT;
         vd.reasoning = "BB squeeze M5+M15 — marché compressé, attente cassure";
         vd.confidence = 75.0;
+        // Recovery possible seulement si M30 montre une direction
+        bool m30trend = !m30.bbNarrow() && (std::abs(m30.momentum) > 0.001);
+        vd.allowRecovery = m30trend;
+        vd.recoveryScore = m30trend ? 45.0 : 10.0;
+        vd.recoveryReason = m30trend
+            ? "BB squeeze M5/M15 mais M30 directionnel — recovery conditionnel"
+            : "BB squeeze total M5+M15+M30 — recovery bloqué";
         return vd;
     }
 
-    // ── [5] Trend fort → trail agressif ───────────────────────
+    // ── [5] Indicateurs multi-TF ───────────────────────────────
     bool bullishTrend = (structure == MarketStructure::BULLISH_TREND ||
                          structure == MarketStructure::BREAKOUT_UP);
     bool bearishTrend = (structure == MarketStructure::BEARISH_TREND ||
                          structure == MarketStructure::BREAKOUT_DOWN);
 
-    bool macdBull = m5.macdBullish() && m15.macdBullish();
-    bool macdBear = !m5.macdBullish() && !m15.macdBullish();
+    // MACD cross-TF — 3 timeframes doivent confirmer (vs 2 avant)
+    bool macdBull3TF = m5.macdBullish() && m15.macdBullish() && m30.macdBullish();
+    bool macdBear3TF = !m5.macdBullish() && !m15.macdBullish() && !m30.macdBullish();
 
-    bool momentumStrong = std::abs(m5.momentum) > 0.003;   // 0.3%
+    // RSI extremes sur 2 TF minimum
+    bool rsiExtreme = (m5.rsiOverbought() && (m15.rsiOverbought() || m30.rsiOverbought())) ||
+                      (m5.rsiOversold()   && (m15.rsiOversold()   || m30.rsiOversold()));
 
-    if ((bullishTrend || bearishTrend) && momentumStrong) {
-        if (macdBull || macdBear) {
-            reason += "[Trend " + structureName(structure)
-                   + " + MACD confirmé + momentum fort] ";
-            conf += 30.0;
-            vd.decision = MarketDecision::TRAIL_AGGRESSIVE;
-            vd.reasoning = reason;
-            vd.confidence = std::min(conf + 50.0, 100.0);
-            return vd;
-        }
-    }
-
-    // ── [6] Zone TP proche ou P&L positif élevé → gel ────────
-    bool rsiExtreme = (m5.rsiOverbought() && m15.rsiOverbought()) ||
-                      (m5.rsiOversold()   && m15.rsiOversold());
+    // ── [6] RSI extrême → gel des stops ───────────────────────
     if (rsiExtreme) {
-        reason += "[RSI extrême M5+M15 → zone retournement] ";
+        reason += "[RSI extrême M5+M15/M30 → zone retournement] ";
         conf += 20.0;
         vd.decision  = MarketDecision::TRAIL_FREEZE;
         vd.reasoning = reason + "Gel des stops — retournement imminent";
         vd.confidence = std::min(conf + 45.0, 100.0);
+        vd.allowRecovery = false;
+        vd.recoveryScore = 8.0;
+        vd.recoveryReason = "RSI extrême — retournement probable, recovery bloqué";
         return vd;
     }
 
-    // ── [7] Range large → trail naturel, continuer ────────────
+    // ── [7] Trend fort 3-TF → trail AGRESSIF ─────────────────
+    // Critères renforcés : structure + momentum M5 ET M30 + MACD 3 TF
+    // Bonus basket : si perte flottante élevée → abaisser le seuil momentum
+    //   (on veut locker les profits de recovery plus agressivement)
+    double momentumThresh = (basketPnl < -20.0 && openOrders >= 2) ? 0.0015 : 0.002;
+    bool momentumAggressive = std::abs(m5.momentum) > momentumThresh
+                           && std::abs(m30.momentum) > 0.001;
+
+    if ((bullishTrend || bearishTrend) && momentumAggressive) {
+        if (macdBull3TF || macdBear3TF) {
+            reason += "[Trend " + structureName(structure)
+                   + " confirmé M5+M15+M30 + momentum fort] ";
+            if (basketPnl < -10.0)
+                reason += "[basket en perte → trail agressif prioritaire] ";
+            conf += 35.0;
+            vd.decision   = MarketDecision::TRAIL_AGGRESSIVE;
+            vd.reasoning  = reason;
+            vd.confidence = std::min(conf + 50.0, 100.0);
+            // Recovery autorisé en trend fort si spread ok
+            vd.recoveryScore  = 80.0;
+            vd.allowRecovery  = true;
+            vd.recoveryReason = "Trend 3-TF confirmé — recovery autorisé";
+            return vd;
+        }
+    }
+
+    // ── [8] Range large → trail naturel ───────────────────────
     if (structure == MarketStructure::RANGE_WIDE) {
         vd.decision  = MarketDecision::TRAIL_NATURAL;
         vd.reasoning = "Range large — trail naturel, conditions propices au grid";
         vd.confidence = 60.0;
-        return vd;
+    } else {
+        // ── [9] Structure incertaine → observation ─────────────
+        vd.decision  = MarketDecision::OBSERVE;
+        vd.reasoning = "Structure incertaine (" + structureName(structure)
+                     + ") — observation en cours";
+        vd.confidence = 40.0;
     }
 
-    // ── [8] Observe → structure indéterminée ──────────────────
-    vd.decision  = MarketDecision::OBSERVE;
-    vd.reasoning = "Structure incertaine (" + structureName(structure)
-                 + ") — observation en cours";
-    vd.confidence = 40.0;
+    // ─────────────────────────────────────────────────────────
+    //  AUDIT RECOVERY MATHÉMATIQUE (commun à RANGE + OBSERVE)
+    //  Calcul du recoveryScore sur 5 facteurs indépendants
+    // ─────────────────────────────────────────────────────────
+    double rScore = 0.0;
+    std::string rReason;
+
+    // F1 (+25) Spread normal
+    if      (spreadRatio <= 1.2) { rScore += 25.0; rReason += "F1:✓spread "; }
+    else if (spreadRatio <= 1.8) { rScore += 12.0; rReason += "F1:~spread "; }
+    else                         {                  rReason += "F1:✗spread "; }
+
+    // F2 (+20) Structure non-piège
+    if (!isTrap) {
+        if (structure == MarketStructure::RANGE_WIDE ||
+            bullishTrend || bearishTrend) {
+            rScore += 20.0; rReason += "F2:✓struct ";
+        } else {
+            rScore += 10.0; rReason += "F2:~struct ";
+        }
+    } else {
+        rReason += "F2:✗piège ";
+    }
+
+    // F3 (+25) Momentum suffisant (marché en mouvement directionnnel)
+    double mom = std::max(std::abs(m5.momentum), std::abs(m30.momentum));
+    if      (mom > 0.003) { rScore += 25.0; rReason += "F3:✓mom++ "; }
+    else if (mom > 0.001) { rScore += 15.0; rReason += "F3:~mom   "; }
+    else                  {                  rReason += "F3:✗mom   "; }
+
+    // F4 (+15) M30 non compressé (BB width > 0.3%)
+    if (!m30.bbNarrow()) { rScore += 15.0; rReason += "F4:✓M30BB "; }
+    else                 {                  rReason += "F4:✗M30BB "; }
+
+    // F5 (+15) RSI M5+M30 non extrême
+    bool rsiOk = !m5.rsiOverbought() && !m5.rsiOversold() &&
+                 !m30.rsiOverbought() && !m30.rsiOversold();
+    if (rsiOk) { rScore += 15.0; rReason += "F5:✓RSI  "; }
+    else       {                  rReason += "F5:✗RSI  "; }
+
+    // Seuil adaptatif : si panier profondément chargé (≥4 ordres ouverts),
+    // rehausser le seuil pour éviter de sur-empiler les positions recovery
+    double threshold = (openOrders >= 4) ? 70.0 : 55.0;
+    if (openOrders >= 4) rReason += "[seuil↑70 — panier chargé] ";
+
+    vd.recoveryScore  = rScore;
+    vd.allowRecovery  = (rScore >= threshold);
+    vd.recoveryReason = rReason
+        + (vd.allowRecovery ? "→ RECOVERY OK" : "→ BLOQUÉ");
+
     return vd;
 }
 
@@ -547,7 +650,11 @@ VisualDecision MarketIntelligence::analyze() const {
                        ? curSpreadSnap / se
                        : 1.0;
 
-    VisualDecision vd = computeDecision(indM1, indM5, indM15, indM30, st, ses, spreadRatio);
+    double bPnl; int nOrd;
+    { std::lock_guard lk(mu_); bPnl = basketPnlCache_; nOrd = openOrdersCache_; }
+
+    VisualDecision vd = computeDecision(indM1, indM5, indM15, indM30,
+                                        st, ses, spreadRatio, bPnl, nOrd);
 
     // ── Couche DeepSeek LLM — enrichissement de la décision ──
     DeepSeekSignal ds = deepseek_.getLastSignal();
