@@ -118,6 +118,29 @@ public:
     [[nodiscard]] int callCount()  const noexcept { return callCount_.load();  }
     [[nodiscard]] int errorCount() const noexcept { return errorCount_.load(); }
 
+    // ─── Âge du dernier signal en secondes (0 = tout frais) ───
+    [[nodiscard]] long signalAgeSec() const noexcept {
+        std::lock_guard lk(signalMu_);
+        if (lastSignal_.signal == DSSignal::UNKNOWN) return -1;
+        return std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - lastSignal_.timestamp).count();
+    }
+
+    // ─── Âge du dernier APPEL API tenté (pas forcément réussi) ─
+    [[nodiscard]] long lastCallAgeSec() const noexcept {
+        std::lock_guard lk(callMu_);
+        return std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - lastCallTime_).count();
+    }
+
+    // ─── Reset complet — efface le signal en cache ─────────────
+    // Utilisé si le signal est trop vieux ou si les conditions
+    // ont changé radicalement (ex: changement de session)
+    void resetSignal() noexcept {
+        std::lock_guard lk(signalMu_);
+        lastSignal_ = DeepSeekSignal{};
+    }
+
     // TTL du cache en secondes — 45s max pour garantir fraîcheur en temps réel
     static constexpr int CACHE_TTL_SEC = 45;
 
@@ -158,7 +181,7 @@ private:
     DeepSeekSignal        lastSignal_;
 
     // Thread d'appel asynchrone
-    std::mutex            callMu_;
+    mutable std::mutex    callMu_;
     bool                  callInProgress_ = false;
     std::chrono::steady_clock::time_point lastCallTime_;
 

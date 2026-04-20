@@ -141,6 +141,18 @@ public:
         return deepseek_.hasApiKey();
     }
 
+    // ─── Stats DeepSeek pour le dashboard ─────────────────────
+    [[nodiscard]] long  dsSignalAgeSec()  const noexcept { return deepseek_.signalAgeSec();   }
+    [[nodiscard]] long  dsLastCallAge()   const noexcept { return deepseek_.lastCallAgeSec(); }
+    [[nodiscard]] int   dsCallCount()     const noexcept { return deepseek_.callCount();      }
+    [[nodiscard]] int   dsErrorCount()    const noexcept { return deepseek_.errorCount();     }
+
+    // ─── Reset forcé du signal (si périmé depuis trop longtemps) ─
+    void dsResetIfStale(long maxAgeSec = 300) noexcept {
+        if (deepseek_.signalAgeSec() > maxAgeSec)
+            deepseek_.resetSignal();
+    }
+
     // ─── Réchauffement synthétique (cold-start fix) ───────────
     // Pré-popule les déques de barres avec des bougies synthétiques
     // basées sur le prix courant et l'ATR estimé (gridGap × point).

@@ -316,6 +316,8 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
         bool inRecov = (state_.load() == EAState::Recovery);
         marketIntel_->update(tick, cfg_.point, bPnl, nMkt,
                              bsLots, ssLots, inRecov);
+        // Reset auto si signal DeepSeek inactif > 5min → force nouvel appel au tick suivant
+        marketIntel_->dsResetIfStale(300);
     }
     {
         VisualDecision vd = marketIntel_->analyze();
@@ -1894,26 +1896,42 @@ std::string TOP4EA_Engine::dashboard() const {
         oss << "║  iniMTA M30 ATR=" << vd.m30.atr
             << "  MACD=" << std::setprecision(4) << vd.m30.macdHist
             << (vd.m30.macdBullish()?" ↑":" ↓") << "\n";
-        // ── Couche DeepSeek LLM ───────────────────────────────
+        // ── Couche DeepSeek LLM — avec âge du signal et stats ──
         if (!marketIntel_->hasDeepSeekKey()) {
             oss << "║  DeepSeek  : [clé API manquante — LLM désactivé]\n";
         } else if (vd.m30.barCount < 5) {
-            // Rare : warmUp() non encore exécuté (premier tick pas encore reçu)
             int hNeeded = 5 - vd.m30.barCount;
             oss << "║  DeepSeek  : [démarrage — encore ~"
                 << (hNeeded * 30) << "min]\n";
         } else if (vd.dsSignal.signal != DSSignal::UNKNOWN) {
+            // ── Âge du signal : critique pour savoir s'il est frais ──
+            long sigAge  = marketIntel_->dsSignalAgeSec();
+            long callAge = marketIntel_->dsLastCallAge();
+            int  calls   = marketIntel_->dsCallCount();
+            int  errors  = marketIntel_->dsErrorCount();
+
+            // Indicateur visuel de fraîcheur : vert/orange/rouge selon âge
+            std::string freshMark;
+            if (!vd.dsSignal.fresh)        freshMark = " ⚠PÉRIMÉ";
+            else if (sigAge < 10)          freshMark = " ●LIVE";
+            else if (sigAge < 30)          freshMark = " ◐récent";
+
             oss << std::setprecision(0);
             oss << "║  DeepSeek  : " << vd.dsSignal.signalName()
                 << " [" << (int)vd.dsSignal.confidence << "%]"
                 << (vd.dsOverride ? " ★OVERRIDE" : "")
-                << (vd.dsSignal.fresh ? "" : " [stale]") << "\n";
+                << freshMark << "\n";
             if (!vd.dsSignal.reason.empty()) {
                 std::string ds_r = vd.dsSignal.reason.substr(0,50);
                 oss << "║   " << ds_r << "\n";
             }
+            // ── Ligne de diagnostic : âge signal, appels, erreurs ──
+            oss << "║   Signal:" << sigAge << "s | Appel:" << callAge << "s"
+                << " | OK=" << (calls - errors) << " ERR=" << errors << "\n";
         } else {
-            oss << "║  DeepSeek  : en attente réponse API...\n";
+            long callAge = marketIntel_->dsLastCallAge();
+            oss << "║  DeepSeek  : en attente réponse API..."
+                << " (dernier appel:" << callAge << "s)\n";
         }
         // ── Audit Recovery — directionnel ────────────────────
         oss << std::setprecision(0);
