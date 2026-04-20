@@ -124,18 +124,39 @@ void DeepSeekVision::requestAnalysis(const DSMarketContext& ctx) {
         std::string resp = httpPost(endpoint_, body.str(), 10000);
         DeepSeekSignal sig = parseResponse(resp);
 
-        // Mise à jour du cache sous verrou
+        // Mise à jour du cache et compteur de répétitions sous verrou
         {
             std::lock_guard lk(signalMu_);
-            sig.timestamp = std::chrono::steady_clock::now();
+            auto now = std::chrono::steady_clock::now();
+            sig.timestamp = now;
             sig.fresh     = (sig.signal != DSSignal::UNKNOWN);
-            lastSignal_   = sig;
+
+            // Détection de signal identique répété (même direction + confidence ±5%)
+            bool isIdentical = (sig.signal != DSSignal::UNKNOWN &&
+                                lastSignal_.signal == sig.signal &&
+                                lastSignal_.signal != DSSignal::UNKNOWN &&
+                                std::abs(lastSignal_.confidence - sig.confidence) <= 5.0);
+
+            if (isIdentical) {
+                ++consecutiveIdenticalCount_;
+                // firstIdenticalTimestamp_ reste inchangé (conserve le moment du 1er signal identique)
+            } else {
+                consecutiveIdenticalCount_ = 1;
+                firstIdenticalTimestamp_   = now;
+            }
+
+            lastSignal_ = sig;
         }
 
         if (sig.fresh) {
+            int cnt = 0;
+            { std::lock_guard lk(signalMu_); cnt = consecutiveIdenticalCount_; }
+            std::string repeatInfo = (cnt > 1) ? " [×" + std::to_string(cnt)
+                                                + (cnt >= DS_REPEAT_DECAY_START ? " ⚠]" : "]")
+                                               : "";
             std::cout << "[DeepSeekVision] Signal: " << sig.signalName()
                       << " conf=" << (int)sig.confidence
-                      << "% | " << sig.reason << "\n";
+                      << "%" << repeatInfo << " | " << sig.reason << "\n";
         }
 
         {
@@ -149,16 +170,49 @@ void DeepSeekVision::requestAnalysis(const DSMarketContext& ctx) {
 
 // ============================================================
 //  getLastSignal — accès thread-safe
+//  Applique le decay de répétitions et le hard-stale timeout.
 // ============================================================
 DeepSeekSignal DeepSeekVision::getLastSignal() const {
     std::lock_guard lk(signalMu_);
     DeepSeekSignal sig = lastSignal_;
 
-    // Vérifier fraîcheur (TTL 30s)
+    // Vérifier fraîcheur (TTL 45s)
     if (sig.signal != DSSignal::UNKNOWN) {
+        auto now = std::chrono::steady_clock::now();
         auto age = std::chrono::duration_cast<std::chrono::seconds>(
-                       std::chrono::steady_clock::now() - sig.timestamp).count();
+                       now - sig.timestamp).count();
         sig.fresh = (age < CACHE_TTL_SEC);
+
+        // ── Decay factor basé sur le nombre de répétitions ────
+        // Commence à 1.0, diminue linéairement après DS_REPEAT_DECAY_START
+        // jusqu'à DS_REPEAT_DECAY_FLOOR après DS_REPEAT_DECAY_N_MAX répétitions.
+        double decay = 1.0;
+        int cnt = consecutiveIdenticalCount_;
+        if (cnt > DS_REPEAT_DECAY_START) {
+            double progress = std::min(
+                (double)(cnt - DS_REPEAT_DECAY_START) /
+                (double)(DS_REPEAT_DECAY_N_MAX - DS_REPEAT_DECAY_START),
+                1.0);
+            decay = 1.0 - progress * (1.0 - DS_REPEAT_DECAY_FLOOR);
+        }
+        sig.effectiveConfidence = sig.confidence * decay;
+        sig.consecutiveCount    = cnt;
+
+        // ── Hard stale timeout — plafond absolu indépendant du TTL ──
+        // Si le même signal est répété depuis plus de dsStaleHardSec_,
+        // forcer fresh=false et effectiveConfidence=0 pour neutraliser l'impact.
+        if (dsStaleHardSec_ > 0 && cnt >= 1) {
+            auto firstAge = std::chrono::duration_cast<std::chrono::seconds>(
+                                now - firstIdenticalTimestamp_).count();
+            if (firstAge >= (long)dsStaleHardSec_) {
+                sig.fresh               = false;
+                sig.effectiveConfidence = 0.0;
+                // Garder sig.confidence et sig.signal pour affichage diagnostique
+            }
+        }
+    } else {
+        sig.effectiveConfidence = 0.0;
+        sig.consecutiveCount    = 0;
     }
     return sig;
 }

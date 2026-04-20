@@ -158,6 +158,9 @@ public:
             deepseek_.resetSignal();
     }
 
+    // ─── Timeout absolu anti-biais statique (depuis conf) ────
+    void dsSetStaleHardSec(int sec) noexcept { deepseek_.setStaleHardSec(sec); }
+
     // ─── Réchauffement synthétique (cold-start fix) ───────────
     // Pré-popule les déques de barres avec des bougies synthétiques
     // basées sur le prix courant et l'ATR estimé (gridGap × point).

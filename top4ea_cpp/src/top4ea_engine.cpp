@@ -30,6 +30,7 @@ TOP4EA_Engine::TOP4EA_Engine(Config cfg)
     recovery_    = std::make_unique<RecoveryEngine>(cfg_);
     intel_       = std::make_unique<IntelligenceEngine>(cfg_);
     marketIntel_ = std::make_unique<MarketIntelligence>();
+    marketIntel_->dsSetStaleHardSec(cfg_.dsStaleHardSec);
 
     // Callbacks bridge
     bridge_->onTick   ([this](const Tick& t)            { onTick(t);    });
@@ -213,6 +214,7 @@ void TOP4EA_Engine::rebuildSubsystems() {
     recovery_    = std::make_unique<RecoveryEngine>   (cfg_);
     intel_       = std::make_unique<IntelligenceEngine>(cfg_);
     marketIntel_ = std::make_unique<MarketIntelligence>();
+    marketIntel_->dsSetStaleHardSec(cfg_.dsStaleHardSec);
     vlMgr_       = ProfitLockManager(cfg_);
     log("[BrokerSpec] Sous-systèmes recréés avec config broker détectée");
 }
@@ -2314,16 +2316,41 @@ std::string TOP4EA_Engine::dashboard() const {
             long callAge = marketIntel_->dsLastCallAge();
             int  calls   = marketIntel_->dsCallCount();
             int  errors  = marketIntel_->dsErrorCount();
+            int  cnt     = vd.dsSignal.consecutiveCount;
+            int  rawConf = (int)vd.dsSignal.confidence;
+            int  effConf = (int)vd.dsSignal.effectiveConfidence;
 
             // Indicateur visuel de fraîcheur : vert/orange/rouge selon âge
+            // L'âge réel est toujours affiché en inline pour traçabilité [42s]
+            std::string ageMark = " [" + std::to_string(sigAge) + "s]";
             std::string freshMark;
             if (!vd.dsSignal.fresh)        freshMark = " ⚠PÉRIMÉ";
             else if (sigAge < 10)          freshMark = " ●LIVE";
             else if (sigAge < 30)          freshMark = " ◐récent";
 
+            // Indicateur de répétitions et decay
+            std::string repeatMark;
+            if (cnt > 1) {
+                repeatMark = " [×" + std::to_string(cnt);
+                if (!vd.dsSignal.fresh)
+                    repeatMark += " ⚠STALE]";
+                else if (cnt >= DeepSeekVision::DS_REPEAT_DECAY_START)
+                    repeatMark += " ⚠]";
+                else
+                    repeatMark += "]";
+            }
+
+            // Indicateur de confidence effective si différente de la brute
+            std::string effMark;
+            if (effConf < rawConf - 2)
+                effMark = " [eff:" + std::to_string(effConf) + "%]";
+
             oss << std::setprecision(0);
             oss << "║  DeepSeek  : " << vd.dsSignal.signalName()
-                << " [" << (int)vd.dsSignal.confidence << "%]"
+                << " [" << rawConf << "%]"
+                << effMark
+                << ageMark
+                << repeatMark
                 << (vd.dsOverride ? " ★OVERRIDE" : "")
                 << freshMark << "\n";
             if (!vd.dsSignal.reason.empty()) {

@@ -38,11 +38,13 @@ enum class DSSignal : uint8_t {
 };
 
 struct DeepSeekSignal {
-    DSSignal    signal      = DSSignal::UNKNOWN;
-    double      confidence  = 0.0;     // 0–100 (auto-rapporté par le LLM)
-    std::string reason      = {};      // explication courte
-    std::string rawResponse = {};      // réponse brute pour diagnostic
-    bool        fresh       = false;   // true si < cacheTtl secondes
+    DSSignal    signal              = DSSignal::UNKNOWN;
+    double      confidence          = 0.0;    // 0–100 (auto-rapporté par le LLM)
+    double      effectiveConfidence = 0.0;    // confidence × decay (utilisée pour les seuils)
+    int         consecutiveCount    = 0;      // nombre de signaux identiques consécutifs reçus
+    std::string reason              = {};     // explication courte
+    std::string rawResponse         = {};     // réponse brute pour diagnostic
+    bool        fresh               = false;  // true si < cacheTtl secondes ET pas hard-stale
     std::chrono::steady_clock::time_point timestamp;
 
     [[nodiscard]] std::string signalName() const noexcept {
@@ -150,6 +152,26 @@ public:
     // Délai de réveil forcé — si signal > FORCE_WAKE_SEC, bypass throttle
     static constexpr int FORCE_WAKE_SEC = 30;
 
+    // ─── Anti-biais statique : decay de répétitions ──────────
+    // Nombre de signaux identiques consécutifs avant que le decay commence
+    static constexpr int    DS_REPEAT_DECAY_START = 3;
+    // Nombre max de répétitions pour atteindre le plancher du decay
+    static constexpr int    DS_REPEAT_DECAY_N_MAX = 10;
+    // Plancher du decay (50% = signal répété 10× vaut moitié de sa confidence)
+    static constexpr double DS_REPEAT_DECAY_FLOOR = 0.5;
+
+    // ─── Timeout absolu de signal répétitif (configurable) ───
+    // Après dsStaleHardSec_ secondes du premier signal identique consécutif,
+    // fresh est forcé à false indépendamment du TTL de 45s.
+    void setStaleHardSec(int sec) noexcept { dsStaleHardSec_ = sec; }
+    [[nodiscard]] int staleHardSec() const noexcept { return dsStaleHardSec_; }
+
+    // ─── Compteur de répétitions courant ─────────────────────
+    [[nodiscard]] int consecutiveCount() const noexcept {
+        std::lock_guard lk(signalMu_);
+        return consecutiveIdenticalCount_;
+    }
+
     // ─── Réveil forcé — contourne le throttling si signal périmé ──────
     // Appelle requestAnalysis en ignorant lastCallTime_ si le signal
     // est absent ou plus vieux que FORCE_WAKE_SEC secondes.
@@ -179,6 +201,14 @@ private:
     // Cache signal courant
     mutable std::mutex    signalMu_;
     DeepSeekSignal        lastSignal_;
+
+    // ─── Anti-biais statique — compteur de répétitions ────────
+    // Protégés par signalMu_
+    int consecutiveIdenticalCount_ = 0;
+    std::chrono::steady_clock::time_point firstIdenticalTimestamp_;
+
+    // Timeout absolu configurable (secondes) — 0 = désactivé
+    int dsStaleHardSec_ = 300;
 
     // Thread d'appel asynchrone
     mutable std::mutex    callMu_;

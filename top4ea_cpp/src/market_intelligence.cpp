@@ -785,7 +785,7 @@ VisualDecision MarketIntelligence::analyze() const {
         // ── [A] Accord DS + local → boost confiance ────────────
         if ((localBullish && ds.signal == DSSignal::BUY_BIAS) ||
             (localBearish && ds.signal == DSSignal::SELL_BIAS)) {
-            double boost = ds.confidence * 0.15;
+            double boost = ds.effectiveConfidence * 0.15;
             vd.confidence = std::min(vd.confidence + boost, 100.0);
             vd.reasoning += " | DS:" + ds.signalName()
                           + "(" + std::to_string((int)ds.confidence) + "%)";
@@ -793,16 +793,16 @@ VisualDecision MarketIntelligence::analyze() const {
 
         // ── [B] DS oriente une décision neutre (TRAIL_NATURAL ou OBSERVE) ──
         // FIX PRINCIPAL : DS était ignoré dans les cas les plus fréquents.
-        // Si DS est confiant (≥60%), il prend la main et oriente activement.
+        // Si DS est confiant (≥60% effectif), il prend la main et oriente activement.
         bool neutralDecision = (vd.decision == MarketDecision::TRAIL_NATURAL ||
                                 vd.decision == MarketDecision::OBSERVE);
-        if (neutralDecision && ds.confidence >= 60.0) {
+        if (neutralDecision && ds.effectiveConfidence >= 60.0) {
             if (ds.signal == DSSignal::BUY_BIAS || ds.signal == DSSignal::SELL_BIAS) {
                 std::string dir = (ds.signal == DSSignal::BUY_BIAS) ? "BULL" : "BEAR";
                 vd.decision   = MarketDecision::TRAIL_AGGRESSIVE;
                 vd.reasoning  = "[DS-ORIENT " + dir + " "
                                + std::to_string((int)ds.confidence) + "%] " + ds.reason;
-                vd.confidence = ds.confidence;
+                vd.confidence = ds.effectiveConfidence;
                 vd.dsOverride = true;
                 // DS oriente → débloquer recovery dans sa direction
                 if (ds.signal == DSSignal::BUY_BIAS) {
@@ -818,19 +818,19 @@ VisualDecision MarketIntelligence::analyze() const {
         }
 
         // ── [C] LOCK DS fort → surcharge (seuil abaissé 85→70) ─
-        if (ds.signal == DSSignal::LOCK && ds.confidence >= 70.0) {
+        if (ds.signal == DSSignal::LOCK && ds.effectiveConfidence >= 70.0) {
             if (vd.decision != MarketDecision::NO_TRADE &&
                 vd.decision != MarketDecision::STOP_ORDERS) {
                 vd.decision   = MarketDecision::LOCK_WAIT;
                 vd.reasoning  = "[DS-LOCK " + std::to_string((int)ds.confidence)
                                + "%] " + ds.reason;
-                vd.confidence = ds.confidence;
+                vd.confidence = ds.effectiveConfidence;
                 vd.dsOverride = true;
             }
         }
 
         // ── [D] Désaccord majeur → gel préventif (seuil abaissé 90→70) ─
-        if (ds.confidence >= 70.0) {
+        if (ds.effectiveConfidence >= 70.0) {
             bool currentlyBull = (vd.decision == MarketDecision::TRAIL_AGGRESSIVE &&
                                   (st == MarketStructure::BULLISH_TREND ||
                                    st == MarketStructure::BREAKOUT_UP));
@@ -841,21 +841,21 @@ VisualDecision MarketIntelligence::analyze() const {
                 vd.decision   = MarketDecision::TRAIL_FREEZE;
                 vd.reasoning  = "[DS-DÉSACCORD " + std::to_string((int)ds.confidence)
                                + "%] " + ds.reason;
-                vd.confidence = (vd.confidence + ds.confidence) * 0.5;
+                vd.confidence = (vd.confidence + ds.effectiveConfidence) * 0.5;
                 vd.dsOverride = true;
             } else if (currentlyBear && ds.signal == DSSignal::BUY_BIAS) {
                 vd.decision   = MarketDecision::TRAIL_FREEZE;
                 vd.reasoning  = "[DS-DÉSACCORD " + std::to_string((int)ds.confidence)
                                + "%] " + ds.reason;
-                vd.confidence = (vd.confidence + ds.confidence) * 0.5;
+                vd.confidence = (vd.confidence + ds.effectiveConfidence) * 0.5;
                 vd.dsOverride = true;
             }
         }
 
         // ── [E] Biais DS sur les facteurs de trail ──────────────
-        // Proportionnel à la confiance (entre 60% et 100%) : max ±20%
-        if (ds.confidence >= 60.0) {
-            double intensity  = std::min((ds.confidence - 60.0) / 40.0, 1.0); // 0..1
+        // Proportionnel à la confidence effective (entre 60% et 100%) : max ±20%
+        if (ds.effectiveConfidence >= 60.0) {
+            double intensity  = std::min((ds.effectiveConfidence - 60.0) / 40.0, 1.0); // 0..1
             double biasFactor = 1.0 + intensity * 0.20;  // 1.0 → 1.20
             if (ds.signal == DSSignal::SELL_BIAS) {
                 // Marché baissier → SS (Sell Stop) plus serré, BS plus large
@@ -883,21 +883,21 @@ VisualDecision MarketIntelligence::analyze() const {
         DeepSeekSignal ds2 = deepseek_.getLastSignal();
         double netDelta = bsLotsCached - ssLotsCached;
 
-        // DS contrebalance la structure quand sa confiance est forte (≥70%)
+        // DS contrebalance la structure quand sa confiance effective est forte (≥70%)
         // → La structure seule ne suffit plus à bloquer dans la direction DS
         bool dsCounterBearStruct = (ds2.fresh && ds2.signal == DSSignal::BUY_BIAS
-                                    && ds2.confidence >= 70.0);
+                                    && ds2.effectiveConfidence >= 70.0);
         bool dsCounterBullStruct = (ds2.fresh && ds2.signal == DSSignal::SELL_BIAS
-                                    && ds2.confidence >= 70.0);
+                                    && ds2.effectiveConfidence >= 70.0);
 
         // ── Critères qui bloquent BS recovery (BUY Stop) ─────
         // BS = position haussière → bloquer si marché baissier
-        // Si DS dit BUY_BIAS ≥ 70%, la structure BEARISH ne bloque plus BS
+        // Si DS dit BUY_BIAS ≥ 70% effectif, la structure BEARISH ne bloque plus BS
         bool bsBearStruct    = (st == MarketStructure::BEARISH_TREND)
                                && !dsCounterBearStruct;
         bool bsRsiOverbought = (indM5.rsi >= 75.0 && indM30.rsi >= 65.0);
         bool bsDsConfirm     = (ds2.fresh && ds2.signal == DSSignal::SELL_BIAS
-                                && ds2.confidence >= 55.0);
+                                && ds2.effectiveConfidence >= 55.0);
         bool bsOverexposed   = (netDelta > 0.10);
 
         // En mode normal (hors recovery), critère 1 suffit (prudence maximale)
@@ -930,12 +930,12 @@ VisualDecision MarketIntelligence::analyze() const {
 
         // ── Critères qui bloquent SS recovery (SELL Stop) ────
         // SS = position baissière → bloquer si marché haussier
-        // Si DS dit SELL_BIAS ≥ 70%, la structure BULLISH ne bloque plus SS
+        // Si DS dit SELL_BIAS ≥ 70% effectif, la structure BULLISH ne bloque plus SS
         bool ssBullStruct   = (st == MarketStructure::BULLISH_TREND)
                               && !dsCounterBullStruct;
         bool ssRsiOversold  = (indM5.rsi <= 25.0 && indM30.rsi <= 35.0);
         bool ssDsConfirm    = (ds2.fresh && ds2.signal == DSSignal::BUY_BIAS
-                               && ds2.confidence >= 55.0);
+                               && ds2.effectiveConfidence >= 55.0);
         bool ssOverexposed  = (netDelta < -0.10);
 
         int ssThreshold = inRecoveryCached ? 2 : 1;

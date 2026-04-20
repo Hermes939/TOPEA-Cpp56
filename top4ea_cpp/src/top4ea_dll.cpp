@@ -117,6 +117,7 @@ static top4ea::Config loadConfig(const char* path) {
             else if (key=="tick_poll_ms")     cfg.tickPollMs        = std::stoi(val);
             else if (key=="state_poll_ms")    cfg.statePollMs       = std::stoi(val);
             else if (key=="reconnect_ms")     cfg.reconnectMs       = std::stoi(val);
+            else if (key=="ds_stale_hard_sec") cfg.dsStaleHardSec   = std::stoi(val);
         } catch (...) {}
     }
     // digits=0 → auto-détection broker au démarrage

@@ -277,6 +277,12 @@ struct Config {
     int         tickPollMs      = 200;   // fréquence polling tick (ms)
     int         statePollMs     = 2000;  // fréquence polling compte+ordres (ms)
     int         reconnectMs     = 1000;  // délai de reconnexion (ms)
+
+    // ─── DeepSeek anti-biais statique ────────────────────────
+    // Durée absolue (secondes) après laquelle un signal identique répétitif
+    // est considéré périmé, indépendamment du TTL de 45s.
+    // 0 = désactivé. Défaut : 300s (5 min).
+    int         dsStaleHardSec  = 300;
 };
 
 // ─── Résultat d'une opération de trading ────────────────────
