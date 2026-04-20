@@ -1303,25 +1303,58 @@ void TOP4EA_Engine::closeBasketAtomic() {
 }
 
 void TOP4EA_Engine::closeOneSide(int sideType) {
-    // sideType 0=fermer BUY (MaxRecovery SELL atteint), 1=fermer SELL
+    // ── maxRecovery atteint → RESET COMPLET DU CYCLE ───────────────
+    // Ancienne logique : fermer un seul côté → l'autre compteur reste à max
+    // → boucle infinie (CloseOneSide appelé en boucle à chaque nouveau tick).
+    //
+    // Nouvelle logique :
+    //   1. Annuler TOUS les stops pendants (SS + BS)
+    //   2. Fermer TOUTES les positions marché (BUY + SELL) à prix marché
+    //   3. Réinitialiser les DEUX compteurs recovery + VL
+    //   4. Replacer l'ancre grid sur le prix courant
+    //   5. Remettre l'état à Init → nouveau cycle propre
+    //
+    // Ce comportement est identique à basketClosedCallback (sortie TP atteint)
+    // mais déclenché par épuisement de la Martingale plutôt que par le profit.
+
+    std::string side = (sideType == 0) ? "SELL" : "BUY";
+    log("=== MAX RECOVERY — côté " + side + " épuisé — RESET CYCLE COMPLET ===");
+
+    // ── [1] Annuler les ordres stops pendants ─────────────────────
     int ss = ssTicket_.load();
     int bs = bsTicket_.load();
     if (ss > 0) { bridge_->sendCommand(makeDelete(ss)); ssTicket_.store(-1); }
     if (bs > 0) { bridge_->sendCommand(makeDelete(bs)); bsTicket_.store(-1); }
+    ssLevel_ = 0.0; bsLevel_ = 0.0;
 
+    // ── [2] Fermer TOUTES les positions (BUY + SELL) ──────────────
     auto orders = fetchOrders();
-    OrderType toClose = (sideType == 0) ? OrderType::Buy : OrderType::Sell;
+    Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
+    int closed = 0;
     for (const auto& o : orders) {
-        if (o.type == toClose) {
-            Tick t;
-            { std::lock_guard lk(tickMu_); t = lastTick_; }
-            double price = (toClose == OrderType::Buy) ? t.bid : t.ask;
-            bridge_->sendCommand(makeClose(o, price));
+        if (o.type == OrderType::Buy || o.type == OrderType::Sell) {
+            double price = (o.type == OrderType::Buy) ? t.bid : t.ask;
+            auto r = bridge_->sendCommand(makeClose(o, price));
+            if (r.success) ++closed;
         }
     }
-    if (sideType == 0) { recovery_->resetBuy();  vlMgr_.resetSS(); }
-    else               { recovery_->resetSell(); vlMgr_.resetBS(); }
-    log("Côté " + std::string(sideType==0?"BUY":"SELL") + " fermé (MaxRecovery)");
+    log("[MaxRecovery] " + std::to_string(closed) + " position(s) fermée(s) @ marché");
+
+    // ── [3] Reset TOTAL des deux compteurs ───────────────────────
+    recovery_->reset();       // resetBuy() + resetSell() + CascadeGuard
+    vlMgr_.reset();           // niveaux VL
+    basketMon_->reset();      // surveillance panier
+    waveState_.store(0);
+    cycleRealizedPnL_ = 0.0;
+
+    // ── [4] Vider le cache d'ordres (évite fausse relance) ────────
+    { std::lock_guard lk(ordersMu_); orders_.clear(); }
+
+    // ── [5] Nouvelle ancre grid + état Init ───────────────────────
+    gridOrigin_ = (t.bid + t.ask) * 0.5;
+    state_.store(EAState::Init);
+    log("=== Nouveau cycle — origin=" + std::to_string(gridOrigin_)
+        + " | SS=0/5 BS=0/5 | prêt pour nouvelle grille ===");
 }
 
 // ────────────────────────────────────────────────────────────
