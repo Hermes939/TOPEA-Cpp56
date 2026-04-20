@@ -1653,11 +1653,23 @@ void TOP4EA_Engine::updateProfitLockOrders(const std::vector<OrderInfo>& orders,
     // ── Fix #3 : Intégration Dual Trail AGGRESSIVE ───────────
     // Quand le verrou AGGRESSIVE est actif, on override le niveau V-BS
     // du ProfitLockManager avec vLockPrice_ — le profit minimum garanti.
-    // Cela assure que l'ordre V-BS broker reflète le niveau de verrou réel
-    // et non la valeur trailing calculée par vlMgr_ (qui pourrait être plus haute).
+    // Guard : n'override QUE s'il y a des positions Sell réelles (totalLots > 0)
+    // pour éviter un V-BS fantôme avec baseLot lors d'une intervention manuelle.
     if (cfg_.trailModeAuto && vLockActive_ && vLockPrice_ > 0.0) {
-        vlMgr_.overrideBSForLock(vLockPrice_);
-        changed = true;  // forcer le traitement même si vlMgr_ n'a pas changé
+        double sellLots = 0.0;
+        for (const auto& o : orders)
+            if (o.type == OrderType::Sell) sellLots += o.lots;
+        if (sellLots > 1e-6) {
+            vlMgr_.overrideBSForLock(vLockPrice_);
+            changed = true;  // forcer le traitement même si vlMgr_ n'a pas changé
+        } else {
+            // Plus de positions Sell réelles — désactiver le verrou pour cohérence
+            log("[DUAL-TRAIL] Verrou AGGRESSIVE désactivé : plus de positions Sell actives");
+            vLockActive_       = false;
+            vLockPrice_        = 0.0;
+            aggressiveBsTarget_ = 0.0;
+            dualTrailMode_     = TrailMode::NATURAL;
+        }
     }
 
     if (!changed) return;
