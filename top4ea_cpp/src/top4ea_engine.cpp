@@ -1883,6 +1883,18 @@ void TOP4EA_Engine::emergencyCloseAll(double currentPnL) {
     basketMon_->reset();
     waveState_.store(0);
     cycleRealizedPnL_ = 0.0;
+    // ── Dual Trail : réinitialiser l'état AGGRESSIVE (côté SELL) ──
+    dualTrailMode_      = TrailMode::NATURAL;
+    aggressiveBsTarget_ = 0.0;
+    vLockActive_        = false;
+    vLockPrice_         = 0.0;
+    ssProfitPipsCache_  = 0.0;
+    // ── Dual Trail : réinitialiser l'état AGGRESSIVE (côté BUY, miroir) ──
+    dualTrailModeBuy_   = TrailMode::NATURAL;
+    aggressiveSsTarget_ = 0.0;
+    ssLockActive_       = false;
+    ssLockPrice_        = 0.0;
+    bsProfitPipsCache_  = 0.0;
     { std::lock_guard lk(ordersMu_); orders_.clear(); }
     gridOrigin_ = (t.bid + t.ask) * 0.5;
     state_.store(EAState::Init);
