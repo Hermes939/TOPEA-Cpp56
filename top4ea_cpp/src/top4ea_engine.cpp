@@ -1746,6 +1746,17 @@ void TOP4EA_Engine::closeBasketAtomic() {
     totalPairs_.fetch_add(res.pairsClosedBy);
     totalSingles_.fetch_add(res.singlesClosedOk);
 
+    // ── Snapshot métriques Dual Trail AVANT le reset ───────────
+    //   Les variables sont encore valides ici (reset plus bas)
+    int    cycleTrailModeSell   = static_cast<int>(dualTrailMode_);
+    int    cycleVLockTriggered  = vLockActive_ ? 1 : 0;
+    double cycleVLockPrice      = vLockPrice_;
+    double cycleSsProfitAtLock  = ssProfitPipsCache_;
+    int    cycleTrailModeBuy    = static_cast<int>(dualTrailModeBuy_);
+    int    cycleSsLockTriggered = ssLockActive_ ? 1 : 0;
+    double cycleSsLockPrice     = ssLockPrice_;
+    double cycleBsProfitAtLock  = bsProfitPipsCache_;
+
     // ── Auto-apprentissage : enregistrement cycle fermé ────────
     //   Toujours après le close (P&L réel), avant le reset
     if (intel_) {
@@ -1756,7 +1767,15 @@ void TOP4EA_Engine::closeBasketAtomic() {
             cycleGapPoints,
             cycleGapOptimal,
             cycleRecovDepth,
-            cycleLotUsed
+            cycleLotUsed,
+            cycleTrailModeSell,
+            cycleVLockTriggered,
+            cycleVLockPrice,
+            cycleSsProfitAtLock,
+            cycleTrailModeBuy,
+            cycleSsLockTriggered,
+            cycleSsLockPrice,
+            cycleBsProfitAtLock
         );
         // Appliquer calibration à la config locale
         intel_->applyCalibration(cfg_);

@@ -137,7 +137,17 @@ public:
         double atrMultUsed,
         double kellyFracUsed,
         double gapExpUsed,
-        double trailAsymUsed
+        double trailAsymUsed,
+        // Métriques Dual Trail (SELL-side BS AGGRESSIVE)
+        int    trailModeUsed,      // 0=NATURAL, 1=AGGRESSIVE
+        int    vLockTriggered,     // 1 si verrou BS actif au close du cycle
+        double vLockPrice,         // niveau verrou BS (0.0 si inactif)
+        double ssProfitAtLockPts,  // profit Sell flottant en pts au moment du lock
+        // Métriques Dual Trail (BUY-side SS AGGRESSIVE miroir)
+        int    trailModeBuyUsed,   // 0=NATURAL, 1=AGGRESSIVE
+        int    ssLockTriggered,    // 1 si verrou SS BUY actif au close du cycle
+        double ssLockPrice,        // niveau verrou SS BUY (0.0 si inactif)
+        double bsProfitAtLockPts   // profit Buy flottant en pts au moment du lock
     ) const noexcept;
 
     // ─── Application à la config ──────────────────────────────

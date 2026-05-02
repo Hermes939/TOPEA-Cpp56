@@ -150,7 +150,17 @@ public:
         double gapUsedPoints,
         double gapOptimalPoints,
         int    recovDepth,
-        double lotUsed
+        double lotUsed,
+        // Métriques Dual Trail SELL-side (BS AGGRESSIVE)
+        int    trailModeUsed     = 0,   // 0=NATURAL, 1=AGGRESSIVE
+        int    vLockTriggered    = 0,   // 1 si verrou BS actif au close du cycle
+        double vLockPrice        = 0.0, // niveau verrou BS (0.0 si inactif)
+        double ssProfitAtLockPts = 0.0, // profit Sell flottant en pts au lock
+        // Métriques Dual Trail BUY-side (SS AGGRESSIVE miroir)
+        int    trailModeBuyUsed  = 0,   // 0=NATURAL, 1=AGGRESSIVE
+        int    ssLockTriggered   = 0,   // 1 si verrou SS BUY actif au close du cycle
+        double ssLockPrice       = 0.0, // niveau verrou SS BUY (0.0 si inactif)
+        double bsProfitAtLockPts = 0.0  // profit Buy flottant en pts au lock
     ) noexcept;
 
     // ─── Application des paramètres calibrés à la config ─────

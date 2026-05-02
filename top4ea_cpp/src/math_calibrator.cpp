@@ -271,8 +271,13 @@ void MathCalibrator::exportCycleToAutoML(
     double lotUsed, double pnlResult, double drawdownPct,
     double ofiScore, double imbalanceScore,
     double atrMultUsed, double kellyFracUsed,
-    double gapExpUsed, double trailAsymUsed
+    double gapExpUsed, double trailAsymUsed,
+    int trailModeUsed, int vLockTriggered, double vLockPrice, double ssProfitAtLockPts,
+    int trailModeBuyUsed, int ssLockTriggered, double ssLockPrice, double bsProfitAtLockPts
 ) const noexcept {
+    // Créer le répertoire data/ si absent
+    std::filesystem::create_directories(std::filesystem::path(exportCsvPath_).parent_path());
+
     // Header si fichier absent
     bool writeHeader = !std::filesystem::exists(exportCsvPath_);
     std::ofstream f(exportCsvPath_, std::ios::app);
@@ -283,6 +288,8 @@ void MathCalibrator::exportCycleToAutoML(
           << "recov_depth,lot_used,pnl_result,drawdown_pct,"
           << "ofi_score,imbalance_score,"
           << "atr_mult_used,kelly_frac_used,gap_exp_used,trail_asym_used,"
+          << "trail_mode_used,v_lock_triggered,v_lock_price,ss_profit_at_lock_pts,"
+          << "trail_mode_buy_used,ss_lock_triggered,ss_lock_price,bs_profit_at_lock_pts,"
           << "label_good\n";
     }
 
@@ -299,6 +306,12 @@ void MathCalibrator::exportCycleToAutoML(
       << ofiScore << "," << imbalanceScore << ","
       << atrMultUsed << "," << kellyFracUsed << ","
       << gapExpUsed << "," << trailAsymUsed << ","
+      << trailModeUsed << "," << vLockTriggered << ","
+      << std::setprecision(5) << vLockPrice << ","
+      << std::setprecision(1) << ssProfitAtLockPts << ","
+      << trailModeBuyUsed << "," << ssLockTriggered << ","
+      << std::setprecision(5) << ssLockPrice << ","
+      << std::setprecision(1) << bsProfitAtLockPts << ","
       << label << "\n";
 }
 

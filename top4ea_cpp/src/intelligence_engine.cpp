@@ -539,7 +539,15 @@ void IntelligenceEngine::recordCycleClosed(
     double gapUsedPoints,
     double gapOptimalPoints,
     int    recovDepth,
-    double lotUsed
+    double lotUsed,
+    int    trailModeUsed,
+    int    vLockTriggered,
+    double vLockPrice,
+    double ssProfitAtLockPts,
+    int    trailModeBuyUsed,
+    int    ssLockTriggered,
+    double ssLockPrice,
+    double bsProfitAtLockPts
 ) noexcept {
     // [1] Enregistrer dans le RollingKelly (déjà existant dans RecoveryEngine)
     // → fait dans TOP4EA_Engine::closeBasketAtomic()
@@ -586,7 +594,16 @@ void IntelligenceEngine::recordCycleClosed(
         cfg_.atrMultiplier,
         cfg_.kellyMaxFraction,
         cfg_.gapExpansionFactor,
-        cfg_.trailAsymmetryFactor
+        cfg_.trailAsymmetryFactor,
+        // Métriques Dual Trail
+        trailModeUsed,
+        vLockTriggered,
+        vLockPrice,
+        ssProfitAtLockPts,
+        trailModeBuyUsed,
+        ssLockTriggered,
+        ssLockPrice,
+        bsProfitAtLockPts
     );
 
     // [4] Calibration périodique (tous les CALIB_EVERY cycles)
