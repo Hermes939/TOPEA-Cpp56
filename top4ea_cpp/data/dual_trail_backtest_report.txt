@@ -1,0 +1,51 @@
+======================================================================
+  TOP4EA — Dual Trail Backtest Report
+  Source : data/automl_training.csv
+  Date   : 2026-05-02
+======================================================================
+
+DONNEES SOURCE
+  Rows CSV total         : 116
+  Cycles groupes (>600s) : 21
+  NOTE: La tache ref. mentionne '76 cycles' (version anterieure du CSV).
+        Source de verite = fichier courant: 116 rows / 21 cycles.
+
+RESULTATS PAR CYCLE
+  Cycles gagnants (PnL>0) : 11  (win rate 52.4%)
+  Cycles perdants         : 10
+  PnL winners moyen/med   : 248.67$ / 57.12$
+  PnL winners min/max     : 5.22$ / 1129.91$
+  PnL losers moyen        : -88.30$
+  Recovery moyen winners  : 6.6
+
+BASELINE (trail_mode_auto=false)
+  P&L total historique    : 1852.35$
+
+PARAMETRES CALIBRES
+  Parametre                       Avant        Apres  Note
+  ----------------------------------------------------------------------
+  trail_mode_auto                 false         true  Activation production
+  x_lock_pips                   500 pts     2400 pts  = 1 GridGap, signal tendance solide
+  bs_overshoot_pips             500 pts      600 pts  = 25% GridGap, profit min robuste
+  aggressive_step_pts        200 pts/tk   100 pts/tk  Glissement ~30 ticks, -BS premature
+  natural_bs_dist_pts           600 pts     1200 pts  Asymetrie BS(1200) > SS(600)
+  natural_ss_dist_pts           600 pts      600 pts  Inchange, coherent trail_fixed_dist
+
+SIMULATION DUAL TRAIL
+  Cycles eligibles AGGRESSIVE (recov>=1, pnl>=10$) : 9/21
+  Gain estime conservateur (+15% capture sur eligibles) : +407.34$
+  P&L simule total  : 2259.69$
+  Amelioration      : +22.0% vs baseline
+
+RISQUES & MITIGATION
+  1. BS AGGRESSIVE premature : x_lock=2400 impose 1 gap entier confirme
+  2. Glissement trop rapide  : aggressive_step=100 vs 200 (~30 ticks)
+  3. Cycles perdants (10)    : Dual Trail n'intervient pas (profit SS insuffisant)
+
+ROLLBACK OPS
+  Action immmediate  : top4ea.conf -> trail_mode_auto = false
+  Pas de redeploiement requis -- moteur relit conf au demarrage
+  Critere d'alerte   : >2 logs [DUAL TRAIL] NATURAL->AGGRESSIVE en <10min
+                       sans fermeture profitable correspondante
+  Seuils rollback    : x_lock=500, bs_overshoot=500, aggressive_step=200
+======================================================================

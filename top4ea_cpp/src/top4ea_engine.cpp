@@ -1341,7 +1341,31 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
                               ? (ssAvgEntry - curAsk) / cfg_.point
                               : 0.0;
         ssProfitPipsCache_ = ssProfitPips;
+        TrailMode prevMode = dualTrailMode_;
         dualTrailMode_     = grid_->getTrailMode(ssProfitPips);
+
+        // ── Log transition de mode NATURAL ↔ AGGRESSIVE ─────────────
+        if (dualTrailMode_ != prevMode) {
+            if (dualTrailMode_ == TrailMode::AGGRESSIVE) {
+                double lockTarget = ssAvgEntry - (double)cfg_.bsOvershootPips * cfg_.point;
+                log("[DUAL TRAIL] NATURAL → AGGRESSIVE"
+                    " | SS profit=" + std::to_string((int)ssProfitPips)
+                    + "pts (seuil=" + std::to_string(cfg_.xLockPips)
+                    + "pts) | ss_entry=" + std::to_string(ssAvgEntry)
+                    + " lots=" + std::to_string(ssLots)
+                    + " ask=" + std::to_string(curAsk)
+                    + " | verrou_cible=" + std::to_string(lockTarget)
+                    + " profit_garanti=" + std::to_string(cfg_.bsOvershootPips) + "pts");
+            } else if (dualTrailMode_ == TrailMode::NATURAL) {
+                std::string lockInfo = vLockActive_
+                    ? " | verrou STICKY maintenu @ " + std::to_string(vLockPrice_)
+                    : " | aucun verrou";
+                log("[DUAL TRAIL] AGGRESSIVE → NATURAL"
+                    " | SS profit=" + std::to_string((int)ssProfitPips)
+                    + "pts < seuil " + std::to_string(cfg_.xLockPips)
+                    + "pts" + lockInfo);
+            }
+        }
 
         if (dualTrailMode_ == TrailMode::AGGRESSIVE && ssLots > 1e-6) {
             // ── Mode AGGRESSIVE : glisser BS progressivement vers le verrou ──
