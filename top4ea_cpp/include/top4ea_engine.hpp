@@ -227,17 +227,29 @@ private:
     // 0 = aucune vague fermée | 1 = Wave1 faite (50%) | 2 = Wave2 faite (+30%)
     std::atomic<int>  waveState_     { 0 };
 
-    // ─── Dual Trail NATURAL / AGGRESSIVE ─────────────────────
+    // ─── Dual Trail NATURAL / AGGRESSIVE (côté SELL — BS glisse DOWN) ──────
     // Mode courant basé sur le profit flottant SS (calculé à chaque tick)
     TrailMode  dualTrailMode_       = TrailMode::NATURAL;
-    // Cible progressive du BS en mode AGGRESSIVE (glisse par steps)
+    // Cible progressive du BS en mode AGGRESSIVE (glisse par steps vers le bas)
     double     aggressiveBsTarget_  = 0.0;
-    // Verrou activé : BS a atteint ss_entry + bsOvershootPips
+    // Verrou activé : BS a atteint ss_entry - bsOvershootPips
     bool       vLockActive_         = false;
-    // Prix du verrou (= ss_entry + bsOvershootPips * point)
+    // Prix du verrou (= ss_entry - bsOvershootPips * point)
     double     vLockPrice_          = 0.0;
-    // Dernier profit SS en points (mis à jour dans ensureBuyStop, pour dashboard)
+    // Dernier profit SS (Sell) en points (mis à jour dans ensureBuyStop, pour dashboard)
     double     ssProfitPipsCache_   = 0.0;
+
+    // ─── Dual Trail NATURAL / AGGRESSIVE (côté BUY — SS glisse UP, miroir) ─
+    // Mode courant basé sur le profit flottant BS (positions BUY, calculé chaque tick)
+    TrailMode  dualTrailModeBuy_    = TrailMode::NATURAL;
+    // Cible progressive du SS en mode AGGRESSIVE BUY (glisse vers le haut)
+    double     aggressiveSsTarget_  = 0.0;
+    // Verrou activé : SS a atteint bs_entry + ssOvershootPips (profit BUY garanti)
+    bool       ssLockActive_        = false;
+    // Prix du verrou SS (= bs_entry + ssOvershootPips * point)
+    double     ssLockPrice_         = 0.0;
+    // Dernier profit BS (Buy) en points (mis à jour dans ensureSellStop, pour dashboard)
+    double     bsProfitPipsCache_   = 0.0;
 
     // ─── Profit réalisé dans le cycle en cours ───────────────
     // Quand V-SS ou V-BS verrouille et ferme un côté en cours de cycle,

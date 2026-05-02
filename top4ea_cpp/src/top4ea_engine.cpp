@@ -173,11 +173,15 @@ void TOP4EA_Engine::applySymbolSpec(const SymbolSpec& spec) {
         // Rescale aussi trail_fixed_dist_pts et cascade_dispatch_pips
         cfg_.trailFixedDistPts = (int)std::round((double)cfg_.trailFixedDistPts * scale);
         // Rescale dual trail pts (cohérence avec gridGap après changement de digits)
-        cfg_.xLockPips         = (int)std::round((double)cfg_.xLockPips         * scale);
-        cfg_.bsOvershootPips   = (int)std::round((double)cfg_.bsOvershootPips   * scale);
-        cfg_.aggressiveStepPts = (int)std::round((double)cfg_.aggressiveStepPts * scale);
-        cfg_.naturalBsDistPts  = (int)std::round((double)cfg_.naturalBsDistPts  * scale);
-        cfg_.naturalSsDistPts  = (int)std::round((double)cfg_.naturalSsDistPts  * scale);
+        cfg_.xLockPips           = (int)std::round((double)cfg_.xLockPips           * scale);
+        cfg_.bsOvershootPips     = (int)std::round((double)cfg_.bsOvershootPips     * scale);
+        cfg_.aggressiveStepPts   = (int)std::round((double)cfg_.aggressiveStepPts   * scale);
+        cfg_.naturalBsDistPts    = (int)std::round((double)cfg_.naturalBsDistPts    * scale);
+        cfg_.naturalSsDistPts    = (int)std::round((double)cfg_.naturalSsDistPts    * scale);
+        // Rescale Dual Trail BUY pts (miroir côté SS AGGRESSIVE)
+        cfg_.xLockPipsBuy        = (int)std::round((double)cfg_.xLockPipsBuy        * scale);
+        cfg_.ssOvershootPips     = (int)std::round((double)cfg_.ssOvershootPips     * scale);
+        cfg_.aggressiveSsStepPts = (int)std::round((double)cfg_.aggressiveSsStepPts * scale);
         log("[BrokerSpec] Rescale grille ×" + std::to_string(scale)
             + " (digits " + std::to_string(oldDigits)
             + "→" + std::to_string(spec.digits)
@@ -687,6 +691,19 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
                 + " → fermeture côté BUY (profit verrouillé)");
             vlMgr_.resetSS();
             triggerFired_.store(true);
+            // ── Dual Trail Fix BUY : reset sur déclenchement V-SS ────────
+            // La fermeture V-SS peut être déclenchée via le verrou AGGRESSIVE BUY
+            // (overrideSSForLock). On doit réinitialiser l'état dual trail BUY ici
+            // car le return suivant court-circuite le bloc géométrique SS.
+            if (cfg_.trailModeAuto && ssLockActive_) {
+                log("[DUAL-TRAIL] V-SS déclenché en mode VERROU BUY — réinitialisation cycle → NATURAL"
+                    " ssLockPrice=" + std::to_string(ssLockPrice_));
+                dualTrailModeBuy_   = TrailMode::NATURAL;
+                aggressiveSsTarget_ = 0.0;
+                ssLockActive_       = false;
+                ssLockPrice_        = 0.0;
+                bsProfitPipsCache_  = 0.0;
+            }
             closeSideAtVL(0);   // ferme toutes les positions Buy avec profit
             return;
         }
@@ -724,6 +741,22 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
         double triggeredAt = ssLevel_.load();
         ssTicket_.store(-1);  // empêche tout re-déclenchement sur le tick suivant
         ssLevel_.store(0.0);  // sera recalculé géométriquement par trailGrid()
+
+        // ── Dual Trail BUY : reset état AGGRESSIVE si SS géométrique ──
+        // Que le verrou BUY soit actif ou non, le SS vient de se déclencher
+        // (nouvelle position Sell ouverte). Le profit BUY sera verrouillé
+        // par le chemin V-SS (vlMgr_). Ici on réinitialise uniquement l'état
+        // dual trail BUY pour éviter qu'il influence le prochain cycle.
+        if (cfg_.trailModeAuto && (ssLockActive_ || dualTrailModeBuy_ == TrailMode::AGGRESSIVE)) {
+            log("[DUAL-TRAIL-BUY] SS géométrique déclenché @ " + std::to_string(triggeredAt)
+                + (ssLockActive_ ? " [VERROU actif ssLockPrice=" + std::to_string(ssLockPrice_) + "]" : "")
+                + " — reset état AGGRESSIVE BUY");
+            dualTrailModeBuy_   = TrailMode::NATURAL;
+            aggressiveSsTarget_ = 0.0;
+            ssLockActive_       = false;
+            ssLockPrice_        = 0.0;
+            bsProfitPipsCache_  = 0.0;
+        }
 
         // ── BUG FIX MARTINGALE ────────────────────────────────
         // Le broker a TOUJOURS exécuté ce SS (position Sell ouverte).
@@ -1043,6 +1076,143 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
                 ss = o.ticket;   // recharger pour la suite
                 break;
             }
+        }
+    }
+
+    // ── Dual Trail NATURAL / AGGRESSIVE (côté BUY, miroir SS) ────────────
+    // Si trailModeAuto activé : calcule le profit BUY flottant et choisit le mode.
+    // Quand le profit BUY >= xLockPipsBuy, la SS glisse progressivement VERS LE HAUT
+    // jusqu'au niveau verrou = bsAvgEntry + ssOvershootPips.
+    if (cfg_.trailModeAuto) {
+        std::vector<OrderInfo> ordSnap;
+        { std::lock_guard lk2(ordersMu_); ordSnap = orders_; }
+
+        double bsAvgEntry = 0.0, bsLots = 0.0;
+        for (const auto& o : ordSnap) {
+            if (o.type == OrderType::Buy && o.lots > 0.0) {
+                bsAvgEntry += o.openPrice * o.lots;
+                bsLots     += o.lots;
+            }
+        }
+        if (bsLots > 1e-6) bsAvgEntry /= bsLots;
+
+        double curBid       = grid_->bid();
+        double bsProfitPips = (bsLots > 1e-6)
+                              ? (curBid - bsAvgEntry) / cfg_.point
+                              : 0.0;
+        bsProfitPipsCache_ = bsProfitPips;
+        dualTrailModeBuy_  = grid_->getBuyTrailMode(bsProfitPips);
+
+        if (dualTrailModeBuy_ == TrailMode::AGGRESSIVE && bsLots > 1e-6) {
+            // ── Mode AGGRESSIVE BUY : glisser SS progressivement vers le verrou ──
+            // Lock level = bsAvgEntry + ssOvershootPips (AU-DESSUS de l'entrée BUY)
+            // Pour les positions BUY : profit garanti = ssOvershootPips quand SS déclenche
+            //   → profit/lot = lockLevel - bsAvgEntry = ssOvershootPips pts
+            double lockLevel = bsAvgEntry + (double)cfg_.ssOvershootPips * cfg_.point;
+            double stepSize  = (double)cfg_.aggressiveSsStepPts * cfg_.point;
+
+            // Initialiser la cible progressive au niveau SS courant
+            if (aggressiveSsTarget_ <= 0.0 || aggressiveSsTarget_ > lockLevel) {
+                if (ssLevel_.load() > 0.0 && ssLevel_.load() < lockLevel)
+                    aggressiveSsTarget_ = ssLevel_.load();
+                else
+                    aggressiveSsTarget_ = lockLevel;   // snap au verrou si SS déjà au-dessus
+            }
+
+            // Glisser vers le haut par un step par tick
+            if (!ssLockActive_) {
+                aggressiveSsTarget_ += stepSize;
+                if (aggressiveSsTarget_ >= lockLevel) {
+                    aggressiveSsTarget_ = lockLevel;
+                    ssLockActive_ = true;
+                    ssLockPrice_  = lockLevel;
+                    log("[AGGRESSIVE-BUY] Verrou SS activé @ "
+                        + std::to_string(lockLevel)
+                        + " [bs_entry=" + std::to_string(bsAvgEntry)
+                        + " +overshoot=" + std::to_string(cfg_.ssOvershootPips) + "pts"
+                        + " profit_garanti=" + std::to_string(cfg_.ssOvershootPips) + "pts]");
+                    // ── Sync immédiat vers ProfitLockManager ──────────────
+                    // Même tick que l'activation du verrou — élimine la fenêtre
+                    // de timing où ssLockActive_=true mais V-SS broker non synchronisé.
+                    if (cfg_.vlEnabled)
+                        vlMgr_.overrideSSForLock(lockLevel);
+                }
+            }
+
+            double aggressTarget = ssLockActive_ ? ssLockPrice_ : aggressiveSsTarget_;
+
+            // Garde broker : respecter STOPLEVEL minimum (SS doit être sous bid)
+            double mdist = grid_->minDistPts();
+            if ((curBid - aggressTarget) < mdist)
+                aggressTarget = math::normalize(curBid - mdist, cfg_.digits);
+
+            // Modifier le SS si nécessaire (ratchet UP — aggressTarget > ssLevel_)
+            if (ss > 0 && !trailFrozen) {
+                double curSsLevel = ssLevel_.load();
+                double delta      = aggressTarget - curSsLevel;  // positif = SS monte
+                if (delta > cfg_.point && aggressTarget < curBid) {
+                    TradeCmd cmd;
+                    cmd.op     = TradeCmd::Op::ModifyOrder;
+                    cmd.ticket = ss;
+                    cmd.price  = math::normalize(aggressTarget, cfg_.digits);
+                    cmd.sl     = 0.0; cmd.tp = 0.0;
+                    auto res = bridge_->sendCommand(cmd);
+                    if (res.success) {
+                        ssLevel_.store(cmd.price);
+                        log("SS AGGRESSIVE-BUY ↑ → "
+                            + std::to_string(cmd.price)
+                            + (ssLockActive_ ? " [LOCK BUY]" : "")
+                            + " [+" + std::to_string(delta / cfg_.point) + "pts]"
+                            + " BS profit=" + std::to_string((int)bsProfitPips) + "pts");
+                    }
+                }
+            } else if (ss <= 0) {
+                // SS absent : créer à la cible aggressive
+                if ((curBid - aggressTarget) >= mdist) {
+                    TradeCmd cmd = makeSellStop(lot, math::normalize(aggressTarget, cfg_.digits), comment);
+                    auto res = bridge_->sendCommand(cmd);
+                    if (res.success) {
+                        ssTicket_.store(res.ticket);
+                        ssLevel_.store(aggressTarget);
+                        ssCreatedAt_ = Clock::now();
+                        log("SS AGGRESSIVE-BUY créé @ " + std::to_string(aggressTarget)
+                            + (ssLockActive_ ? " [LOCK BUY]" : ""));
+                    }
+                }
+            }
+            return;   // traitement AGGRESSIVE BUY terminé — ne pas appeler computeSellStop
+        }
+
+        // Mode NATURAL : si verrou BUY déjà actif → le maintenir (sticky lock)
+        if (dualTrailModeBuy_ == TrailMode::NATURAL && ssLockActive_) {
+            double aggressTarget = ssLockPrice_;
+            double curBid2 = grid_->bid();
+            double mdist2  = grid_->minDistPts();
+            if ((curBid2 - aggressTarget) < mdist2)
+                aggressTarget = math::normalize(curBid2 - mdist2, cfg_.digits);
+            if (ss > 0 && !trailFrozen) {
+                double delta = aggressTarget - ssLevel_.load();
+                if (delta > cfg_.point && aggressTarget < curBid2) {
+                    TradeCmd cmd;
+                    cmd.op     = TradeCmd::Op::ModifyOrder;
+                    cmd.ticket = ss;
+                    cmd.price  = math::normalize(aggressTarget, cfg_.digits);
+                    cmd.sl = 0.0; cmd.tp = 0.0;
+                    auto res = bridge_->sendCommand(cmd);
+                    if (res.success) {
+                        ssLevel_.store(cmd.price);
+                        log("SS VERROU-BUY maintenu @ " + std::to_string(cmd.price)
+                            + " [LOCK sticky BUY — profit retombé sous seuil]");
+                    }
+                }
+            }
+            return;   // lock sticky maintenu
+        }
+
+        // Mode NATURAL sans verrou actif : réinitialiser la cible progressive
+        if (aggressiveSsTarget_ > 0.0) {
+            log("[NATURAL-BUY] Réinitialisation cible AGGRESSIVE (pas de verrou actif)");
+            aggressiveSsTarget_ = 0.0;
         }
     }
 
@@ -1605,12 +1775,18 @@ void TOP4EA_Engine::closeBasketAtomic() {
     vlMgr_.reset();           // effacer tous les niveaux VL du cycle terminé
     waveState_.store(0);      // remettre à zéro le suivi des vagues pour le prochain cycle
     cycleRealizedPnL_ = 0.0;  // remettre à zéro le profit encaissé (VL partiels)
-    // ── Dual Trail : réinitialiser l'état AGGRESSIVE ──────────
+    // ── Dual Trail : réinitialiser l'état AGGRESSIVE (côté SELL) ──
     dualTrailMode_      = TrailMode::NATURAL;
     aggressiveBsTarget_ = 0.0;
     vLockActive_        = false;
     vLockPrice_         = 0.0;
     ssProfitPipsCache_  = 0.0;
+    // ── Dual Trail : réinitialiser l'état AGGRESSIVE (côté BUY, miroir) ──
+    dualTrailModeBuy_   = TrailMode::NATURAL;
+    aggressiveSsTarget_ = 0.0;
+    ssLockActive_       = false;
+    ssLockPrice_        = 0.0;
+    bsProfitPipsCache_  = 0.0;
 
     // ── FIX CRITIQUE : vider le cache d'ordres immédiatement ────
     // Sans ce vidage, le tick suivant lit le cache périmé (7 ordres, P&L=+10$),
@@ -1751,6 +1927,28 @@ void TOP4EA_Engine::updateProfitLockOrders(const std::vector<OrderInfo>& orders,
             vLockPrice_        = 0.0;
             aggressiveBsTarget_ = 0.0;
             dualTrailMode_     = TrailMode::NATURAL;
+        }
+    }
+
+    // ── Fix BUY : Intégration Dual Trail AGGRESSIVE côté BUY (miroir SS) ──
+    // Quand le verrou BUY AGGRESSIVE est actif, on override le niveau V-SS
+    // du ProfitLockManager avec ssLockPrice_ — le profit minimum garanti BUY.
+    // Guard : n'override QUE s'il y a des positions Buy réelles (buyLots > 0)
+    // pour éviter un V-SS fantôme lors d'une intervention manuelle.
+    if (cfg_.trailModeAuto && ssLockActive_ && ssLockPrice_ > 0.0) {
+        double buyLots = 0.0;
+        for (const auto& o : orders)
+            if (o.type == OrderType::Buy) buyLots += o.lots;
+        if (buyLots > 1e-6) {
+            vlMgr_.overrideSSForLock(ssLockPrice_);
+            changed = true;  // forcer le traitement même si vlMgr_ n'a pas changé
+        } else {
+            // Plus de positions Buy réelles — désactiver le verrou pour cohérence
+            log("[DUAL-TRAIL-BUY] Verrou AGGRESSIVE BUY désactivé : plus de positions Buy actives");
+            ssLockActive_       = false;
+            ssLockPrice_        = 0.0;
+            aggressiveSsTarget_ = 0.0;
+            dualTrailModeBuy_   = TrailMode::NATURAL;
         }
     }
 
@@ -2220,21 +2418,39 @@ std::string TOP4EA_Engine::dashboard() const {
     oss << "╠═══════════════════════════════════╣\n";
     // Affichage du mode trail : fixe, adaptatif, ou NATURAL/AGGRESSIVE
     if (cfg_.trailModeAuto) {
-        // ── Mode Dual Trail NATURAL / AGGRESSIVE ───────────────
-        std::string modeLabel;
+        // ── Mode Dual Trail — côté SELL (BS AGGRESSIVE) ────────
+        std::string modeLabelSell;
         if (vLockActive_) {
             int profPips = (int)ssProfitPipsCache_;
-            modeLabel = "ACTIF [VERROU OK +" + std::to_string(profPips) + "pts]";
+            modeLabelSell = "BS VERROU +" + std::to_string(profPips) + "pts";
         } else if (dualTrailMode_ == TrailMode::AGGRESSIVE) {
-            modeLabel = "ACTIF [MODE: AGGRESSIVE 🔒]";
+            modeLabelSell = "BS AGGRESSIVE";
         } else {
-            modeLabel = "ACTIF [MODE: NATURAL]";
+            modeLabelSell = "BS NATURAL";
         }
-        if (dashFrozen) modeLabel = "❄FIGÉ (zone TP)";
+        // ── Mode Dual Trail — côté BUY (SS AGGRESSIVE miroir) ──
+        std::string modeLabelBuy;
+        if (ssLockActive_) {
+            int profPips = (int)bsProfitPipsCache_;
+            modeLabelBuy = "SS VERROU +" + std::to_string(profPips) + "pts";
+        } else if (dualTrailModeBuy_ == TrailMode::AGGRESSIVE) {
+            modeLabelBuy = "SS AGGRESSIVE";
+        } else {
+            modeLabelBuy = "SS NATURAL";
+        }
+        std::string trailStatus = dashFrozen ? "❄FIGÉ (zone TP)" : "ACTIF";
 
-        oss << "║  Trail  : " << modeLabel << "\n";
-        oss << "║  SS dist: " << cfg_.naturalSsDistPts << "pts"
-            << "  BS dist: ";
+        oss << "║  Trail  : " << trailStatus
+            << " [" << modeLabelSell << " | " << modeLabelBuy << "]\n";
+        oss << "║  SS dist: ";
+        if (ssLockActive_) {
+            oss << std::setprecision(5) << ssLockPrice_ << " [LOCK BUY]";
+        } else if (dualTrailModeBuy_ == TrailMode::AGGRESSIVE && aggressiveSsTarget_ > 0.0) {
+            oss << std::setprecision(5) << aggressiveSsTarget_ << "→lock";
+        } else {
+            oss << cfg_.naturalSsDistPts << "pts";
+        }
+        oss << "  BS dist: ";
         if (vLockActive_) {
             oss << std::setprecision(5) << vLockPrice_ << " [LOCK]";
         } else if (dualTrailMode_ == TrailMode::AGGRESSIVE && aggressiveBsTarget_ > 0.0) {
@@ -2243,12 +2459,15 @@ std::string TOP4EA_Engine::dashboard() const {
             oss << cfg_.naturalBsDistPts << "pts";
         }
         oss << "\n";
-        // ssProfitPipsCache_ est en POINTS (= price_diff / point)
-        // 1 pip XAU (2 décimales) = 10 pts → afficher les deux pour clarté opérateur
+        // Profit flottant — côté SELL (positions Sell en profit → BS AGGRESSIVE)
         int pipSize = (cfg_.digits >= 3) ? 10 : 10;
         double ssPips = ssProfitPipsCache_ / pipSize;
-        oss << "║  SS profit: " << std::setprecision(1) << ssProfitPipsCache_
+        oss << "║  Sell profit: " << std::setprecision(1) << ssProfitPipsCache_
             << "pts (" << ssPips << "pips) seuil=" << cfg_.xLockPips << "pts\n";
+        // Profit flottant — côté BUY (positions Buy en profit → SS AGGRESSIVE)
+        double bsPips = bsProfitPipsCache_ / pipSize;
+        oss << "║  Buy  profit: " << bsProfitPipsCache_
+            << "pts (" << bsPips << "pips) seuil=" << cfg_.xLockPipsBuy << "pts\n";
         oss << std::setprecision(2);
     } else if (cfg_.trailFixedDistPts > 0) {
         int pipSize = (cfg_.digits >= 3) ? 10 : 10;   // 1 pip = 10 points

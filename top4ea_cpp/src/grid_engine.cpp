@@ -109,6 +109,13 @@ TrailMode GridEngine::getTrailMode(double ss_profit_pips) const noexcept {
            : TrailMode::NATURAL;
 }
 
+TrailMode GridEngine::getBuyTrailMode(double bs_profit_pips) const noexcept {
+    if (!cfg_.trailModeAuto) return TrailMode::NATURAL;
+    return (bs_profit_pips >= (double)cfg_.xLockPipsBuy)
+           ? TrailMode::AGGRESSIVE
+           : TrailMode::NATURAL;
+}
+
 StopPlacement GridEngine::computeSellStop(
     int    currentTicket,
     double currentLevel,

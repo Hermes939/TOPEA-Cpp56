@@ -102,6 +102,10 @@ static top4ea::Config loadConfig(const char* path) {
             else if (key=="aggressive_step_pts") cfg.aggressiveStepPts = std::stoi(val);
             else if (key=="natural_bs_dist_pts") cfg.naturalBsDistPts  = std::stoi(val);
             else if (key=="natural_ss_dist_pts") cfg.naturalSsDistPts  = std::stoi(val);
+            // Dual Trail BUY (SS AGGRESSIVE miroir)
+            else if (key=="x_lock_pips_buy")         cfg.xLockPipsBuy        = std::stoi(val);
+            else if (key=="ss_overshoot_pips")        cfg.ssOvershootPips     = std::stoi(val);
+            else if (key=="aggressive_ss_step_pts")   cfg.aggressiveSsStepPts = std::stoi(val);
             // Rétrocompatibilité anciens fichiers .conf (be_ → vl_)
             else if (key=="be_enabled")    cfg.vlEnabled   = (val=="true"||val=="1");
             else if (key=="be_buffer_pts") cfg.vlTrailPts  = std::stoi(val);

@@ -62,9 +62,13 @@ public:
         double gapFactor       = 1.0,
         int    distOverridePts = -1) const noexcept;
 
-    // Mode dual trail — NATURAL ou AGGRESSIVE
+    // Mode dual trail côté SELL — NATURAL ou AGGRESSIVE
     // ss_profit_pips : profit flottant des Sell en points (> 0 = en profit)
     [[nodiscard]] TrailMode getTrailMode(double ss_profit_pips) const noexcept;
+
+    // Mode dual trail côté BUY (miroir SS AGGRESSIVE)
+    // bs_profit_pips : profit flottant des Buy en points (> 0 = en profit)
+    [[nodiscard]] TrailMode getBuyTrailMode(double bs_profit_pips) const noexcept;
 
     // Demi-gap courant (ATR ou fixe) en points
     [[nodiscard]] double halfGap() const noexcept;

@@ -265,11 +265,19 @@ struct Config {
     //   trail_mode_auto, x_lock_pips, bs_overshoot_pips,
     //   aggressive_step_pts, natural_bs_dist_pts, natural_ss_dist_pts
     bool        trailModeAuto      = false; // false = off (comportement actuel conservé)
-    int         xLockPips          = 500;   // pts profit SS → passage AGGRESSIVE
-    int         bsOvershootPips    = 500;   // verrou BS = ss_entry + n pts au-dessus
+    // ── Côté SELL (BS AGGRESSIVE) ─────────────────────────────
+    int         xLockPips          = 500;   // pts profit SS (Sell) → passage BS AGGRESSIVE
+    int         bsOvershootPips    = 500;   // verrou BS = ss_entry - n pts (profit garanti)
     int         aggressiveStepPts  = 200;   // glissement BS par tick en mode AGGRESSIVE
     int         naturalBsDistPts   = 600;   // distance BS NATURAL (0 = trailFixedDistPts)
     int         naturalSsDistPts   = 600;   // distance SS NATURAL (0 = trailFixedDistPts)
+    // ── Côté BUY (SS AGGRESSIVE miroir) ──────────────────────
+    // Quand le profit flottant des positions BUY >= xLockPipsBuy, la SS glisse
+    // progressivement vers bsAvgEntry + ssOvershootPips (AU-DESSUS de l'entrée BUY)
+    // garantissant un profit minimum de ssOvershootPips pts au déclenchement SS.
+    int         xLockPipsBuy       = 500;   // pts profit BUY → passage SS AGGRESSIVE
+    int         ssOvershootPips    = 500;   // verrou SS = bs_entry + n pts (profit garanti BUY)
+    int         aggressiveSsStepPts = 200;  // glissement SS par tick en mode AGGRESSIVE BUY
 
     // ─── Connexion MetaApi ───────────────────────────────────
     // token et accountId lus depuis METAAPI_TOKEN / METAAPI_ACCOUNT_ID
