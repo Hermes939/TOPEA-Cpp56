@@ -190,6 +190,11 @@ private:
     // ─── Vérification de cohérence ────────────────────────────
     void validateParams(CalibrableParams& p) const noexcept;
 
+    // ─── Migration du schéma CSV AutoML ──────────────────────
+    //  Détecte un fichier ancien (colonnes < attendues) et le réécrit
+    //  en injectant des valeurs 0 pour les colonnes Dual Trail manquantes
+    void migrateAutoMLSchema() noexcept;
+
     CalibrableParams   params_;
     std::string        automlJsonPath_;
     std::string        exportCsvPath_;

@@ -35,6 +35,9 @@ MathCalibrator::MathCalibrator(const Config& cfg,
 
     // Tenter de charger un état sauvegardé
     loadState();
+
+    // Migration schéma CSV AutoML si nécessaire (colonnes Dual Trail absentes)
+    migrateAutoMLSchema();
 }
 
 // ────────────────────────────────────────────────────────────
@@ -260,6 +263,76 @@ std::optional<CalibrableParams> MathCalibrator::parseAutoMLJson(
     p.ouMinTheta          = std::clamp(p.ouMinTheta,          0.01, 0.30);
 
     return p;
+}
+
+// ────────────────────────────────────────────────────────────
+//  Migration schéma CSV AutoML (colonnes Dual Trail absentes)
+//  Réécrit le fichier existant en ajoutant 8 colonnes zeroed
+//  avant label_good si le header ne contient pas trail_mode_used
+// ────────────────────────────────────────────────────────────
+void MathCalibrator::migrateAutoMLSchema() noexcept {
+    if (!std::filesystem::exists(exportCsvPath_)) return;
+
+    // Lire le header existant
+    std::ifstream fin(exportCsvPath_);
+    if (!fin) return;
+    std::string header;
+    if (!std::getline(fin, header)) return;
+
+    // Si le header contient déjà trail_mode_used, aucune migration nécessaire
+    if (header.find("trail_mode_used") != std::string::npos) return;
+
+    // Lire toutes les lignes de données restantes
+    std::vector<std::string> dataLines;
+    std::string line;
+    while (std::getline(fin, line)) {
+        if (!line.empty()) dataLines.push_back(std::move(line));
+    }
+    fin.close();
+
+    // Nouveau header (8 colonnes Dual Trail insérées avant label_good)
+    static constexpr std::string_view NEW_HEADER =
+        "timestamp,atr_pts,rho1,regime,net_delta,hedge_pressure,"
+        "recov_depth,lot_used,pnl_result,drawdown_pct,"
+        "ofi_score,imbalance_score,"
+        "atr_mult_used,kelly_frac_used,gap_exp_used,trail_asym_used,"
+        "trail_mode_used,v_lock_triggered,v_lock_price,ss_profit_at_lock_pts,"
+        "trail_mode_buy_used,ss_lock_triggered,ss_lock_price,bs_profit_at_lock_pts,"
+        "label_good";
+
+    // Écrire dans un fichier temporaire, puis renommer (atomique)
+    std::string tmpPath = exportCsvPath_ + ".migrating";
+    std::ofstream fout(tmpPath);
+    if (!fout) return;
+
+    fout << NEW_HEADER << "\n";
+
+    // Pour chaque ancienne ligne : insérer 8 zéros avant le dernier champ
+    for (auto& dl : dataLines) {
+        // Trouver la dernière virgule → tout ce qui est avant + 8 zéros + label
+        auto lastComma = dl.rfind(',');
+        if (lastComma == std::string::npos) {
+            fout << dl << "\n";   // ligne malformée : conserver telle quelle
+            continue;
+        }
+        std::string prefix = dl.substr(0, lastComma);
+        std::string label  = dl.substr(lastComma + 1);
+        fout << prefix
+             << ",0,0,0.000000,0.0"   // trail_mode_used, v_lock_triggered, v_lock_price, ss_profit_at_lock_pts
+             << ",0,0,0.000000,0.0"   // trail_mode_buy_used, ss_lock_triggered, ss_lock_price, bs_profit_at_lock_pts
+             << "," << label << "\n";
+    }
+    fout.close();
+
+    // Remplacer l'ancien fichier (rename atomique sur POSIX)
+    std::error_code ec;
+    std::filesystem::rename(tmpPath, exportCsvPath_, ec);
+    // En cas d'échec (cross-device), copier puis supprimer
+    if (ec) {
+        std::filesystem::copy_file(tmpPath, exportCsvPath_,
+                                   std::filesystem::copy_options::overwrite_existing, ec);
+        if (!ec) std::filesystem::remove(tmpPath, ec);
+    }
 }
 
 // ────────────────────────────────────────────────────────────
