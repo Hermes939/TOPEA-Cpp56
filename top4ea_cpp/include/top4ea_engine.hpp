@@ -223,6 +223,18 @@ private:
     // Timeout anti-gel : si CLOSING > 30s sans retour → force reset
     TimePoint         closingStart_  = Clock::now();
 
+    // ─── Reconnexion : restauration robuste ─────────────────
+    // true  = onConnect(true) vient d'être reçu ; initOrRestore() effectuera
+    //         jusqu'à 3 tentatives de fetchOrders() (2 s entre chaque) avant
+    //         de décider nouvelle grille vs restauration.
+    // false = démarrage initial normal (pas de reconnexion).
+    std::atomic<bool> pendingRestore_ { false };
+
+    // Nombre d'ordres récupérés lors de la dernière restauration post-reconnexion.
+    // -1 = aucune reconnexion encore survenue (dashboard : ligne cachée).
+    // ≥0 = reconnexion traitée (affiché dans le dashboard).
+    std::atomic<int>  lastRestoreCount_ { -1 };
+
     // ─── TP par vagues ───────────────────────────────────────
     // 0 = aucune vague fermée | 1 = Wave1 faite (50%) | 2 = Wave2 faite (+30%)
     std::atomic<int>  waveState_     { 0 };

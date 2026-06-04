@@ -100,25 +100,24 @@ void TOP4EA_Engine::detectAndApplyBrokerSpec() {
     SymbolSpec spec = bridge_->requestSymbolSpec(cfg_.symbol, 8000);
 
     if (spec.detected) {
-        // Vérifier si la config fichier surcharge manuellement (digits != 0)
-        // digits=0 dans top4ea.conf = auto-détection pure
-        // digits>0 = surcharge manuelle (ex: test ou broker exotique)
+        // digits=0 dans top4ea.conf = auto-détection pure → applySymbolSpec() sans rescale
+        //   (oldDigits=0 → condition de rescale dans applySymbolSpec est false)
+        // digits>0 et ≠ broker = surcharge manuelle délibérée :
+        //   → appliquer applySymbolSpec() quand même : le rescale sera calculé
+        //     depuis oldDigits=cfg.digits vers spec.digits et logué en WARNING.
+        //   → Cela garantit que la spec broker (volumes, tickValue, stopLevel) est
+        //     toujours appliquée ; seul l'écart de digits déclenche le rescale grille.
         bool manualOverride = (cfg_.digits > 0) &&
                               (cfg_.digits != spec.digits);
         if (manualOverride) {
-            log("[BrokerSpec] SURCHARGE MANUELLE : config fichier digits="
+            log("[BrokerSpec] WARNING — SURCHARGE MANUELLE : config fichier digits="
                 + std::to_string(cfg_.digits)
                 + " vs broker digits=" + std::to_string(spec.digits)
-                + " → config fichier utilisée");
-            // On stocke la spec détectée mais on n'applique que les champs
-            // non-critiques (volumes, stopLevel) sans changer digits/point
-            symbolSpec_           = spec;
-            cfg_.tickValue        = spec.tickValue;    // toujours prendre
-            cfg_.volumeMin        = spec.volumeMin;
-            cfg_.volumeMax        = spec.volumeMax;
-            cfg_.volumeStep       = spec.volumeStep;
-            cfg_.stopLevelPoints  = spec.stopLevelPoints;
-            bridge_->updateConfig(cfg_);               // sync précision JSON
+                + " → rescale grille APPLIQUÉ (×"
+                + std::to_string((int)std::pow(10.0,
+                    (double)(spec.digits - cfg_.digits)))
+                + "). Mettre digits=0 pour éviter ce rescale.");
+            applySymbolSpec(spec);
         } else {
             applySymbolSpec(spec);
         }
@@ -200,6 +199,19 @@ void TOP4EA_Engine::applySymbolSpec(const SymbolSpec& spec) {
 
     symbolSpec_ = spec;
 
+    // ── Log de boot [BOOT] pour traçabilité du rescale ──────
+    {
+        bool rescaled = (oldDigits > 0 && spec.digits != oldDigits);
+        std::ostringstream boot;
+        boot << "[BOOT] digits=" << cfg_.digits << " (auto"
+             << (oldDigits > 0 ? "/surcharge" : "") << ")"
+             << " | gridGap=" << cfg_.gridGap << "pts"
+             << " | rescale=" << (rescaled
+                 ? ("OUI ×" + std::to_string((int)std::pow(10.0, (double)(spec.digits - oldDigits))))
+                 : "AUCUN");
+        log(boot.str());
+    }
+
     log("[BrokerSpec] APPLIQUÉ : digits=" + std::to_string(cfg_.digits)
         + " point=" + std::to_string(cfg_.point)
         + " (était " + std::to_string(oldPt) + ")"
@@ -268,11 +280,13 @@ void TOP4EA_Engine::onError(int code, const std::string& msg) {
 void TOP4EA_Engine::onConnect(bool connected) {
     if (connected) {
         log("MetaApi connecté/reconnecté");
-        // Effacer les tickets SS/BS stale pour éviter tout faux
-        // déclenchement géométrique pendant la fenêtre de reconnexion.
-        // restoreState() les rétablira proprement depuis le broker.
-        ssTicket_.store(-1);  bsTicket_.store(-1);
-        ssLevel_.store(0.0);  bsLevel_.store(0.0);
+        // NE PAS effacer les tickets SS/BS immédiatement :
+        // la fenêtre de reconnexion peut provoquer un fetchOrders() vide ou incomplet.
+        // pendingRestore_=true indique à initOrRestore() de retenter jusqu'à 3× (2 s
+        // entre chaque) avant de décider nouvelle grille vs restauration.
+        // Les tickets SS/BS ne seront effacés QUE si les 3 tentatives confirment
+        // qu'aucun ordre de ce magic n'existe côté broker.
+        pendingRestore_.store(true);
         state_.store(EAState::Init);
     } else {
         log("MetaApi déconnecté — en attente de reconnexion");
@@ -533,19 +547,63 @@ void TOP4EA_Engine::initOrRestore() {
         }
     }
 
-    auto orders = fetchOrders();
-    bool hasMkt = std::any_of(orders.begin(), orders.end(), [](const OrderInfo& o){
-        return o.type == OrderType::Buy || o.type == OrderType::Sell; });
-    bool hasStop= (ssTicket_.load() > 0 || bsTicket_.load() > 0);
+    // ── Fetch ordres avec retry si reconnexion en attente ────
+    // Quand pendingRestore_=true (onConnect vient de tirer), on tente
+    // jusqu'à 3 fetchOrders() espacés de 2 s pour pallier la latence API.
+    // Les tickets SS/BS ne sont effacés QUE si les 3 tentatives reviennent vides.
+    if (pendingRestore_.load()) {
+        pendingRestore_.store(false);
+        bool restored = false;
 
-    if (hasMkt || hasStop) {
-        restoreState(orders);
+        for (int attempt = 1; attempt <= 3; ++attempt) {
+            auto orders = fetchOrders();
+            bool hasMkt = std::any_of(orders.begin(), orders.end(),
+                [](const OrderInfo& o){
+                    return o.type == OrderType::Buy || o.type == OrderType::Sell; });
+            bool hasAny = !orders.empty();
+
+            if (hasMkt || hasAny) {
+                log("[RESTORE] Tentative " + std::to_string(attempt) + "/3 — "
+                    + std::to_string(orders.size()) + " ordre(s) trouvé(s) → restauration");
+                restoreState(orders);   // lastRestoreCount_ mis à jour dans restoreState()
+                restored = true;
+                break;
+            }
+
+            log("[RESTORE] Tentative " + std::to_string(attempt) + "/3 vide"
+                + (attempt < 3 ? " — retry dans 2 s..." : " — aucun ordre côté broker"));
+            if (attempt < 3)
+                std::this_thread::sleep_for(std::chrono::seconds(2));
+        }
+
+        if (!restored) {
+            // Confirme qu'il n'y a aucun ordre actif → effacer tickets + nouvelle grille
+            ssTicket_.store(-1); bsTicket_.store(-1);
+            ssLevel_.store(0.0); bsLevel_.store(0.0);
+            Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
+            gridOrigin_ = (t.bid + t.ask) * 0.5;
+            state_.store(EAState::GridActive);
+            lastRestoreCount_.store(0);
+            log("[RESTORE] 3/3 tentatives vides — nouvelle grille, origin="
+                + std::to_string(gridOrigin_));
+        }
     } else {
-        // Établir l'ancre géométrique sur le prix mid courant
-        Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
-        gridOrigin_ = (t.bid + t.ask) * 0.5;
-        state_.store(EAState::GridActive);
-        log("Grille initialisée — origin=" + std::to_string(gridOrigin_));
+        // Démarrage initial (pas de reconnexion)
+        auto orders = fetchOrders();
+        bool hasMkt = std::any_of(orders.begin(), orders.end(),
+            [](const OrderInfo& o){
+                return o.type == OrderType::Buy || o.type == OrderType::Sell; });
+        bool hasStop = (ssTicket_.load() > 0 || bsTicket_.load() > 0);
+
+        if (hasMkt || hasStop) {
+            restoreState(orders);
+        } else {
+            // Établir l'ancre géométrique sur le prix mid courant
+            Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
+            gridOrigin_ = (t.bid + t.ask) * 0.5;
+            state_.store(EAState::GridActive);
+            log("Grille initialisée — origin=" + std::to_string(gridOrigin_));
+        }
     }
 
     // ─── Réchauffement Visual AI (cold-start fix) ─────────────
@@ -631,34 +689,71 @@ void TOP4EA_Engine::restoreState(const std::vector<OrderInfo>& orders) {
     int ssT = -1, bsT = -1;
     double ssLvl = 0, bsLvl = 0;
     int sellCnt = 0, buyCnt = 0;
-    double sumPrice = 0.0;
-    int    mktCount = 0;
+    double sumWeightedPrice = 0.0;  // somme(prix_entrée × lots)
+    double sumLots          = 0.0;  // somme(lots) — dénominateur moyenne pondérée
+    int    mktCount         = 0;
 
     for (const auto& o : orders) {
         if (o.type == OrderType::SellStop) { ssT = o.ticket; ssLvl = o.openPrice; }
         if (o.type == OrderType::BuyStop)  { bsT = o.ticket; bsLvl = o.openPrice; }
-        if (o.type == OrderType::Sell) { ++sellCnt; sumPrice += o.openPrice; ++mktCount; }
-        if (o.type == OrderType::Buy)  { ++buyCnt;  sumPrice += o.openPrice; ++mktCount; }
+        if (o.type == OrderType::Sell) {
+            ++sellCnt;
+            sumWeightedPrice += o.openPrice * o.lots;
+            sumLots          += o.lots;
+            ++mktCount;
+        }
+        if (o.type == OrderType::Buy) {
+            ++buyCnt;
+            sumWeightedPrice += o.openPrice * o.lots;
+            sumLots          += o.lots;
+            ++mktCount;
+        }
     }
+
     ssTicket_.store(ssT);  ssLevel_.store(ssLvl);
     bsTicket_.store(bsT);  bsLevel_.store(bsLvl);
     recovery_->restoreFromOrders(sellCnt, buyCnt);
 
-    // Restaurer l'ancre géométrique depuis le prix moyen des ordres ouverts
-    // Si aucun ordre : utiliser le prix mid courant
-    if (mktCount > 0) {
-        gridOrigin_ = sumPrice / mktCount;
+    // Restaurer l'ancre géométrique depuis la moyenne pondérée par les lots.
+    // En recovery martingale les lots sont intentionnellement inégaux (Ln > Ln-1) ;
+    // la moyenne pondérée reflète fidèlement le prix moyen réel d'exposition.
+    // Fallback sur le prix mid courant si aucun ordre marché ou lots nuls.
+    if (mktCount > 0 && sumLots > 0.0) {
+        gridOrigin_ = sumWeightedPrice / sumLots;
     } else {
         Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
         gridOrigin_ = (t.bid + t.ask) * 0.5;
     }
 
-    state_.store(EAState::GridActive);
-    log("État restauré SS=" + std::to_string(ssLvl)
-        + " BS=" + std::to_string(bsLvl)
-        + " sellR=" + std::to_string(sellCnt)
-        + " buyR=" + std::to_string(buyCnt)
-        + " origin=" + std::to_string(gridOrigin_));
+    // État restauré : Recovery si des positions marché sont présentes, sinon GridActive.
+    // EAState::GridActive ← seulement SS/BS stops sans position marché ouverte.
+    // EAState::Recovery   ← au moins une position marché Sell ou Buy ouverte.
+    const int totalMkt = sellCnt + buyCnt;
+    if (totalMkt > 0) {
+        state_.store(EAState::Recovery);
+    } else {
+        state_.store(EAState::GridActive);
+    }
+
+    // Log détaillé de chaque champ restauré pour auditabilité
+    log("[RESTORE] ─────────────────────────────────");
+    log("[RESTORE] ssTicket=" + std::to_string(ssT)
+        + " @ " + std::to_string(ssLvl));
+    log("[RESTORE] bsTicket=" + std::to_string(bsT)
+        + " @ " + std::to_string(bsLvl));
+    log("[RESTORE] sellCount=" + std::to_string(sellCnt)
+        + " buyCount=" + std::to_string(buyCnt)
+        + " totalMkt=" + std::to_string(totalMkt));
+    log("[RESTORE] gridOrigin=" + std::to_string(gridOrigin_)
+        + (mktCount > 0 && sumLots > 0.0
+            ? " (moy. pondérée par lots, totalLots=" + std::to_string(sumLots) + ")"
+            : " (mid tick courant)"));
+    log("[RESTORE] state=" + std::string(totalMkt > 0 ? "RECOVERY" : "GridActive"));
+    log("[RESTORE] ordres totaux=" + std::to_string(orders.size()));
+    log("[RESTORE] ─────────────────────────────────");
+
+    // Stocker le compte pour l'indicateur dashboard (visible au démarrage ET reconnexion)
+    lastRestoreCount_.store(static_cast<int>(orders.size()));
 }
 
 // ────────────────────────────────────────────────────────────
@@ -2537,6 +2632,12 @@ std::string TOP4EA_Engine::dashboard() const {
             << "  BS gap : ×" << dashBsGap << "\n";
     }
     oss << "╠═══════════════════════════════════╣\n";
+    {
+        int rc = lastRestoreCount_.load();
+        if (rc >= 0) {
+            oss << "║  [RESTORE: " << rc << " ordre(s) récupéré(s) post-reconnexion]\n";
+        }
+    }
     oss << "║  SS Recovery: " << recovery_->sellCount() << " / " << cfg_.maxRecovery << "\n";
     oss << "║  BS Recovery: " << recovery_->buyCount()  << " / " << cfg_.maxRecovery << "\n";
     oss << "║  Ordres mkt : " << mkt << "  [ZONE " << zoneStr << "]\n";

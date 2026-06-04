@@ -119,8 +119,11 @@ struct Config {
     int         magic           = 10300;
     int         slippage        = 3;
     double      dailyTargetPct  = 10.0;         // 0 = désactivé
-    int         digits          = 5;
-    double      point           = 0.00001;
+    // 0 = AUTO-DÉTECTION broker (défaut). Aucun rescale parasite ne sera appliqué.
+    // Les valeurs de grille dans top4ea.conf sont exprimées nativement en digits=3.
+    // > 0 = surcharge manuelle ; si ≠ broker → rescale appliqué et WARNING logué.
+    int         digits          = 0;
+    double      point           = 0.001;        // valeur par défaut digits=3 (Exness XAUUSDm)
 
     // Améliorations mathématiques
     bool        useAtrGrid      = true;         // GridGap dynamique ATR
