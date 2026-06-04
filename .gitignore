@@ -47,3 +47,4 @@ __pycache__/
 # ── Replit ────────────────────────────────────────────────────
 .upm/
 uv.lock
+automl/output/status.json
