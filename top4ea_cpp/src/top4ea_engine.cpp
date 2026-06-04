@@ -869,6 +869,62 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
                 " count=" + std::to_string(recovery_->sellCount()));
         }
 
+        // ── Recompute DirectionVote post-SS-trigger (exposition mise à jour) ────
+        // Le vote est recalculé immédiatement après le trigger avec les lots
+        // courants pour refléter l'exposition réelle post-déclenchement.
+        {
+            std::vector<OrderInfo> ordSnap;
+            { std::lock_guard lk2(ordersMu_); ordSnap = orders_; }
+            double buyLots = 0.0, sellLots = 0.0;
+            for (const auto& o : ordSnap) {
+                if (o.type == OrderType::Buy)  buyLots  += o.lots;
+                if (o.type == OrderType::Sell) sellLots += o.lots;
+            }
+            double totalLots = buyLots + sellLots;
+            DirectionVote freshVote = computeDirectionVote(
+                buyLots, sellLots, totalLots,
+                vdNow.dsSignal.signal,
+                vdNow.dsSignal.effectiveConfidence,
+                vdNow.structure,
+                vdNow.dxyResult.signal);
+            log("[VOTE-POST-SS] " + freshVote.reason);
+            vdNow.dirVote = freshVote;
+        }
+
+        // ── Gate vote board — surcharge directionnelle (DS gate prioritaire) ──
+        // Règle de priorité : si DS ≥60% effectif est actif, son gate prime sur le
+        // vote board. Le vote ne peut pas révoquer ce que le DS gate a accordé.
+        {
+            const DirectionVote& dv    = vdNow.dirVote;
+            const DeepSeekSignal& dsSig = vdNow.dsSignal;
+            bool dsGateBuy  = (dsSig.fresh && dsSig.effectiveConfidence >= 60.0
+                               && dsSig.signal == DSSignal::BUY_BIAS);
+            bool dsGateSell = (dsSig.fresh && dsSig.effectiveConfidence >= 60.0
+                               && dsSig.signal == DSSignal::SELL_BIAS);
+
+            // dv.bsOnly (vote ≥+2, BUY dir) → bloquer SS — OK sauf si DS SELL_BIAS a forcé SS
+            if (dv.bsOnly && vdNow.allowSSRecovery && !dsGateSell) {
+                vdNow.allowSSRecovery = false;
+                vdNow.ssBlockReason   = "[SS:VOTE-GATE +BUY vote="
+                    + std::to_string(dv.score) + " " + dv.reason + "]";
+                log("[RECOVERY] SS bloqué vote board — vote=" + std::to_string(dv.score));
+            } else if (dv.bsOnly && dsGateSell) {
+                log("[RECOVERY] Vote bsOnly ignoré — DS SELL hard gate prioritaire ("
+                    + std::to_string((int)dsSig.effectiveConfidence) + "%)");
+            }
+
+            // dv.ssOnly (vote ≤-2, SELL dir) → bloquer BS — OK sauf si DS BUY_BIAS a forcé BS
+            if (dv.ssOnly && vdNow.allowBSRecovery && !dsGateBuy) {
+                vdNow.allowBSRecovery = false;
+                vdNow.bsBlockReason   = "[BS:VOTE-GATE -SELL vote="
+                    + std::to_string(dv.score) + " " + dv.reason + "]";
+                log("[RECOVERY] BS bloqué vote board — vote=" + std::to_string(dv.score));
+            } else if (dv.ssOnly && dsGateBuy) {
+                log("[RECOVERY] Vote ssOnly ignoré — DS BUY hard gate prioritaire ("
+                    + std::to_string((int)dsSig.effectiveConfidence) + "%)");
+            }
+        }
+
         if (!vdNow.allowRecovery || !vdNow.allowSSRecovery) {
             // Visual AI bloque le nouveau SS recovery (sécurité directionnelle)
             // Le compteur est déjà incrémenté → lot correct au prochain SS
@@ -905,6 +961,56 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
             recovery_->forceIncrementBuy();
             log("[Recovery] BS broker exécuté — Martingale forcée malgré CascadeGuard"
                 " count=" + std::to_string(recovery_->buyCount()));
+        }
+
+        // ── Recompute DirectionVote post-BS-trigger (exposition mise à jour) ────
+        {
+            std::vector<OrderInfo> ordSnap;
+            { std::lock_guard lk2(ordersMu_); ordSnap = orders_; }
+            double buyLots = 0.0, sellLots = 0.0;
+            for (const auto& o : ordSnap) {
+                if (o.type == OrderType::Buy)  buyLots  += o.lots;
+                if (o.type == OrderType::Sell) sellLots += o.lots;
+            }
+            double totalLots = buyLots + sellLots;
+            DirectionVote freshVote = computeDirectionVote(
+                buyLots, sellLots, totalLots,
+                vdNow.dsSignal.signal,
+                vdNow.dsSignal.effectiveConfidence,
+                vdNow.structure,
+                vdNow.dxyResult.signal);
+            log("[VOTE-POST-BS] " + freshVote.reason);
+            vdNow.dirVote = freshVote;
+        }
+
+        // ── Gate vote board (côté BS) — DS gate prioritaire ─────
+        {
+            const DirectionVote& dv    = vdNow.dirVote;
+            const DeepSeekSignal& dsSig = vdNow.dsSignal;
+            bool dsGateBuy  = (dsSig.fresh && dsSig.effectiveConfidence >= 60.0
+                               && dsSig.signal == DSSignal::BUY_BIAS);
+            bool dsGateSell = (dsSig.fresh && dsSig.effectiveConfidence >= 60.0
+                               && dsSig.signal == DSSignal::SELL_BIAS);
+
+            if (dv.ssOnly && vdNow.allowBSRecovery && !dsGateBuy) {
+                vdNow.allowBSRecovery = false;
+                vdNow.bsBlockReason   = "[BS:VOTE-GATE -SELL vote="
+                    + std::to_string(dv.score) + " " + dv.reason + "]";
+                log("[RECOVERY] BS bloqué vote board — vote=" + std::to_string(dv.score));
+            } else if (dv.ssOnly && dsGateBuy) {
+                log("[RECOVERY] Vote ssOnly ignoré côté BS — DS BUY hard gate ("
+                    + std::to_string((int)dsSig.effectiveConfidence) + "%)");
+            }
+
+            if (dv.bsOnly && vdNow.allowSSRecovery && !dsGateSell) {
+                vdNow.allowSSRecovery = false;
+                vdNow.ssBlockReason   = "[SS:VOTE-GATE +BUY vote="
+                    + std::to_string(dv.score) + " " + dv.reason + "]";
+                log("[RECOVERY] SS bloqué vote board (côté BS) — vote=" + std::to_string(dv.score));
+            } else if (dv.bsOnly && dsGateSell) {
+                log("[RECOVERY] Vote bsOnly ignoré côté BS — DS SELL hard gate ("
+                    + std::to_string((int)dsSig.effectiveConfidence) + "%)");
+            }
         }
 
         if (!vdNow.allowRecovery || !vdNow.allowBSRecovery) {
@@ -1144,8 +1250,160 @@ void TOP4EA_Engine::trailGrid() {
     std::string ssComment = (ssR > 0) ? "SS_R" + std::to_string(ssR) : "SS_GRID";
     std::string bsComment = (bsR > 0) ? "BS_R" + std::to_string(bsR) : "BS_GRID";
 
-    ensureSellStop(ssLot, ssComment, ssR, ssGapFactor, trailFrozen);
-    ensureBuyStop (bsLot, bsComment, bsR, bsGapFactor, trailFrozen);
+    // ── Direction Vote Board — placement momentum-directionnel ──
+    // Vote ≤ -2 (SELL confirmé) → ne placer QUE le SS, supprimer BS si pending.
+    // Vote ≥ +2 (BUY confirmé)  → ne placer QUE le BS, supprimer SS si pending.
+    // En mode directionnel, le stop actif est ancré sur le HIGH ou LOW récent M1.
+    {
+        VisualDecision latestVD2 = marketIntel_->getLastDecision();
+        const DirectionVote& dv = latestVD2.dirVote;
+
+        // ── Helpers : annuler pending stops (directional cleanup) ───────────
+        auto cancelPendingBS_vote = [&]() {
+            int tkt = bsTicket_.load();
+            if (tkt > 0) {
+                auto res = bridge_->sendCommand(makeDelete(tkt));
+                if (res.success) {
+                    bsTicket_.store(-1); bsLevel_.store(0.0);
+                    log("[VOTE-TRAIL] BS annulé (SELL-only) ticket=" + std::to_string(tkt));
+                }
+            }
+        };
+        auto cancelPendingSS_vote = [&]() {
+            int tkt = ssTicket_.load();
+            if (tkt > 0) {
+                auto res = bridge_->sendCommand(makeDelete(tkt));
+                if (res.success) {
+                    ssTicket_.store(-1); ssLevel_.store(0.0);
+                    log("[VOTE-TRAIL] SS annulé (BUY-only) ticket=" + std::to_string(tkt));
+                }
+            }
+        };
+
+        // ── Helpers : ancrage direct à un prix (bypass gapFactor/computeXxxStop) ──
+        // VRAI ancrage prix : on crée/modifie le stop directement au niveau désiré.
+        // Retourne true si placé, false si pas encore valide (fallback au calcul normal).
+        auto placeSSAtPrice = [&](double targetPrice, const std::string& cmt) -> bool {
+            double minDist = grid_->minDistPts();
+            if ((grid_->bid() - targetPrice) < minDist) return false;
+            targetPrice = math::normalize(targetPrice, cfg_.digits);
+            int ssTkt = ssTicket_.load();
+            if (ssTkt > 0) {
+                if (std::abs(targetPrice - ssLevel_.load()) > cfg_.point) {
+                    TradeCmd cmd;
+                    cmd.op = TradeCmd::Op::ModifyOrder;
+                    cmd.ticket = ssTkt;
+                    cmd.price  = targetPrice;
+                    cmd.sl = 0.0; cmd.tp = 0.0;
+                    auto res = bridge_->sendCommand(cmd);
+                    if (res.success) {
+                        ssLevel_.store(targetPrice);
+                        log("[VOTE-TRAIL] SS modifié ANC @ " + std::to_string(targetPrice)
+                            + " [" + cmt + "]");
+                    }
+                }
+                return true;
+            }
+            TradeCmd cmd = makeSellStop(ssLot, targetPrice, cmt);
+            auto res = bridge_->sendCommand(cmd);
+            if (res.success) {
+                ssTicket_.store(res.ticket);
+                ssLevel_.store(targetPrice);
+                ssCreatedAt_ = Clock::now();
+                log("[VOTE-TRAIL] SS créé ANC @ " + std::to_string(targetPrice)
+                    + " [" + cmt + "]");
+                return true;
+            }
+            return false;
+        };
+        auto placeBSAtPrice = [&](double targetPrice, const std::string& cmt) -> bool {
+            double minDist = grid_->minDistPts();
+            if ((targetPrice - grid_->ask()) < minDist) return false;
+            targetPrice = math::normalize(targetPrice, cfg_.digits);
+            int bsTkt = bsTicket_.load();
+            if (bsTkt > 0) {
+                if (std::abs(targetPrice - bsLevel_.load()) > cfg_.point) {
+                    TradeCmd cmd;
+                    cmd.op = TradeCmd::Op::ModifyOrder;
+                    cmd.ticket = bsTkt;
+                    cmd.price  = targetPrice;
+                    cmd.sl = 0.0; cmd.tp = 0.0;
+                    auto res = bridge_->sendCommand(cmd);
+                    if (res.success) {
+                        bsLevel_.store(targetPrice);
+                        log("[VOTE-TRAIL] BS modifié ANC @ " + std::to_string(targetPrice)
+                            + " [" + cmt + "]");
+                    }
+                }
+                return true;
+            }
+            TradeCmd cmd = makeBuyStop(bsLot, targetPrice, cmt);
+            auto res = bridge_->sendCommand(cmd);
+            if (res.success) {
+                bsTicket_.store(res.ticket);
+                bsLevel_.store(targetPrice);
+                bsCreatedAt_ = Clock::now();
+                log("[VOTE-TRAIL] BS créé ANC @ " + std::to_string(targetPrice)
+                    + " [" + cmt + "]");
+                return true;
+            }
+            return false;
+        };
+
+        if (dv.ssOnly) {
+            // ── SELL-only : ancré directement au HIGH récent M1 - minDist ──
+            // Principe : le SS se positionne JUSTE sous le HIGH des 5 dernières
+            // bougies M1 (niveau de résistance). Quand le marché "sell the rally",
+            // le SS déclenche dès le retour sous ce plafond.
+            // Vrai prix transmis à la cci broker — pas de calcul gapFactor.
+            cancelPendingBS_vote();
+            double anchor = marketIntel_->recentHigh(5);
+            double targetSS = (anchor > 0.0)
+                              ? (anchor - grid_->minDistPts())
+                              : 0.0;
+            bool anchored = (targetSS > 0.0) &&
+                            placeSSAtPrice(targetSS,
+                                ssComment + "_ANC v=" + std::to_string(dv.score));
+            if (!anchored)
+                ensureSellStop(ssLot, ssComment, ssR, ssGapFactor, trailFrozen);
+            static int lastSellOnlyScore = 999;
+            if (dv.score != lastSellOnlyScore) {
+                log("[VOTE-TRAIL] SELL-only vote=" + std::to_string(dv.score)
+                    + " anc=" + (anchor > 0.0 ? std::to_string(anchor) : "N/A")
+                    + (anchored ? " [ANC-OK]" : " [fallback]")
+                    + " | DXY:" + DXYResult::name(latestVD2.dxyResult.signal)
+                    + " | " + dv.reason);
+                lastSellOnlyScore = dv.score;
+            }
+        } else if (dv.bsOnly) {
+            // ── BUY-only : ancré directement au LOW récent M1 + minDist ──
+            // Le BS se place JUSTE au-dessus du LOW des 5 dernières M1 (support).
+            // Quand le marché "buy the dip" rebondit sur le creux, le BS déclenche.
+            cancelPendingSS_vote();
+            double anchor = marketIntel_->recentLow(5);
+            double targetBS = (anchor > 0.0)
+                              ? (anchor + grid_->minDistPts())
+                              : 0.0;
+            bool anchored = (targetBS > 0.0) &&
+                            placeBSAtPrice(targetBS,
+                                bsComment + "_ANC v=" + std::to_string(dv.score));
+            if (!anchored)
+                ensureBuyStop(bsLot, bsComment, bsR, bsGapFactor, trailFrozen);
+            static int lastBuyOnlyScore = 999;
+            if (dv.score != lastBuyOnlyScore) {
+                log("[VOTE-TRAIL] BUY-only vote=" + std::to_string(dv.score)
+                    + " anc=" + (anchor > 0.0 ? std::to_string(anchor) : "N/A")
+                    + (anchored ? " [ANC-OK]" : " [fallback]")
+                    + " | DXY:" + DXYResult::name(latestVD2.dxyResult.signal)
+                    + " | " + dv.reason);
+                lastBuyOnlyScore = dv.score;
+            }
+        } else {
+            // ── Mode symétrique standard ─────────────────────────
+            ensureSellStop(ssLot, ssComment, ssR, ssGapFactor, trailFrozen);
+            ensureBuyStop (bsLot, bsComment, bsR, bsGapFactor, trailFrozen);
+        }
+    }
 }
 
 void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
@@ -2776,6 +3034,24 @@ std::string TOP4EA_Engine::dashboard() const {
             << "  BS×" << effBS
             << "  [clamp 0.40–4.0]\n";
 
+        oss << std::setprecision(2);
+
+        // ─── [6] Direction Vote Board [-5, +5] ─────────────────
+        {
+            const DirectionVote& dv = latestVD.dirVote;
+            const char* modeStr = dv.ssOnly ? "SELL-ONLY ▼"
+                                : dv.bsOnly ? "BUY-ONLY  ▲"
+                                : "SYMÉTRIQUE ↔";
+            oss << "╠══════════ VOTE DIRECTIONNEL ════════╣\n";
+            oss << "║  Score  : " << (dv.score >= 0 ? "+" : "")
+                << dv.score << "/5  [" << modeStr << "]\n";
+            oss << "║  DXY    : " << DXYResult::name(latestVD.dxyResult.signal)
+                << "  force=" << std::setprecision(0) << latestVD.dxyResult.strength << "%\n";
+            // Tronquer le reason au dernier token (score=N)
+            std::string rv = dv.reason;
+            if (rv.size() > 55) rv = rv.substr(0, 52) + "...";
+            if (!rv.empty()) oss << "║  " << rv << "\n";
+        }
         oss << std::setprecision(2);
     }
     // ─── Panneau VISUAL AI + SOUS-AGENTS ─────────────────────

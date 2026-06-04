@@ -631,4 +631,120 @@ const char* IntelligenceEngine::regimeName(Regime r) noexcept {
     }
 }
 
+// ────────────────────────────────────────────────────────────
+//  computeDirectionVote — vote board directionnel [-5, +5]
+//  Agrège 4 sources indépendantes en un score entier :
+//    (1) Delta lots portfolio     : ±2
+//    (2) Signal DeepSeek effectif : ±2
+//    (3) Structure marché         : ±1
+//    (4) Signal DXY proxy         : ±1
+//  Seuils décision :
+//    score ≤ -2 → SS-only (direction SELL confirmée)
+//    score ≥ +2 → BS-only (direction BUY confirmée)
+//    [-2, +2]   → grille symétrique standard
+// ────────────────────────────────────────────────────────────
+DirectionVote computeDirectionVote(
+    double          buyLots,
+    double          sellLots,
+    double          totalLots,
+    DSSignal        dsSignal,
+    double          dsEffectiveConf,
+    MarketStructure structure,
+    DXYSignal       dxySignal) noexcept
+{
+    DirectionVote vote;
+    std::string r;
+
+    // ── (1) Delta lots — poids ±2 — protection hedge ─────────
+    // Logique de protection : si ≥70% des lots sont côté BUY (buy-heavy),
+    // le portefeuille est SUREXPOSÉ aux BUY → on BLOQUE les nouvelles BUY (BS)
+    // et on favorise SS (SELL) pour hedger/protéger. Score négatif = SS-only.
+    // Inverse pour sell-heavy → score positif = BS-only (hedge SELL).
+    if (totalLots > 1e-6) {
+        double bsPct  = buyLots  / totalLots;  // fraction lots BUY
+        double ssPct  = sellLots / totalLots;  // fraction lots SELL
+        if (bsPct >= 0.70) {
+            // Surexposé BUY → favoriser SELL (hedge), bloquer nouvelles BUY
+            vote.score -= 2;
+            r += "delta=" + std::to_string((int)(bsPct * 100)) + "%buy-heavy(-2:hedge) ";
+        } else if (bsPct >= 0.55) {
+            vote.score -= 1;
+            r += "delta=" + std::to_string((int)(bsPct * 100)) + "%buy-heavy(-1) ";
+        } else if (ssPct >= 0.70) {
+            // Surexposé SELL → favoriser BUY (hedge), bloquer nouvelles SELL
+            vote.score += 2;
+            r += "delta=" + std::to_string((int)(ssPct * 100)) + "%sell-heavy(+2:hedge) ";
+        } else if (ssPct >= 0.55) {
+            vote.score += 1;
+            r += "delta=" + std::to_string((int)(ssPct * 100)) + "%sell-heavy(+1) ";
+        } else {
+            r += "delta=balanced ";
+        }
+    } else {
+        r += "delta=none ";
+    }
+
+    // ── (2) DeepSeek signal — poids ±2 ───────────────────────
+    // ≥60% confiance effective → ±2, ≥40% → ±1
+    if (dsSignal == DSSignal::BUY_BIAS && dsEffectiveConf >= 60.0) {
+        vote.score += 2;
+        r += "DS:BUY(" + std::to_string((int)dsEffectiveConf) + "%)(+2) ";
+    } else if (dsSignal == DSSignal::BUY_BIAS && dsEffectiveConf >= 40.0) {
+        vote.score += 1;
+        r += "DS:BUY(" + std::to_string((int)dsEffectiveConf) + "%)(+1) ";
+    } else if (dsSignal == DSSignal::SELL_BIAS && dsEffectiveConf >= 60.0) {
+        vote.score -= 2;
+        r += "DS:SELL(" + std::to_string((int)dsEffectiveConf) + "%)(-2) ";
+    } else if (dsSignal == DSSignal::SELL_BIAS && dsEffectiveConf >= 40.0) {
+        vote.score -= 1;
+        r += "DS:SELL(" + std::to_string((int)dsEffectiveConf) + "%)(-1) ";
+    } else {
+        r += "DS:neut ";
+    }
+
+    // ── (3) Structure marché — poids ±1 ──────────────────────
+    switch (structure) {
+        case MarketStructure::BULLISH_TREND:
+        case MarketStructure::BREAKOUT_UP:
+            vote.score += 1;
+            r += "struct:BULL(+1) ";
+            break;
+        case MarketStructure::BEARISH_TREND:
+        case MarketStructure::BREAKOUT_DOWN:
+            vote.score -= 1;
+            r += "struct:BEAR(-1) ";
+            break;
+        default:
+            r += "struct:neut ";
+            break;
+    }
+
+    // ── (4) Signal DXY proxy (corrélation inverse XAU) ────────
+    // DXY BULL (dollar fort) → XAU structurellement baissier → -1
+    // DXY BEAR (dollar faible) → XAU structurellement haussier → +1
+    switch (dxySignal) {
+        case DXYSignal::BULL:
+            vote.score -= 1;
+            r += "DXY:BULL(-1) ";
+            break;
+        case DXYSignal::BEAR:
+            vote.score += 1;
+            r += "DXY:BEAR(+1) ";
+            break;
+        default:
+            r += "DXY:neut ";
+            break;
+    }
+
+    // ── Clamp et décision ─────────────────────────────────────
+    if (vote.score < -5) vote.score = -5;
+    if (vote.score >  5) vote.score =  5;
+
+    vote.ssOnly = (vote.score <= -2);
+    vote.bsOnly = (vote.score >= +2);
+    vote.reason = r + "→score=" + std::to_string(vote.score);
+
+    return vote;
+}
+
 } // namespace top4ea

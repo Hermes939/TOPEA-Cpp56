@@ -456,6 +456,119 @@ std::tuple<double,double,double> MarketIntelligence::computeBB(
 }
 
 // ============================================================
+//  computeEMABars — EMA(period) des closes d'une deque de barres
+// ============================================================
+double MarketIntelligence::computeEMABars(
+    const std::deque<Bar>& bars, int period) const noexcept
+{
+    int n = (int)bars.size();
+    if (n < period || period <= 0) return 0.0;
+    double alpha = 2.0 / (period + 1.0);
+    // Initialise sur SMA des n premières barres
+    double e = 0.0;
+    int start = n - period;
+    // Utilise les period dernières barres pour initialiser la SMA
+    for (int i = start; i < start + period && i < n; ++i) e += bars[i].close;
+    e /= period;
+    // Puis applique EMA sur le reste
+    for (int i = start + period; i < n; ++i)
+        e = alpha * bars[i].close + (1.0 - alpha) * e;
+    return e;
+}
+
+// ============================================================
+//  computeADX — ADX(period) Wilder depuis barres
+// ============================================================
+double MarketIntelligence::computeADX(
+    const std::deque<Bar>& bars, int period) const noexcept
+{
+    int n = (int)bars.size();
+    if (n < period * 2 + 2) return 20.0;
+
+    std::vector<double> trVec, pdmVec, ndmVec;
+    trVec.reserve(n - 1);
+    pdmVec.reserve(n - 1);
+    ndmVec.reserve(n - 1);
+
+    for (int i = 1; i < n; ++i) {
+        const Bar& cur  = bars[i];
+        const Bar& prev = bars[i - 1];
+        double tr  = std::max({ cur.high - cur.low,
+                                std::abs(cur.high - prev.close),
+                                std::abs(cur.low  - prev.close) });
+        double upMove   = cur.high - prev.high;
+        double downMove = prev.low  - cur.low;
+        double pdm = (upMove > downMove && upMove > 0.0) ? upMove : 0.0;
+        double ndm = (downMove > upMove && downMove > 0.0) ? downMove : 0.0;
+        trVec.push_back(tr);
+        pdmVec.push_back(pdm);
+        ndmVec.push_back(ndm);
+    }
+
+    int m = (int)trVec.size();
+    if (m < period + 1) return 20.0;
+
+    // Wilder smoothing initial = SMA(period)
+    double trSmooth = 0.0, pdmSmooth = 0.0, ndmSmooth = 0.0;
+    for (int i = 0; i < period; ++i) {
+        trSmooth  += trVec[i];
+        pdmSmooth += pdmVec[i];
+        ndmSmooth += ndmVec[i];
+    }
+
+    std::vector<double> dxVec;
+    for (int i = period; i < m; ++i) {
+        trSmooth  = trSmooth  - (trSmooth  / period) + trVec[i];
+        pdmSmooth = pdmSmooth - (pdmSmooth / period) + pdmVec[i];
+        ndmSmooth = ndmSmooth - (ndmSmooth / period) + ndmVec[i];
+        double pdi = (trSmooth > 1e-10) ? 100.0 * pdmSmooth / trSmooth : 0.0;
+        double ndi = (trSmooth > 1e-10) ? 100.0 * ndmSmooth / trSmooth : 0.0;
+        double sum = pdi + ndi;
+        double dx  = (sum > 1e-10) ? 100.0 * std::abs(pdi - ndi) / sum : 0.0;
+        dxVec.push_back(dx);
+    }
+
+    if ((int)dxVec.size() < period) return 20.0;
+    double adx = 0.0;
+    for (int i = 0; i < period; ++i) adx += dxVec[i];
+    adx /= period;
+    for (int i = period; i < (int)dxVec.size(); ++i)
+        adx = (adx * (period - 1) + dxVec[i]) / period;
+    return adx;
+}
+
+// ============================================================
+//  recentHigh / recentLow — anchor directionnel M1
+// ============================================================
+double MarketIntelligence::recentHigh(int nBars) const noexcept {
+    std::deque<Bar> bM1;
+    Bar cM1;
+    { std::lock_guard lk(mu_); bM1 = m1Bars_; cM1 = curM1_; }
+    if (cM1.ticks > 0) bM1.push_back(cM1);
+    if (bM1.empty()) return 0.0;
+    int n = (int)bM1.size();
+    int from = std::max(0, n - nBars);
+    double h = 0.0;
+    for (int i = from; i < n; ++i)
+        if (bM1[i].high > h) h = bM1[i].high;
+    return h;
+}
+
+double MarketIntelligence::recentLow(int nBars) const noexcept {
+    std::deque<Bar> bM1;
+    Bar cM1;
+    { std::lock_guard lk(mu_); bM1 = m1Bars_; cM1 = curM1_; }
+    if (cM1.ticks > 0) bM1.push_back(cM1);
+    if (bM1.empty()) return 0.0;
+    int n = (int)bM1.size();
+    int from = std::max(0, n - nBars);
+    double l = 1e9;
+    for (int i = from; i < n; ++i)
+        if (bM1[i].low < l) l = bM1[i].low;
+    return (l < 1e9) ? l : 0.0;
+}
+
+// ============================================================
 //  computeIndicators — assemble IndiSet pour un TF
 // ============================================================
 IndiSet MarketIntelligence::computeIndicators(
@@ -483,6 +596,13 @@ IndiSet MarketIntelligence::computeIndicators(
         double c10 = bars[n-11].close;
         s.momentum = (c10 > 0.0) ? (c0 - c10) / c10 : 0.0;
     }
+
+    // ADX(14) Wilder — force de tendance
+    s.adx = computeADX(bars, 14);
+
+    // EMA20 / EMA50 — direction structurelle
+    s.ema20 = computeEMABars(bars, 20);
+    s.ema50 = computeEMABars(bars, 50);
 
     return s;
 }
@@ -762,6 +882,26 @@ VisualDecision MarketIntelligence::computeDecision(
     if (rsiOk) { rScore += 15.0; rReason += "F5:✓RSI  "; }
     else       {                  rReason += "F5:✗RSI  "; }
 
+    // ── F6 BONUS (+15) RSI M1 neutre + ADX M5 trending + EMA direction confirmée ──
+    // "Impulsion momentum" : marché prêt à exploser dans une direction confirmée.
+    // RSI M1 en zone neutre [45–55] = pression équilibrée, prête à se libérer.
+    // ADX M5 > 20 = tendance existante (pas un range compressé).
+    // EMA M5 directionnelle = structure à moyen terme confirmée.
+    bool impulseNeutral = m1.rsiNeutral();
+    bool impulseADX     = m5.adxTrending();
+    bool impulseEMA     = m5.emaBullish() || m5.emaBearish();
+    if (impulseNeutral && impulseADX && impulseEMA) {
+        rScore += 15.0;
+        rReason += "F6:✓impulse(RSI1m_neut+ADX5>20+EMA) ";
+        // Si la décision actuelle est TRAIL_NATURAL ou OBSERVE → passer à TRAIL_AGGRESSIVE
+        // (le marché est positionné pour une impulsion directionnelle)
+        if (vd.decision == MarketDecision::TRAIL_NATURAL ||
+            vd.decision == MarketDecision::OBSERVE) {
+            vd.decision  = MarketDecision::TRAIL_AGGRESSIVE;
+            vd.reasoning += " [IMPULSE-AGRESSIVE: RSI1m≈50 ADX>" + std::to_string((int)m5.adx) + "]";
+        }
+    }
+
     // Seuil adaptatif : si panier profondément chargé (≥4 ordres ouverts),
     // rehausser le seuil pour éviter de sur-empiler les positions recovery
     double threshold = (openOrders >= 4) ? 70.0 : 55.0;
@@ -927,41 +1067,51 @@ VisualDecision MarketIntelligence::analyze() const {
         }
     }
 
-    // ── Bloc directionnel recovery (CRITIQUE) ────────────────
-    // Calcul des flags allowBSRecovery / allowSSRecovery
-    // en combinant : balance de lots, signal DeepSeek, structure, RSI.
-    //
-    // Règle centrale : ne pas ajouter d'ordres recovery dans la direction
-    // qui va à l'encontre de la tendance ET qui est déjà surexposée.
-    //
-    // FIX : DS ≥ 70% peut contrebalancer la structure seule et débloquer
-    // la recovery dans SA direction (évite le blocage mutuel).
-    // ──────────────────────────────────────────────────────────
-    {
+    // ── [F] Gate DeepSeek direct (HARD GATE ≥60% effectif) ──────
+    // Gate symétrique : bloque UN côté ET force-autorise l'AUTRE sans condition.
+    //   SELL_BIAS ≥60% → allowBSRecovery=false  ET  allowSSRecovery=true  (force)
+    //   BUY_BIAS  ≥60% → allowSSRecovery=false  ET  allowBSRecovery=true  (force)
+    // Le gate est le plus prioritaire : le bloc directionnel ci-dessous ne peut pas
+    // le révoquer (flags dsGateSellActive / dsGateBuyActive protègent le résultat).
+    bool dsGateSellActive = false;
+    bool dsGateBuyActive  = false;
+    if (ds.fresh && ds.effectiveConfidence >= 60.0) {
+        if (ds.signal == DSSignal::SELL_BIAS) {
+            vd.allowBSRecovery = false;
+            vd.bsBlockReason   = "[BS:DS-GATE SELL_BIAS "
+                               + std::to_string((int)ds.effectiveConfidence) + "% ≥60%]";
+            vd.allowSSRecovery = true;   // force-allow SS (direction alignée DS)
+            vd.ssBlockReason.clear();
+            dsGateSellActive = true;
+        } else if (ds.signal == DSSignal::BUY_BIAS) {
+            vd.allowSSRecovery = false;
+            vd.ssBlockReason   = "[SS:DS-GATE BUY_BIAS "
+                               + std::to_string((int)ds.effectiveConfidence) + "% ≥60%]";
+            vd.allowBSRecovery = true;   // force-allow BS (direction alignée DS)
+            vd.bsBlockReason.clear();
+            dsGateBuyActive = true;
+        }
+    }
+
+    // ── [G] Module DXY Analyzer (proxy inversé XAU M30/M15) ─
+    vd.dxyResult = DXYAnalyzer::compute(bM30, bM15);
+
+    // ── Bloc directionnel recovery (structure + RSI + lot overexposure) ──────
+    // Calcul des flags allowBSRecovery / allowSSRecovery depuis :
+    //   structure, RSI extrême, lots overexposés.
+    // NEUTRALISÉ si DS hard gate actif (gate est prioritaire et singulier).
+    if (!dsGateSellActive && !dsGateBuyActive) {
         DeepSeekSignal ds2 = deepseek_.getLastSignal();
         double netDelta = bsLotsCached - ssLotsCached;
 
-        // DS contrebalance la structure quand sa confiance effective est forte (≥70%)
-        // → La structure seule ne suffit plus à bloquer dans la direction DS
-        bool dsCounterBearStruct = (ds2.fresh && ds2.signal == DSSignal::BUY_BIAS
-                                    && ds2.effectiveConfidence >= 70.0);
-        bool dsCounterBullStruct = (ds2.fresh && ds2.signal == DSSignal::SELL_BIAS
-                                    && ds2.effectiveConfidence >= 70.0);
-
         // ── Critères qui bloquent BS recovery (BUY Stop) ─────
-        // BS = position haussière → bloquer si marché baissier
-        // Si DS dit BUY_BIAS ≥ 70% effectif, la structure BEARISH ne bloque plus BS
-        bool bsBearStruct    = (st == MarketStructure::BEARISH_TREND)
-                               && !dsCounterBearStruct;
+        bool bsBearStruct    = (st == MarketStructure::BEARISH_TREND);
         bool bsRsiOverbought = (indM5.rsi >= 75.0 && indM30.rsi >= 65.0);
         bool bsDsConfirm     = (ds2.fresh && ds2.signal == DSSignal::SELL_BIAS
                                 && ds2.effectiveConfidence >= 55.0);
         bool bsOverexposed   = (netDelta > 0.10);
 
-        // En mode normal (hors recovery), critère 1 suffit (prudence maximale)
-        // En recovery, on exige 2 signaux pour éviter de bloquer inutilement
         int bsThreshold = inRecoveryCached ? 2 : 1;
-
         int bsBearScore = (int)bsBearStruct + (int)bsRsiOverbought
                         + (int)bsDsConfirm + (int)bsOverexposed;
         if (bsBearScore >= bsThreshold) {
@@ -975,22 +1125,9 @@ VisualDecision MarketIntelligence::analyze() const {
                                  + std::to_string((int)(netDelta * 100)) + "clots";
             vd.bsBlockReason += "]";
         }
-        // DS BUY_BIAS fort → forcer l'autorisation BS même si bloqué ci-dessus
-        if (dsCounterBearStruct && !vd.allowBSRecovery) {
-            // DS contredit la structure, mais d'autres critères bloquent encore
-            // → autoriser uniquement si DS est fort et pas en RSI extrême
-            if (!bsRsiOverbought) {
-                vd.allowBSRecovery = true;
-                vd.bsBlockReason   = "[BS:DS-OVERRIDE BUY("
-                                   + std::to_string((int)ds2.confidence) + "%)]";
-            }
-        }
 
         // ── Critères qui bloquent SS recovery (SELL Stop) ────
-        // SS = position baissière → bloquer si marché haussier
-        // Si DS dit SELL_BIAS ≥ 70% effectif, la structure BULLISH ne bloque plus SS
-        bool ssBullStruct   = (st == MarketStructure::BULLISH_TREND)
-                              && !dsCounterBullStruct;
+        bool ssBullStruct   = (st == MarketStructure::BULLISH_TREND);
         bool ssRsiOversold  = (indM5.rsi <= 25.0 && indM30.rsi <= 35.0);
         bool ssDsConfirm    = (ds2.fresh && ds2.signal == DSSignal::BUY_BIAS
                                && ds2.effectiveConfidence >= 55.0);
@@ -1010,20 +1147,49 @@ VisualDecision MarketIntelligence::analyze() const {
                                 + std::to_string((int)(netDelta * 100)) + "clots";
             vd.ssBlockReason += "]";
         }
-        // DS SELL_BIAS fort → forcer l'autorisation SS même si bloqué ci-dessus
-        if (dsCounterBullStruct && !vd.allowSSRecovery) {
-            if (!ssRsiOversold) {
-                vd.allowSSRecovery = true;
-                vd.ssBlockReason   = "[SS:DS-OVERRIDE SELL("
-                                   + std::to_string((int)ds2.confidence) + "%)]";
-            }
-        }
 
         // allowRecovery = true seulement si AU MOINS une direction est libre
         if (!vd.allowBSRecovery && !vd.allowSSRecovery) {
             vd.allowRecovery = false;
             vd.recoveryReason += " | Tous les sens bloqués directionnellement";
         }
+    } else {
+        // DS gate actif — re-enforce le résultat du gate (bloc directionnel sauté).
+        // Force également allowRecovery=true pour la direction alignée DS,
+        // sauf si une sécurité hard bloque le trading (NO_TRADE / STOP_ORDERS / session fermée).
+        bool hardSafetyActive = (vd.decision == MarketDecision::NO_TRADE ||
+                                 vd.decision == MarketDecision::STOP_ORDERS ||
+                                 vd.session  == TradingSession::CLOSED);
+        if (dsGateSellActive) {
+            vd.allowBSRecovery = false;
+            vd.allowSSRecovery = true;
+            vd.ssBlockReason.clear();
+            if (!hardSafetyActive)
+                vd.allowRecovery = true;   // DS gate prime sur le score de recovery
+        } else {
+            vd.allowSSRecovery = false;
+            vd.allowBSRecovery = true;
+            vd.bsBlockReason.clear();
+            if (!hardSafetyActive)
+                vd.allowRecovery = true;   // DS gate prime sur le score de recovery
+        }
+    }
+
+    // ── [H] Direction Vote Board [-5, +5] ─────────────────────
+    // Consolide : delta lots + DeepSeek + structure + DXY
+    // Stocké dans vd.dirVote pour le dashboard, detectGeometricTriggers et trailGrid.
+    {
+        DeepSeekSignal ds3 = deepseek_.getLastSignal();
+        double totalLots = bsLotsCached + ssLotsCached;
+        vd.dirVote = computeDirectionVote(
+            bsLotsCached,           // buyLots (BS = BUY side lots)
+            ssLotsCached,           // sellLots (SS = SELL side lots)
+            totalLots,
+            ds3.signal,
+            ds3.effectiveConfidence,
+            st,
+            vd.dxyResult.signal
+        );
     }
 
     return vd;

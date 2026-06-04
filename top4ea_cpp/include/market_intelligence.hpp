@@ -21,6 +21,8 @@
 // ============================================================
 #include "types.hpp"
 #include "deepseek_vision.hpp"
+#include "dxy_analyzer.hpp"
+#include "intelligence_engine.hpp"
 #include <deque>
 #include <mutex>
 #include <string>
@@ -62,6 +64,9 @@ struct IndiSet {
     double bbLower    = 0.0;   // Bollinger inférieur
     double bbWidth    = 0.0;   // (bbUpper - bbLower) / bbMid  en %
     double momentum   = 0.0;   // (close - close[10]) / close[10]
+    double adx        = 20.0;  // ADX(14) [0–100] — force tendance
+    double ema20      = 0.0;   // EMA(20) close
+    double ema50      = 0.0;   // EMA(50) close
     int    barCount   = 0;     // nombre de barres disponibles
 
     [[nodiscard]] bool  ready()          const noexcept { return barCount >= 14; }
@@ -69,6 +74,10 @@ struct IndiSet {
     [[nodiscard]] bool  rsiOversold()    const noexcept { return rsi <= 15.0;    }
     [[nodiscard]] bool  macdBullish()    const noexcept { return macdHist > 0.0; }
     [[nodiscard]] bool  bbNarrow()       const noexcept { return bbWidth < 0.003;}// < 0.3%
+    [[nodiscard]] bool  rsiNeutral()     const noexcept { return rsi >= 45.0 && rsi <= 55.0; }
+    [[nodiscard]] bool  adxTrending()    const noexcept { return adx > 20.0;     }
+    [[nodiscard]] bool  emaBullish()     const noexcept { return ema20 > ema50 && ema20 > 0.0 && ema50 > 0.0; }
+    [[nodiscard]] bool  emaBearish()     const noexcept { return ema20 < ema50 && ema20 > 0.0 && ema50 > 0.0; }
 };
 
 // ============================================================
@@ -110,6 +119,14 @@ struct VisualDecision {
     // < 1.0 = serrer ce côté (trigger plus tôt), > 1.0 = élargir (protection)
     double dsTrailSSBias = 1.0;
     double dsTrailBSBias = 1.0;
+
+    // ── Module DXY (proxy inversé XAU) ───────────────────────
+    DXYResult       dxyResult;             // analyse DXY courante
+
+    // ── Direction Vote Board [-5, +5] ─────────────────────────
+    // Consolide : delta lots (±2) + DeepSeek (±2) + structure (±1) + DXY (±1)
+    // Exposé pour le dashboard et utilisé dans detectGeometricTriggers / trailGrid
+    DirectionVote   dirVote;               // résultat vote board
 };
 
 // ============================================================
@@ -158,6 +175,12 @@ public:
             deepseek_.resetSignal();
     }
 
+    // ─── Anchor directionnels M1 (utilisés par trailGrid) ────
+    // Retourne le HIGH max ou LOW min des dernières nBars barres M1
+    // (pour le placement SS au HIGH / BS au LOW en mode directionnel)
+    [[nodiscard]] double recentHigh(int nBars = 5) const noexcept;
+    [[nodiscard]] double recentLow (int nBars = 5) const noexcept;
+
     // ─── Timeout absolu anti-biais statique (depuis conf) ────
     void dsSetStaleHardSec(int sec) noexcept { deepseek_.setStaleHardSec(sec); }
 
@@ -190,6 +213,14 @@ private:
     // ── Calcul des indicateurs ────────────────────────────────
     [[nodiscard]] IndiSet computeIndicators(
         const std::deque<Bar>& bars) const noexcept;
+
+    // ── ADX(14) Wilder ────────────────────────────────────────
+    [[nodiscard]] double computeADX(
+        const std::deque<Bar>& bars, int period = 14) const noexcept;
+
+    // ── EMA rapide ────────────────────────────────────────────
+    [[nodiscard]] double computeEMABars(
+        const std::deque<Bar>& bars, int period) const noexcept;
 
     [[nodiscard]] double computeATR(
         const std::deque<Bar>& bars, int period = 14) const noexcept;

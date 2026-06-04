@@ -31,12 +31,38 @@
 #include "institutional_delta.hpp"
 #include "error_memory.hpp"
 #include "math_calibrator.hpp"
+#include "deepseek_vision.hpp"
+#include "dxy_analyzer.hpp"
 #include <string>
 #include <vector>
 #include <deque>
 #include <mutex>
 
 namespace top4ea {
+
+// ============================================================
+//  DirectionVote — résultat du vote board directionnel [-5,+5]
+//  Score < -2 → SELL-only (SS uniquement), > +2 → BUY-only (BS uniquement)
+//  [-2, +2]   → grille symétrique standard
+// ============================================================
+struct DirectionVote {
+    int         score   = 0;        // [-5, +5]
+    bool        ssOnly  = false;    // score ≤ -2 → ne placer que SS
+    bool        bsOnly  = false;    // score ≥ +2 → ne placer que BS
+    std::string reason;             // description lisible pour le log
+};
+
+// ─── Vote board directionnel (fonction utilitaire publique) ──
+// Agrège : delta lots (±2) + DeepSeek signal (±2) +
+//          structure/momentum (±1) + DXY proxy (±1) = [-5,+5]
+DirectionVote computeDirectionVote(
+    double       buyLots,
+    double       sellLots,
+    double       totalLots,
+    DSSignal     dsSignal,
+    double       dsEffectiveConf,
+    MarketStructure structure,
+    DXYSignal    dxySignal) noexcept;
 
 // ============================================================
 //  IntelligenceEngine
