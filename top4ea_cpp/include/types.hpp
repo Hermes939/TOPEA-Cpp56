@@ -294,6 +294,16 @@ struct Config {
     // est considéré périmé, indépendamment du TTL de 45s.
     // 0 = désactivé. Défaut : 300s (5 min).
     int         dsStaleHardSec  = 300;
+
+    // ─── Plafonds de sécurité recovery ───────────────────────
+    // maxLots          : plafond absolu de lots total du panier (0 = désactivé)
+    //                    Bloque tout nouveau stop si totalLots(orders) >= maxLots
+    //                    Sécurité anti-Martingale runaway indépendante du lot/niveau.
+    // maxRecoveryActive: nombre maximum de levels de recovery SIMULTANÉMENT actifs
+    //                    (0 = désactivé = identique à maxRecovery)
+    //                    Ex: maxRecovery=10 mais maxRecoveryActive=3 → au plus 3 niveaux actifs
+    double      maxLots             = 0.0;  // 0 = désactivé
+    int         maxRecoveryActive   = 0;    // 0 = désactivé
 };
 
 // ─── Résultat d'une opération de trading ────────────────────

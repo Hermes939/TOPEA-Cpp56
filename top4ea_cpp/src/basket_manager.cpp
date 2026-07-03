@@ -19,7 +19,8 @@ BasketMonitor::BasketMonitor(const Config& cfg)
 
 bool BasketMonitor::update(double currentPnL,
                            const std::vector<OrderInfo>& orders,
-                           int recoveryDepth) noexcept {
+                           int    recoveryDepth,
+                           double overrideTarget) noexcept {
     lastPnL_.store(currentPnL);
     orderCount_.store((int)orders.size());
     vel_.update(currentPnL);
@@ -30,6 +31,9 @@ bool BasketMonitor::update(double currentPnL,
     // position reouverte immédiatement dans un contexte dégradé.
     // Formule : target × (1 + max(0, depth - threshold) × bonus)
     //
+    // overrideTarget > 0 : remplace cfg_.basketTarget (mode dynamique par lots).
+    // Passe depuis effectiveTarget() dans processTick() pour centraliser la logique.
+    //
     // CORRECTION MATHÉMATIQUE :
     //   Ancien code : mult = min(mult, 2.0)  → plafond arbitraire à 2×
     //   Problème    : au recovery L5 (depth=5, threshold=5, extraLevels=0),
@@ -38,12 +42,13 @@ bool BasketMonitor::update(double currentPnL,
     //   Correction  : plafond porté à 8× pour rester cohérent avec l'exposition réelle.
     //                 Avec basket_target=$10 et mult max=8 : target max = $80
     //                 ce qui correspond à ~1 grid gap de mouvement favorable à plein lot.
-    double adjustedTarget = cfg_.basketTarget;
+    double baseTarget = (overrideTarget > 0.0) ? overrideTarget : cfg_.basketTarget;
+    double adjustedTarget = baseTarget;
     if (recoveryDepth > cfg_.basketRecoveryThreshold) {
         int extraLevels = recoveryDepth - cfg_.basketRecoveryThreshold;
         double mult = 1.0 + extraLevels * cfg_.basketRecoveryBonus;
         mult = std::min(mult, 8.0);  // plafond à 8× (était 2×) pour couvrir deep recovery
-        adjustedTarget = cfg_.basketTarget * mult;
+        adjustedTarget = baseTarget * mult;
     }
 
     // Fermeture immédiate si target contextualisé atteint

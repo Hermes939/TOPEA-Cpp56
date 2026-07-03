@@ -414,21 +414,28 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
             // Exécuté AVANT le target basket global pour capturer les profits intermédiaires
             // Wave1 (50% des positions) → Wave2 (30% du restant) → trail reliquat
             if (cfg_.waveEnabled && !basketClosing_.load()) {
+                // En mode dynamique (basketTarget==0), les seuils vague sont
+                // proportionnels au target effectif : wave1=35%, wave2=70%
+                double effTgt      = effectiveTarget(cached);
+                double useWave1    = (cfg_.basketTarget <= 0.0)
+                                     ? effTgt * 0.35 : cfg_.wave1Target;
+                double useWave2    = (cfg_.basketTarget <= 0.0)
+                                     ? effTgt * 0.70 : cfg_.wave2Target;
                 int ws = waveState_.load();
-                if (ws == 0 && cyclePnl >= cfg_.wave1Target) {
+                if (ws == 0 && cyclePnl >= useWave1) {
                     if (waveState_.compare_exchange_strong(ws, 1)) {
                         log(">>> WAVE1 cyclePnL=" + std::to_string(cyclePnl)
                             + " (réalisé=" + std::to_string(cycleRealizedPnL_)
                             + " flottant=" + std::to_string(pnl)
-                            + " target=" + std::to_string(cfg_.wave1Target) + ") — fermeture 50%");
+                            + " target=" + std::to_string(useWave1) + ") — fermeture 50%");
                         closeWavePartial(0);
                     }
-                } else if (ws == 1 && cyclePnl >= cfg_.wave2Target) {
+                } else if (ws == 1 && cyclePnl >= useWave2) {
                     if (waveState_.compare_exchange_strong(ws, 2)) {
                         log(">>> WAVE2 cyclePnL=" + std::to_string(cyclePnl)
                             + " (réalisé=" + std::to_string(cycleRealizedPnL_)
                             + " flottant=" + std::to_string(pnl)
-                            + " target=" + std::to_string(cfg_.wave2Target) + ") — fermeture 30%");
+                            + " target=" + std::to_string(useWave2) + ") — fermeture 30%");
                         closeWavePartial(1);
                     }
                 }
@@ -436,7 +443,8 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
 
             // ── Test target basket global (réalisé + flottant) ────
             int totalRecov = recovery_->sellCount() + recovery_->buyCount();
-            if (basketMon_->update(cyclePnl, cached, totalRecov)) {
+            double effTarget = effectiveTarget(cached);
+            if (basketMon_->update(cyclePnl, cached, totalRecov, effTarget)) {
                 if (!basketClosing_.exchange(true)) {
                     closingStart_ = Clock::now();
                     log(">>> BASKET TARGET ATTEINT cyclePnL=" + std::to_string(cyclePnl)
@@ -1150,7 +1158,8 @@ void TOP4EA_Engine::trailGrid() {
             // Gel zone TP fallback
             std::vector<OrderInfo> ord; { std::lock_guard lk2(ordersMu_); ord = orders_; }
             double pnl  = basketProfit(ord);
-            trailFrozen = (pnl >= cfg_.basketTarget * cfg_.trailFreezeZone && pnl > 0.0);
+            double freezeTgt = effectiveTarget(ord);
+            trailFrozen = (pnl >= freezeTgt * cfg_.trailFreezeZone && pnl > 0.0);
         }
     }
 
@@ -1304,6 +1313,25 @@ void TOP4EA_Engine::trailGrid() {
                 }
                 return true;
             }
+            // ── Gardes maxLots / maxRecoveryActive (création uniquement) ───
+            if (ssR > 0) {
+                if (cfg_.maxLots > 0.0) {
+                    std::vector<OrderInfo> gSnap;
+                    { std::lock_guard lk2(ordersMu_); gSnap = orders_; }
+                    if (totalLots(gSnap) >= cfg_.maxLots) {
+                        log("[GUARD] max_lots atteint — SS VOTE-ANC bloqué");
+                        return false;
+                    }
+                }
+                if (cfg_.maxRecoveryActive > 0) {
+                    int act = recovery_->sellCount() + recovery_->buyCount();
+                    if (act >= cfg_.maxRecoveryActive) {
+                        log("[GUARD] max_recovery_active atteint — SS VOTE-ANC bloqué"
+                            " actifs=" + std::to_string(act));
+                        return false;
+                    }
+                }
+            }
             TradeCmd cmd = makeSellStop(ssLot, targetPrice, cmt);
             auto res = bridge_->sendCommand(cmd);
             if (res.success) {
@@ -1336,6 +1364,25 @@ void TOP4EA_Engine::trailGrid() {
                     }
                 }
                 return true;
+            }
+            // ── Gardes maxLots / maxRecoveryActive (création uniquement) ───
+            if (bsR > 0) {
+                if (cfg_.maxLots > 0.0) {
+                    std::vector<OrderInfo> gSnap;
+                    { std::lock_guard lk2(ordersMu_); gSnap = orders_; }
+                    if (totalLots(gSnap) >= cfg_.maxLots) {
+                        log("[GUARD] max_lots atteint — BS VOTE-ANC bloqué");
+                        return false;
+                    }
+                }
+                if (cfg_.maxRecoveryActive > 0) {
+                    int act = recovery_->sellCount() + recovery_->buyCount();
+                    if (act >= cfg_.maxRecoveryActive) {
+                        log("[GUARD] max_recovery_active atteint — BS VOTE-ANC bloqué"
+                            " actifs=" + std::to_string(act));
+                        return false;
+                    }
+                }
             }
             TradeCmd cmd = makeBuyStop(bsLot, targetPrice, cmt);
             auto res = bridge_->sendCommand(cmd);
@@ -1521,7 +1568,24 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
                 }
             } else if (ss <= 0) {
                 // SS absent : créer à la cible aggressive
-                if ((curBid - aggressTarget) >= mdist) {
+                // Gardes maxLots / maxRecoveryActive avant création
+                bool aggGuardOk = true;
+                if (recovDepth > 0 && cfg_.maxLots > 0.0) {
+                    std::vector<OrderInfo> gSnap;
+                    { std::lock_guard lk2(ordersMu_); gSnap = orders_; }
+                    if (totalLots(gSnap) >= cfg_.maxLots) {
+                        log("[GUARD] max_lots atteint — SS AGGRESSIVE-BUY bloqué");
+                        aggGuardOk = false;
+                    }
+                }
+                if (aggGuardOk && recovDepth > 0 && cfg_.maxRecoveryActive > 0) {
+                    int act = recovery_->sellCount() + recovery_->buyCount();
+                    if (act >= cfg_.maxRecoveryActive) {
+                        log("[GUARD] max_recovery_active atteint — SS AGGRESSIVE-BUY bloqué");
+                        aggGuardOk = false;
+                    }
+                }
+                if (aggGuardOk && (curBid - aggressTarget) >= mdist) {
                     TradeCmd cmd = makeSellStop(lot, math::normalize(aggressTarget, cfg_.digits), comment);
                     auto res = bridge_->sendCommand(cmd);
                     if (res.success) {
@@ -1591,6 +1655,30 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
                 + " | dist=" + std::to_string((curBid - pl.targetPrice) / cfg_.point)
                 + "pts < " + std::to_string(minDist / cfg_.point) + "pts min — rejeté");
             return;
+        }
+
+        // ── Garde maxLots : plafond absolu de lots total ─────────
+        if (cfg_.maxLots > 0.0) {
+            std::vector<OrderInfo> ordSnap;
+            { std::lock_guard lk2(ordersMu_); ordSnap = orders_; }
+            double curLots = totalLots(ordSnap);
+            if (curLots >= cfg_.maxLots) {
+                log("[GUARD] max_lots atteint — aucun nouveau recovery SS"
+                    " | lots=" + std::to_string(curLots)
+                    + "/" + std::to_string(cfg_.maxLots));
+                return;
+            }
+        }
+
+        // ── Garde maxRecoveryActive : niveaux simultanés max ─────
+        if (recovDepth > 0 && cfg_.maxRecoveryActive > 0) {
+            int activeTotal = recovery_->sellCount() + recovery_->buyCount();
+            if (activeTotal >= cfg_.maxRecoveryActive) {
+                log("[GUARD] max_recovery_active atteint — SS recovery bloqué"
+                    " | actifs=" + std::to_string(activeTotal)
+                    + "/" + std::to_string(cfg_.maxRecoveryActive));
+                return;
+            }
         }
 
         // ── CascadeGuard : seul critère institutionnel de placement recovery ──
@@ -1789,7 +1877,24 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
                 }
             } else if (bs <= 0) {
                 // BS absent : créer à la cible aggressive
-                if ((aggressTarget - curAsk) >= mdist) {
+                // Gardes maxLots / maxRecoveryActive avant création
+                bool aggGuardOkBs = true;
+                if (recovDepth > 0 && cfg_.maxLots > 0.0) {
+                    std::vector<OrderInfo> gSnap;
+                    { std::lock_guard lk2(ordersMu_); gSnap = orders_; }
+                    if (totalLots(gSnap) >= cfg_.maxLots) {
+                        log("[GUARD] max_lots atteint — BS AGGRESSIVE bloqué");
+                        aggGuardOkBs = false;
+                    }
+                }
+                if (aggGuardOkBs && recovDepth > 0 && cfg_.maxRecoveryActive > 0) {
+                    int act = recovery_->sellCount() + recovery_->buyCount();
+                    if (act >= cfg_.maxRecoveryActive) {
+                        log("[GUARD] max_recovery_active atteint — BS AGGRESSIVE bloqué");
+                        aggGuardOkBs = false;
+                    }
+                }
+                if (aggGuardOkBs && (aggressTarget - curAsk) >= mdist) {
                     TradeCmd cmd = makeBuyStop(lot, math::normalize(aggressTarget, cfg_.digits), comment);
                     auto res = bridge_->sendCommand(cmd);
                     if (res.success) {
@@ -1862,6 +1967,30 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
                 + " | dist=" + std::to_string((pl.targetPrice - curAsk) / cfg_.point)
                 + "pts < " + std::to_string(minDist / cfg_.point) + "pts min — rejeté");
             return;
+        }
+
+        // ── Garde maxLots : plafond absolu de lots total ─────────
+        if (cfg_.maxLots > 0.0) {
+            std::vector<OrderInfo> ordSnap;
+            { std::lock_guard lk2(ordersMu_); ordSnap = orders_; }
+            double curLots = totalLots(ordSnap);
+            if (curLots >= cfg_.maxLots) {
+                log("[GUARD] max_lots atteint — aucun nouveau recovery BS"
+                    " | lots=" + std::to_string(curLots)
+                    + "/" + std::to_string(cfg_.maxLots));
+                return;
+            }
+        }
+
+        // ── Garde maxRecoveryActive : niveaux simultanés max ─────
+        if (recovDepth > 0 && cfg_.maxRecoveryActive > 0) {
+            int activeTotal = recovery_->sellCount() + recovery_->buyCount();
+            if (activeTotal >= cfg_.maxRecoveryActive) {
+                log("[GUARD] max_recovery_active atteint — BS recovery bloqué"
+                    " | actifs=" + std::to_string(activeTotal)
+                    + "/" + std::to_string(cfg_.maxRecoveryActive));
+                return;
+            }
         }
 
         // ── CascadeGuard : seul critère institutionnel de placement recovery ──
@@ -1945,16 +2074,51 @@ double TOP4EA_Engine::selectLot(int recovCount,
 }
 
 // ────────────────────────────────────────────────────────────
-//  Target effectif — VABT ou fixe
+//  Target effectif — Dynamique lots, VABT, ou fixe
+//
+//  Priorité :
+//    1. basketTarget == 0.0 → formule dynamique par lots (mode recommandé)
+//         base = totalLots × 150 × tickValue
+//         bonus : ×1.25 si lots≥2, ×1.25 de plus si lots≥5 (cumulatif)
+//         velocityAdjust = base × 0.30 × clamp(pnlVelocity/0.5, 0, 1)
+//    2. basketTarget > 0 && useVABT → formule VABT (ATR × coeff × lots)
+//    3. basketTarget > 0             → valeur fixe du fichier de config
 // ────────────────────────────────────────────────────────────
 double TOP4EA_Engine::effectiveTarget(
     const std::vector<OrderInfo>& orders) const noexcept
 {
-    if (!cfg_.useVABT) return cfg_.basketTarget;
-    double atrPts = grid_->atrPoints();
-    double lots   = totalLots(orders);
-    return math::vabtTarget(atrPts, lots, cfg_.tickValue,
-                            cfg_.vabtCoeff, cfg_.basketTarget);
+    double lots = totalLots(orders);
+
+    // ── Mode dynamique par lots (basket_target = 0) ────────────
+    if (cfg_.basketTarget <= 0.0) {
+        double base = lots * 150.0 * cfg_.tickValue;
+
+        // Paliers bonus : ×1.25 si ≥2L, ×1.25 de plus si ≥5L
+        double bonus = 1.0;
+        if (lots >= 5.0)       bonus = 1.5625;   // ×1.25 × 1.25
+        else if (lots >= 2.0)  bonus = 1.25;
+
+        base *= bonus;
+
+        // Composante vélocité : +0% à +30% selon la pente EWMA du P&L
+        double vel      = basketMon_->velocity();   // $/tick courant
+        double velNorm  = std::max(0.0, std::min(1.0, vel / 0.5));
+        double velAdj   = base * 0.30 * velNorm;
+
+        double dynTarget = base + velAdj;
+        // Plancher minimum : $1.50 (correspondant à 0.01 lot)
+        return std::max(1.50, dynTarget);
+    }
+
+    // ── Mode VABT (basketTarget > 0 && useVABT) ───────────────
+    if (cfg_.useVABT) {
+        double atrPts = grid_->atrPoints();
+        return math::vabtTarget(atrPts, lots, cfg_.tickValue,
+                                cfg_.vabtCoeff, cfg_.basketTarget);
+    }
+
+    // ── Valeur fixe ────────────────────────────────────────────
+    return cfg_.basketTarget;
 }
 
 double TOP4EA_Engine::totalLots(
@@ -2527,7 +2691,9 @@ void TOP4EA_Engine::closeSideAtVL(int side) {
     double remPnl = basketProfit(fresh);
     double totalCycle = cycleRealizedPnL_ + remPnl;
 
-    if (fresh.empty() || totalCycle >= cfg_.basketTarget) {
+    // Utiliser effectiveTarget() pour rester cohérent avec le mode dynamique par lots
+    double vlEffTarget = effectiveTarget(fresh);
+    if (fresh.empty() || totalCycle >= vlEffTarget) {
         log("[VL] Target global atteint après VL"
             + std::string(" (réalisé=") + std::to_string(cycleRealizedPnL_)
             + " flottant=" + std::to_string(remPnl)
@@ -2544,8 +2710,8 @@ void TOP4EA_Engine::closeSideAtVL(int side) {
         gridOrigin_ = (t2.bid + t2.ask) * 0.5;
         state_.store(EAState::GridActive);
         log("[VL] Grille repositionnée @ " + std::to_string(gridOrigin_)
-            + " | target restant=" + std::to_string(cfg_.basketTarget - cycleRealizedPnL_)
-            + "$ (target=" + std::to_string(cfg_.basketTarget)
+            + " | target restant=" + std::to_string(vlEffTarget - cycleRealizedPnL_)
+            + "$ (target=" + std::to_string(vlEffTarget)
             + " - réalisé=" + std::to_string(cycleRealizedPnL_) + ")");
     }
 }
@@ -2815,14 +2981,6 @@ std::string TOP4EA_Engine::dashboard() const {
         oss << "  [+réalisé=" << std::setprecision(2) << cycleRealizedPnL_
             << " → cycle=" << (cyclePnlDash>=0?"+":"") << cyclePnlDash << "$]";
     oss << "\n";
-    {
-        double dynTarget = effectiveTarget(orders);
-        oss << "║  Target    : " << dynTarget << " $";
-        if (cfg_.useVABT && dynTarget != cfg_.basketTarget)
-            oss << "  [VABT base=" << cfg_.basketTarget << "]";
-        oss << "\n";
-    }
-    oss << "║  Vélocité  : " << basketMon_->velocity() << " $/tick\n";
     oss << "╠═══════════════════════════════════╣\n";
     // Affichage du mode trail : fixe, adaptatif, ou NATURAL/AGGRESSIVE
     if (cfg_.trailModeAuto) {
@@ -2896,8 +3054,46 @@ std::string TOP4EA_Engine::dashboard() const {
             oss << "║  [RESTORE: " << rc << " ordre(s) récupéré(s) post-reconnexion]\n";
         }
     }
-    oss << "║  SS Recovery: " << recovery_->sellCount() << " / " << cfg_.maxRecovery << "\n";
-    oss << "║  BS Recovery: " << recovery_->buyCount()  << " / " << cfg_.maxRecovery << "\n";
+    {
+        double dynTarget = effectiveTarget(orders);
+        double lots      = totalLots(orders);
+        // ── Ligne Target enrichie ──
+        if (cfg_.basketTarget <= 0.0) {
+            double bonus = 1.0;
+            const char* bonusTag = "";
+            if (lots >= 5.0)       { bonus = 1.5625; bonusTag = "×1.5625"; }
+            else if (lots >= 2.0)  { bonus = 1.25;   bonusTag = "×1.25"; }
+            double vel     = basketMon_->velocity();
+            double velNorm = std::max(0.0, std::min(1.0, vel / 0.5));
+            oss << "║  Target    : $" << dynTarget
+                << " (dyn " << std::setprecision(2) << lots << "L"
+                << "×$" << (150.0 * cfg_.tickValue)
+                << (bonus > 1.0 ? std::string(bonusTag) : "")
+                << (velNorm > 0.0 ? " vel+" + [&]{ std::ostringstream t; t << std::setprecision(0) << std::fixed << (velNorm*30.0); return t.str(); }() + "%" : "")
+                << ")\n";
+        } else if (cfg_.useVABT && dynTarget != cfg_.basketTarget) {
+            oss << "║  Target    : $" << dynTarget << " [VABT base=$" << cfg_.basketTarget << "]\n";
+        } else {
+            oss << "║  Target    : $" << dynTarget << " [fixe]\n";
+        }
+        // ── Ligne Lots ──
+        oss << "║  Lots      : " << std::setprecision(2) << lots;
+        if (cfg_.maxLots > 0.0)
+            oss << "/" << cfg_.maxLots << " max";
+        oss << "\n";
+    }
+    oss << "║  Vélocité  : " << basketMon_->velocity() << " $/tick\n";
+    oss << "╠═══════════════════════════════════╣\n";
+    oss << "║  SS Recovery: " << recovery_->sellCount() << " / " << cfg_.maxRecovery;
+    if (cfg_.maxRecoveryActive > 0)
+        oss << "  [actif max " << cfg_.maxRecoveryActive << "]";
+    oss << "\n";
+    oss << "║  BS Recovery: " << recovery_->buyCount()  << " / " << cfg_.maxRecovery;
+    if (cfg_.maxRecoveryActive > 0) {
+        int activeTotal = recovery_->sellCount() + recovery_->buyCount();
+        oss << "  [" << activeTotal << "/" << cfg_.maxRecoveryActive << " actifs]";
+    }
+    oss << "\n";
     oss << "║  Ordres mkt : " << mkt << "  [ZONE " << zoneStr << "]\n";
     oss << "║  GridGap   : " << grid_->effectiveGridGap() << " pts"
         << " (ATR=" << std::setprecision(1) << grid_->atrPoints() << ")\n";
