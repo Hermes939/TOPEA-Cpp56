@@ -166,6 +166,14 @@ private:
     mutable std::mutex                  intelMu_;
     IntelligenceEngine::Analysis        lastIntel_;
 
+    // ─── Throttle affichage Vote Board (Task #15) ────────────
+    // Le détail complet (breakdown) n'est ré-affiché que toutes les
+    // ~30s ou immédiatement si le mode (SS-ONLY/BS-ONLY/SYMÉTRIQUE)
+    // change, pour rester lisible sans spammer la console (dashboard
+    // rafraîchi toutes les 500ms).
+    mutable std::chrono::steady_clock::time_point lastVoteBoardPrint_{};
+    mutable int                                   lastVoteBoardMode_ = -2; // -1=SS,0=SYM,1=BS,-2=jamais affiché
+
     std::atomic<EAState> state_ { EAState::Init };
     mutable std::mutex   mu_;
 

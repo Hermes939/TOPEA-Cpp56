@@ -1,0 +1,1 @@
+- [Replit workflow restarts can orphan processes](workflow-restart-orphaned-processes.md) — long-running native binaries (C++/etc.) started by a workflow shell can survive restarts and multiply; always add a single-instance lock in the binary itself.

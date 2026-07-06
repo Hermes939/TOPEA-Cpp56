@@ -3232,21 +3232,52 @@ std::string TOP4EA_Engine::dashboard() const {
 
         oss << std::setprecision(2);
 
-        // ─── [6] Direction Vote Board [-5, +5] ─────────────────
+        // ─── [6] Direction Vote Board [-5, +5] (Task #15) ──────
+        // Affiché en permanence sur le dashboard. Le breakdown complet
+        // (delta/DS/struct/DXY) n'est ré-imprimé que toutes les ~30s ou
+        // immédiatement au changement de mode, pour éviter le spam.
         {
             const DirectionVote& dv = latestVD.dirVote;
             const char* modeStr = dv.ssOnly ? "SELL-ONLY ▼"
                                 : dv.bsOnly ? "BUY-ONLY  ▲"
                                 : "SYMÉTRIQUE ↔";
+            const char* modeShort = dv.ssOnly ? "SS-ONLY"
+                                   : dv.bsOnly ? "BS-ONLY"
+                                   : "SYMÉTRIQUE";
+            int curMode = dv.ssOnly ? -1 : (dv.bsOnly ? 1 : 0);
+
             oss << "╠══════════ VOTE DIRECTIONNEL ════════╣\n";
             oss << "║  Score  : " << (dv.score >= 0 ? "+" : "")
                 << dv.score << "/5  [" << modeStr << "]\n";
             oss << "║  DXY    : " << DXYResult::name(latestVD.dxyResult.signal)
                 << "  force=" << std::setprecision(0) << latestVD.dxyResult.strength << "%\n";
-            // Tronquer le reason au dernier token (score=N)
-            std::string rv = dv.reason;
-            if (rv.size() > 55) rv = rv.substr(0, 52) + "...";
-            if (!rv.empty()) oss << "║  " << rv << "\n";
+
+            auto now = std::chrono::steady_clock::now();
+            bool modeChanged = (curMode != lastVoteBoardMode_);
+            bool timeElapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                    now - lastVoteBoardPrint_).count() >= 30;
+
+            if (modeChanged || timeElapsed || lastVoteBoardMode_ == -2) {
+                // Breakdown complet, non tronqué : reason contient
+                // "delta=... DS:... struct:... DXY:... →score=N"
+                std::string rv = dv.reason;
+                std::size_t arrowPos = rv.find("→score=");
+                std::string breakdown = (arrowPos != std::string::npos)
+                    ? rv.substr(0, arrowPos) : rv;
+                // Retirer l'espace final éventuel
+                while (!breakdown.empty() && breakdown.back() == ' ')
+                    breakdown.pop_back();
+
+                oss << "║  [VOTE] score=" << (dv.score >= 0 ? "+" : "") << dv.score
+                    << " | " << breakdown << " | → " << modeShort << "\n";
+
+                lastVoteBoardPrint_ = now;
+                lastVoteBoardMode_  = curMode;
+            } else {
+                std::string rv = dv.reason;
+                if (rv.size() > 55) rv = rv.substr(0, 52) + "...";
+                if (!rv.empty()) oss << "║  " << rv << "\n";
+            }
         }
         oss << std::setprecision(2);
     }
