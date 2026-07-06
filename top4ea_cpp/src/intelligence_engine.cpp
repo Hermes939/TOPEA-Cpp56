@@ -650,7 +650,8 @@ DirectionVote computeDirectionVote(
     DSSignal        dsSignal,
     double          dsEffectiveConf,
     MarketStructure structure,
-    DXYSignal       dxySignal) noexcept
+    DXYSignal       dxySignal,
+    bool            lotsStale) noexcept
 {
     DirectionVote vote;
     std::string r;
@@ -660,7 +661,12 @@ DirectionVote computeDirectionVote(
     // le portefeuille est SUREXPOSÉ aux BUY → on BLOQUE les nouvelles BUY (BS)
     // et on favorise SS (SELL) pour hedger/protéger. Score négatif = SS-only.
     // Inverse pour sell-heavy → score positif = BS-only (hedge SELL).
-    if (totalLots > 1e-6) {
+    // Task #17 : si le cache lots est périmé (coupure flux ticks), on
+    // exclut totalement cette composante (poids de repli = 0) plutôt que
+    // de voter sur une exposition potentiellement obsolète.
+    if (lotsStale) {
+        r += "delta=STALE(skip) ";
+    } else if (totalLots > 1e-6) {
         double bsPct  = buyLots  / totalLots;  // fraction lots BUY
         double ssPct  = sellLots / totalLots;  // fraction lots SELL
         if (bsPct >= 0.70) {

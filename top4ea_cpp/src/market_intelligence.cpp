@@ -162,6 +162,7 @@ void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
     openOrdersCache_ = openOrders;
     bsLotsCache_     = bsLots;
     ssLotsCache_     = ssLots;
+    lotsCacheUpdatedAt_ = std::chrono::steady_clock::now();
     inRecoveryCache_ = inRecovery;
 
     pushTick(tick);
@@ -1181,6 +1182,11 @@ VisualDecision MarketIntelligence::analyze() const {
     {
         DeepSeekSignal ds3 = deepseek_.getLastSignal();
         double totalLots = bsLotsCached + ssLotsCached;
+        // Task #17 : garde de péremption — bsLotsCache_/ssLotsCache_ ne sont
+        // rafraîchis que via update() (à chaque tick broker) ; une coupure
+        // réseau les fige à leur dernière valeur connue sans le signaler.
+        // On exclut alors la composante delta-lots (±2) du vote board.
+        bool lotsStale = lotsCacheStale();
         vd.dirVote = computeDirectionVote(
             bsLotsCached,           // buyLots (BS = BUY side lots)
             ssLotsCached,           // sellLots (SS = SELL side lots)
@@ -1188,7 +1194,8 @@ VisualDecision MarketIntelligence::analyze() const {
             ds3.signal,
             ds3.effectiveConfidence,
             st,
-            vd.dxyResult.signal
+            vd.dxyResult.signal,
+            lotsStale
         );
     }
 

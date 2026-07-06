@@ -1413,14 +1413,21 @@ void TOP4EA_Engine::trailGrid() {
                                 ssComment + "_ANC v=" + std::to_string(dv.score));
             if (!anchored)
                 ensureSellStop(ssLot, ssComment, ssR, ssGapFactor, trailFrozen);
-            static int lastSellOnlyScore = 999;
-            if (dv.score != lastSellOnlyScore) {
+            // ── Task #17 : état persisté sur le membre, plus une static locale ──
+            // Loggue à chaque changement de score ET à chaque transition de mode
+            // (ex: symétrique → SELL-only), au lieu de suppression one-shot qui
+            // masquait un retour au même score après un passage par un autre mode.
+            bool modeChanged = (lastDirVoteMode_ != -1);
+            if (dv.score != lastDirVoteScore_ || modeChanged) {
+                if (modeChanged)
+                    log("[VOTE-MODE] Transition → SELL-only (score=" + std::to_string(dv.score) + ")");
                 log("[VOTE-TRAIL] SELL-only vote=" + std::to_string(dv.score)
                     + " anc=" + (anchor > 0.0 ? std::to_string(anchor) : "N/A")
                     + (anchored ? " [ANC-OK]" : " [fallback]")
                     + " | DXY:" + DXYResult::name(latestVD2.dxyResult.signal)
                     + " | " + dv.reason);
-                lastSellOnlyScore = dv.score;
+                lastDirVoteScore_ = dv.score;
+                lastDirVoteMode_  = -1;
             }
         } else if (dv.bsOnly) {
             // ── BUY-only : ancré directement au LOW récent M1 + minDist ──
@@ -1436,19 +1443,36 @@ void TOP4EA_Engine::trailGrid() {
                                 bsComment + "_ANC v=" + std::to_string(dv.score));
             if (!anchored)
                 ensureBuyStop(bsLot, bsComment, bsR, bsGapFactor, trailFrozen);
-            static int lastBuyOnlyScore = 999;
-            if (dv.score != lastBuyOnlyScore) {
-                log("[VOTE-TRAIL] BUY-only vote=" + std::to_string(dv.score)
-                    + " anc=" + (anchor > 0.0 ? std::to_string(anchor) : "N/A")
-                    + (anchored ? " [ANC-OK]" : " [fallback]")
-                    + " | DXY:" + DXYResult::name(latestVD2.dxyResult.signal)
-                    + " | " + dv.reason);
-                lastBuyOnlyScore = dv.score;
+            // ── Task #17 : idem SELL-only, membre persisté + transition ──
+            {
+                bool modeChanged = (lastDirVoteMode_ != 1);
+                if (dv.score != lastDirVoteScore_ || modeChanged) {
+                    if (modeChanged)
+                        log("[VOTE-MODE] Transition → BUY-only (score=" + std::to_string(dv.score) + ")");
+                    log("[VOTE-TRAIL] BUY-only vote=" + std::to_string(dv.score)
+                        + " anc=" + (anchor > 0.0 ? std::to_string(anchor) : "N/A")
+                        + (anchored ? " [ANC-OK]" : " [fallback]")
+                        + " | DXY:" + DXYResult::name(latestVD2.dxyResult.signal)
+                        + " | " + dv.reason);
+                    lastDirVoteScore_ = dv.score;
+                    lastDirVoteMode_  = 1;
+                }
             }
         } else {
             // ── Mode symétrique standard ─────────────────────────
             ensureSellStop(ssLot, ssComment, ssR, ssGapFactor, trailFrozen);
             ensureBuyStop (bsLot, bsComment, bsR, bsGapFactor, trailFrozen);
+            // ── Task #17 : logguer la transition d'entrée en symétrique ──
+            // (SELL-only ou BUY-only → symétrique), pour tracer tout le
+            // cycle des changements de mode sur le vote board, pas
+            // seulement les modes directionnels.
+            bool modeChanged = (lastDirVoteMode_ != 0);
+            if (dv.score != lastDirVoteScore_ || modeChanged) {
+                if (modeChanged)
+                    log("[VOTE-MODE] Transition → symétrique (score=" + std::to_string(dv.score) + ")");
+                lastDirVoteScore_ = dv.score;
+                lastDirVoteMode_  = 0;
+            }
         }
     }
 }

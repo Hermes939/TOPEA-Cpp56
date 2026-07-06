@@ -174,6 +174,18 @@ private:
     mutable std::chrono::steady_clock::time_point lastVoteBoardPrint_{};
     mutable int                                   lastVoteBoardMode_ = -2; // -1=SS,0=SYM,1=BS,-2=jamais affiché
 
+    // ─── Persistance état vote board dans trailGrid() (Task #17) ─────
+    // Remplace les anciens `static int lastSellOnlyScore/lastBuyOnlyScore`
+    // locaux à trailGrid() : ceux-ci ne survivaient qu'à l'intérieur d'un
+    // seul mode (SS-only ou BS-only) et ne détectaient pas les transitions
+    // de mode (ex: SELL-only → symétrique → BUY-only), ce qui pouvait
+    // masquer un changement réel de régime directionnel. `lastDirVoteScore_`
+    // suit le dernier score loggé (quel que soit le mode) et
+    // `lastDirVoteMode_` le dernier mode loggé (-2=jamais, -1=SS-only,
+    // 0=symétrique, 1=BS-only) pour logger explicitement chaque transition.
+    int lastDirVoteScore_ = -999;
+    int lastDirVoteMode_  = -2;
+
     std::atomic<EAState> state_ { EAState::Init };
     mutable std::mutex   mu_;
 

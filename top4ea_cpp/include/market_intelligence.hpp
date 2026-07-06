@@ -181,6 +181,20 @@ public:
     [[nodiscard]] double recentHigh(int nBars = 5) const noexcept;
     [[nodiscard]] double recentLow (int nBars = 5) const noexcept;
 
+    // ─── Garde de péremption cache lots BS/SS (Task #17) ─────
+    // true si bsLotsCache_/ssLotsCache_ n'ont pas été rafraîchis via
+    // update() depuis plus de maxAgeSec secondes (défaut 10s). Utilisé
+    // pour exclure la composante delta-lots (±2) du vote board plutôt
+    // que de voter sur une exposition potentiellement obsolète après
+    // une coupure de flux de ticks.
+    [[nodiscard]] bool lotsCacheStale(double maxAgeSec = 10.0) const noexcept {
+        if (lotsCacheUpdatedAt_.time_since_epoch().count() == 0)
+            return true;   // jamais mis à jour → considéré périmé
+        auto age = std::chrono::duration_cast<std::chrono::duration<double>>(
+            std::chrono::steady_clock::now() - lotsCacheUpdatedAt_).count();
+        return age > maxAgeSec;
+    }
+
     // ─── Timeout absolu anti-biais statique (depuis conf) ────
     void dsSetStaleHardSec(int sec) noexcept { deepseek_.setStaleHardSec(sec); }
 
@@ -273,6 +287,14 @@ private:
     double bsLotsCache_     = 0.0;
     double ssLotsCache_     = 0.0;
     bool   inRecoveryCache_ = false;
+
+    // ─── Horodatage cache lots (Task #17 — garde de péremption) ──────
+    // update() n'est appelé qu'à chaque tick reçu du broker : une coupure
+    // réseau/API gèle bsLotsCache_/ssLotsCache_ à leur dernière valeur
+    // connue sans que rien ne le signale. On horodate chaque écriture pour
+    // pouvoir exclure la composante delta-lots du vote board si le cache
+    // est trop vieux (cf. lotsCacheStale()).
+    std::chrono::steady_clock::time_point lotsCacheUpdatedAt_{};
 
     // Cache décision courante (thread-safe)
     mutable std::mutex   mu_;

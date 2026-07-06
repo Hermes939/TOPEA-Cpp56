@@ -55,6 +55,11 @@ struct DirectionVote {
 // ─── Vote board directionnel (fonction utilitaire publique) ──
 // Agrège : delta lots (±2) + DeepSeek signal (±2) +
 //          structure/momentum (±1) + DXY proxy (±1) = [-5,+5]
+// lotsStale (Task #17) : si true, la composante delta lots (±2) est
+// exclue du score (poids de repli = 0) car buyLots/sellLots proviennent
+// d'un cache non rafraîchi depuis trop longtemps (coupure de flux de
+// ticks) — on préfère ignorer ce signal plutôt que voter sur une
+// exposition potentiellement obsolète.
 DirectionVote computeDirectionVote(
     double       buyLots,
     double       sellLots,
@@ -62,7 +67,8 @@ DirectionVote computeDirectionVote(
     DSSignal     dsSignal,
     double       dsEffectiveConf,
     MarketStructure structure,
-    DXYSignal    dxySignal) noexcept;
+    DXYSignal    dxySignal,
+    bool         lotsStale = false) noexcept;
 
 // ============================================================
 //  IntelligenceEngine
