@@ -2102,11 +2102,31 @@ double TOP4EA_Engine::selectLot(int recovCount,
 //
 //  Priorité :
 //    1. basketTarget == 0.0 → formule dynamique par lots (mode recommandé)
-//         base = totalLots × 150 × tickValue
-//         bonus : ×1.25 si lots≥2, ×1.25 de plus si lots≥5 (cumulatif)
+//         base = totalLots × 70 × tickValue
+//         bonus : ×1.10 si lots≥2, ×1.15 de plus si lots≥5 (cumulatif → ×1.265)
 //         velocityAdjust = base × 0.30 × clamp(pnlVelocity/0.5, 0, 1)
 //    2. basketTarget > 0 && useVABT → formule VABT (ATR × coeff × lots)
 //    3. basketTarget > 0             → valeur fixe du fichier de config
+//
+//  ── Calibration (Task #18, data/automl_training.csv, 250 cycles réels) ──
+//  Les coefficients d'origine (150 $/lot, bonus ×1.25/×1.5625) ont été
+//  backtestés contre pnl_result réel par cycle (colonne lot_used/pnl_result).
+//  Constat : le taux d'atteinte du target ("hit rate" = pnl_result ≥ target)
+//  chutait fortement sur les paniers à fort recovery (33% sur 2-5L, 29% sur
+//  5L+) car le bonus multiplicatif ×1.5625 dépassait la rentabilité $/lot
+//  réellement observée sur ces tranches (médiane ≈ $22.6/panier sur 2-5L,
+//  très négative sur 5L+ à cause de la variance des recoveries profondes).
+//  Le taux de base a été réduit 150→70 $/lot et les paliers adoucis
+//  (×1.25→1.10 à 2L, ×1.25→1.15 à 5L) : hit rate global 41.2%→44.8%,
+//  hit rate 2-5L 33%→57%, hit rate 5L+ 29%→36%, sans dégrader les tranches
+//  <1L/1-2L (déjà à 39-78%, dominées par le plancher $1.50 ou déjà
+//  largement atteintes). Comparé à l'ancien target fixe $10 (hit rate 38%
+//  toutes tranches confondues), la formule dynamique recalibrée reste
+//  supérieure tout en étant nettement plus accessible sur les gros paniers.
+//  La composante vélocité (0.30) n'a PAS pu être recalibrée : le CSV ne
+//  contient pas de série temporelle $/tick par cycle (basketMon_->velocity()
+//  n'est pas journalisé) — conservée à sa valeur d'origine, voir tâche de
+//  suivi pour instrumenter cette donnée avant calibration.
 // ────────────────────────────────────────────────────────────
 double TOP4EA_Engine::effectiveTarget(
     const std::vector<OrderInfo>& orders) const noexcept
@@ -2115,12 +2135,13 @@ double TOP4EA_Engine::effectiveTarget(
 
     // ── Mode dynamique par lots (basket_target = 0) ────────────
     if (cfg_.basketTarget <= 0.0) {
-        double base = lots * 150.0 * cfg_.tickValue;
+        // Task #18 : base rate calibré 150→70 $/lot (voir commentaire ci-dessus)
+        double base = lots * 70.0 * cfg_.tickValue;
 
-        // Paliers bonus : ×1.25 si ≥2L, ×1.25 de plus si ≥5L
+        // Paliers bonus calibrés : ×1.10 si ≥2L, ×1.15 de plus si ≥5L (×1.265 cumulé)
         double bonus = 1.0;
-        if (lots >= 5.0)       bonus = 1.5625;   // ×1.25 × 1.25
-        else if (lots >= 2.0)  bonus = 1.25;
+        if (lots >= 5.0)       bonus = 1.265;   // ×1.10 × 1.15
+        else if (lots >= 2.0)  bonus = 1.10;
 
         base *= bonus;
 
@@ -3085,13 +3106,13 @@ std::string TOP4EA_Engine::dashboard() const {
         if (cfg_.basketTarget <= 0.0) {
             double bonus = 1.0;
             const char* bonusTag = "";
-            if (lots >= 5.0)       { bonus = 1.5625; bonusTag = "×1.5625"; }
-            else if (lots >= 2.0)  { bonus = 1.25;   bonusTag = "×1.25"; }
+            if (lots >= 5.0)       { bonus = 1.265; bonusTag = "×1.265"; }
+            else if (lots >= 2.0)  { bonus = 1.10;   bonusTag = "×1.10"; }
             double vel     = basketMon_->velocity();
             double velNorm = std::max(0.0, std::min(1.0, vel / 0.5));
             oss << "║  Target    : $" << dynTarget
                 << " (dyn " << std::setprecision(2) << lots << "L"
-                << "×$" << (150.0 * cfg_.tickValue)
+                << "×$" << (70.0 * cfg_.tickValue)
                 << (bonus > 1.0 ? std::string(bonusTag) : "")
                 << (velNorm > 0.0 ? " vel+" + [&]{ std::ostringstream t; t << std::setprecision(0) << std::fixed << (velNorm*30.0); return t.str(); }() + "%" : "")
                 << ")\n";
