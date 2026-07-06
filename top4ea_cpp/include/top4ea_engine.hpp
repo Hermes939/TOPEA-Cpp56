@@ -24,6 +24,7 @@
 #include <vector>
 #include <sstream>
 #include <iomanip>
+#include <deque>
 
 namespace top4ea {
 
@@ -145,6 +146,14 @@ private:
         const std::vector<OrderInfo>& orders) const noexcept;
 
     void log(const std::string& msg) const;
+
+    // ─── Alerte guard maxLots / maxRecoveryActive (Task #19) ─────
+    // Enregistre un blocage horodaté et purge la fenêtre glissante
+    // de kGuardWindowSec secondes. Émet un log [GUARD][ALERT] une
+    // seule fois par franchissement du seuil (évite le spam tant que
+    // le compteur reste au-dessus, ré-armé quand il repasse en dessous).
+    void recordGuardBlock(bool isMaxLots) const;
+    [[nodiscard]] int guardBlockCount(bool isMaxLots) const;
 
     // ─── Membres ─────────────────────────────────────────────
     Config                              cfg_;
@@ -289,6 +298,18 @@ private:
     // additionne : cycleRealizedPnL_ + basketProfit(ordres ouverts).
     // Remis à 0 uniquement dans closeBasketAtomic() (fin de cycle complet).
     double cycleRealizedPnL_ = 0.0;
+
+    // ─── Alerte guard maxLots / maxRecoveryActive (Task #19) ─────
+    // Historique horodaté (fenêtre glissante) des blocages [GUARD]
+    // rencontrés à la création de SS/BS (recovery + VOTE-ANC + AGGRESSIVE).
+    // Purgé au fil de l'eau dans recordGuardBlock()/guardBlockCount().
+    mutable std::mutex     guardMu_;
+    mutable std::deque<TimePoint> guardMaxLotsBlocks_;
+    mutable std::deque<TimePoint> guardMaxRecoveryBlocks_;
+    mutable bool           guardMaxLotsWarned_     = false;
+    mutable bool           guardMaxRecoveryWarned_ = false;
+    static constexpr int   kGuardWindowSec    = 60;  // fenêtre glissante (s)
+    static constexpr int   kGuardWarnThreshold = 3;  // seuil d'alerte (blocages / fenêtre)
 };
 
 } // namespace top4ea

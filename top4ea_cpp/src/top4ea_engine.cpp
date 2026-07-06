@@ -1320,6 +1320,7 @@ void TOP4EA_Engine::trailGrid() {
                     { std::lock_guard lk2(ordersMu_); gSnap = orders_; }
                     if (totalLots(gSnap) >= cfg_.maxLots) {
                         log("[GUARD] max_lots atteint — SS VOTE-ANC bloqué");
+                        recordGuardBlock(true);
                         return false;
                     }
                 }
@@ -1328,6 +1329,7 @@ void TOP4EA_Engine::trailGrid() {
                     if (act >= cfg_.maxRecoveryActive) {
                         log("[GUARD] max_recovery_active atteint — SS VOTE-ANC bloqué"
                             " actifs=" + std::to_string(act));
+                        recordGuardBlock(false);
                         return false;
                     }
                 }
@@ -1372,6 +1374,7 @@ void TOP4EA_Engine::trailGrid() {
                     { std::lock_guard lk2(ordersMu_); gSnap = orders_; }
                     if (totalLots(gSnap) >= cfg_.maxLots) {
                         log("[GUARD] max_lots atteint — BS VOTE-ANC bloqué");
+                        recordGuardBlock(true);
                         return false;
                     }
                 }
@@ -1380,6 +1383,7 @@ void TOP4EA_Engine::trailGrid() {
                     if (act >= cfg_.maxRecoveryActive) {
                         log("[GUARD] max_recovery_active atteint — BS VOTE-ANC bloqué"
                             " actifs=" + std::to_string(act));
+                        recordGuardBlock(false);
                         return false;
                     }
                 }
@@ -1599,6 +1603,7 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
                     { std::lock_guard lk2(ordersMu_); gSnap = orders_; }
                     if (totalLots(gSnap) >= cfg_.maxLots) {
                         log("[GUARD] max_lots atteint — SS AGGRESSIVE-BUY bloqué");
+                        recordGuardBlock(true);
                         aggGuardOk = false;
                     }
                 }
@@ -1606,6 +1611,7 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
                     int act = recovery_->sellCount() + recovery_->buyCount();
                     if (act >= cfg_.maxRecoveryActive) {
                         log("[GUARD] max_recovery_active atteint — SS AGGRESSIVE-BUY bloqué");
+                        recordGuardBlock(false);
                         aggGuardOk = false;
                     }
                 }
@@ -1690,6 +1696,7 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
                 log("[GUARD] max_lots atteint — aucun nouveau recovery SS"
                     " | lots=" + std::to_string(curLots)
                     + "/" + std::to_string(cfg_.maxLots));
+                recordGuardBlock(true);
                 return;
             }
         }
@@ -1701,6 +1708,7 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
                 log("[GUARD] max_recovery_active atteint — SS recovery bloqué"
                     " | actifs=" + std::to_string(activeTotal)
                     + "/" + std::to_string(cfg_.maxRecoveryActive));
+                recordGuardBlock(false);
                 return;
             }
         }
@@ -1908,6 +1916,7 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
                     { std::lock_guard lk2(ordersMu_); gSnap = orders_; }
                     if (totalLots(gSnap) >= cfg_.maxLots) {
                         log("[GUARD] max_lots atteint — BS AGGRESSIVE bloqué");
+                        recordGuardBlock(true);
                         aggGuardOkBs = false;
                     }
                 }
@@ -1915,6 +1924,7 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
                     int act = recovery_->sellCount() + recovery_->buyCount();
                     if (act >= cfg_.maxRecoveryActive) {
                         log("[GUARD] max_recovery_active atteint — BS AGGRESSIVE bloqué");
+                        recordGuardBlock(false);
                         aggGuardOkBs = false;
                     }
                 }
@@ -2002,6 +2012,7 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
                 log("[GUARD] max_lots atteint — aucun nouveau recovery BS"
                     " | lots=" + std::to_string(curLots)
                     + "/" + std::to_string(cfg_.maxLots));
+                recordGuardBlock(true);
                 return;
             }
         }
@@ -2013,6 +2024,7 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
                 log("[GUARD] max_recovery_active atteint — BS recovery bloqué"
                     " | actifs=" + std::to_string(activeTotal)
                     + "/" + std::to_string(cfg_.maxRecoveryActive));
+                recordGuardBlock(false);
                 return;
             }
         }
@@ -3190,6 +3202,10 @@ std::string TOP4EA_Engine::dashboard() const {
     oss << "║  Garde cascade: " << (cg.allowed ? "OUVERT" : "BLOQUÉ") << "\n";
     oss << "╠═══════════════════════════════════╣\n";
     oss << "║  Pairs tot : " << totalPairs_.load() << " | Singles: " << totalSingles_.load() << "\n";
+    // ─── Compteur blocages [GUARD] (Task #19) ──────────────────
+    oss << "║  [GUARD] Lots: " << guardBlockCount(true)
+        << " blocs | Recovery: " << guardBlockCount(false)
+        << " blocs (60s)\n";
     // ─── Panneau INTELLIGENCE ─────────────────────────────────
     {
         std::lock_guard lk(intelMu_);
@@ -3525,6 +3541,50 @@ void TOP4EA_Engine::log(const std::string& msg) const {
     auto t     = std::chrono::system_clock::to_time_t(now);
     std::cout << "[" << std::put_time(std::localtime(&t), "%H:%M:%S") << "] "
               << msg << "\n";
+}
+
+// ─── Alerte guard maxLots / maxRecoveryActive (Task #19) ─────────
+// Enregistre l'horodatage du blocage, purge la fenêtre glissante
+// kGuardWindowSec, et émet un [GUARD][ALERT] une seule fois par
+// franchissement du seuil kGuardWarnThreshold (ré-armé quand le
+// compteur repasse sous le seuil).
+void TOP4EA_Engine::recordGuardBlock(bool isMaxLots) const {
+    auto now = Clock::now();
+    std::lock_guard lk(guardMu_);
+    auto& dq = isMaxLots ? guardMaxLotsBlocks_ : guardMaxRecoveryBlocks_;
+    dq.push_back(now);
+    while (!dq.empty() &&
+           std::chrono::duration_cast<std::chrono::seconds>(now - dq.front()).count()
+               > kGuardWindowSec) {
+        dq.pop_front();
+    }
+    int count = static_cast<int>(dq.size());
+    bool& warned = isMaxLots ? guardMaxLotsWarned_ : guardMaxRecoveryWarned_;
+    if (count >= kGuardWarnThreshold) {
+        if (!warned) {
+            warned = true;
+            log(std::string("[GUARD][ALERT] ")
+                + (isMaxLots ? "max_lots" : "max_recovery_active")
+                + " bloqué " + std::to_string(count) + " fois en "
+                + std::to_string(kGuardWindowSec)
+                + "s — stratégie potentiellement stagnante,"
+                  " vérifier max_lots/max_recovery_active dans top4ea.conf");
+        }
+    } else {
+        warned = false;
+    }
+}
+
+int TOP4EA_Engine::guardBlockCount(bool isMaxLots) const {
+    auto now = Clock::now();
+    std::lock_guard lk(guardMu_);
+    auto& dq = isMaxLots ? guardMaxLotsBlocks_ : guardMaxRecoveryBlocks_;
+    while (!dq.empty() &&
+           std::chrono::duration_cast<std::chrono::seconds>(now - dq.front()).count()
+               > kGuardWindowSec) {
+        dq.pop_front();
+    }
+    return static_cast<int>(dq.size());
 }
 
 // ============================================================
