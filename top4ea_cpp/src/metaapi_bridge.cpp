@@ -471,6 +471,11 @@ std::string MetaApiBridge::httpGet(const std::string& path) {
         std::cerr << "[MetaApi] curl: " << curl_easy_strerror(res) << "\n";
         return {};
     }
+    if (httpCode == 429) {
+        std::cerr << "[MetaApi] GET HTTP 429 (rate-limit) — attente 5s avant retry\n";
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        return {};
+    }
     if (httpCode < 200 || httpCode >= 300) {
         std::cerr << "[MetaApi] GET HTTP " << httpCode << " — "
                   << path.substr(0, 80) << "\n";
