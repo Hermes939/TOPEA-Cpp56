@@ -479,6 +479,8 @@ std::string MetaApiBridge::httpGet(const std::string& path) {
     if (httpCode < 200 || httpCode >= 300) {
         std::cerr << "[MetaApi] GET HTTP " << httpCode << " — "
                   << path.substr(0, 80) << "\n";
+        if (!response.empty())
+            std::cerr << "[MetaApi] Détail: " << response.substr(0, 300) << "\n";
         return {};
     }
     return response;
