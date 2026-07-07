@@ -207,6 +207,10 @@ private:
     int consecutiveIdenticalCount_ = 0;
     std::chrono::steady_clock::time_point firstIdenticalTimestamp_;
 
+    // ─── Détection de changement de session ───────────────────
+    // Protégé par signalMu_
+    std::string lastSession_;
+
     // Timeout absolu configurable (secondes) — 0 = désactivé
     int dsStaleHardSec_ = 300;
 

@@ -131,18 +131,37 @@ void DeepSeekVision::requestAnalysis(const DSMarketContext& ctx) {
             sig.timestamp = now;
             sig.fresh     = (sig.signal != DSSignal::UNKNOWN);
 
-            // Détection de signal identique répété (même direction + confidence ±5%)
-            bool isIdentical = (sig.signal != DSSignal::UNKNOWN &&
-                                lastSignal_.signal == sig.signal &&
-                                lastSignal_.signal != DSSignal::UNKNOWN &&
-                                std::abs(lastSignal_.confidence - sig.confidence) <= 5.0);
-
-            if (isIdentical) {
-                ++consecutiveIdenticalCount_;
-                // firstIdenticalTimestamp_ reste inchangé (conserve le moment du 1er signal identique)
-            } else {
+            // ── Détection de changement de session ────────────────
+            // Si la session a changé depuis le dernier appel, le compteur
+            // de répétitions est réinitialisé pour ne pas pénaliser un
+            // signal légitime qui arrive en début de nouvelle session.
+            if (!ctx.session.empty() && !lastSession_.empty() &&
+                ctx.session != lastSession_) {
+                std::string prevSes = lastSession_;
                 consecutiveIdenticalCount_ = 1;
                 firstIdenticalTimestamp_   = now;
+                lastSession_               = ctx.session;
+                // Log hors verrou pour éviter deadlock — on le sort après le bloc
+                // mais on sauvegarde les valeurs pour le print ci-dessous
+                std::cout << "[DeepSeekVision] Session change " << prevSes
+                          << "\xe2\x86\x92" << ctx.session  // → UTF-8
+                          << " \xe2\x80\x94 compteur r\xc3\xa9p\xc3\xa9titions r\xc3\xa9initialis\xc3\xa9\n";
+            } else {
+                if (!ctx.session.empty()) lastSession_ = ctx.session;
+
+                // Détection de signal identique répété (même direction + confidence ±5%)
+                bool isIdentical = (sig.signal != DSSignal::UNKNOWN &&
+                                    lastSignal_.signal == sig.signal &&
+                                    lastSignal_.signal != DSSignal::UNKNOWN &&
+                                    std::abs(lastSignal_.confidence - sig.confidence) <= 5.0);
+
+                if (isIdentical) {
+                    ++consecutiveIdenticalCount_;
+                    // firstIdenticalTimestamp_ reste inchangé (conserve le moment du 1er signal identique)
+                } else {
+                    consecutiveIdenticalCount_ = 1;
+                    firstIdenticalTimestamp_   = now;
+                }
             }
 
             lastSignal_ = sig;
