@@ -68,7 +68,10 @@ DirectionVote computeDirectionVote(
     double       dsEffectiveConf,
     MarketStructure structure,
     DXYSignal    dxySignal,
-    bool         lotsStale = false) noexcept;
+    bool         lotsStale       = false,
+    int          gateMinScore    = 2,    // seuil ±N pour bsOnly/ssOnly
+    int          dsConfHigh      = 60,   // conf DS% → poids ±2 / gate override
+    int          dsConfLow       = 40) noexcept;  // conf DS% → poids ±1
 
 // ============================================================
 //  IntelligenceEngine

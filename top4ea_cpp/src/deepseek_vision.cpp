@@ -64,7 +64,17 @@ void DeepSeekVision::forceWake(const DSMarketContext& ctx) {
     // Forcer le reset du throttle pour provoquer un appel immédiat
     {
         std::lock_guard lk(callMu_);
-        if (callInProgress_) return;  // Déjà un appel en cours, patience
+        // Watchdog inline pour forceWake également
+        if (callInProgress_) {
+            auto now2 = std::chrono::steady_clock::now();
+            long stuckSec = std::chrono::duration_cast<std::chrono::seconds>(
+                                now2 - callStartTime_).count();
+            if (stuckSec <= CALL_STUCK_SEC) return;  // patience
+            std::cerr << "[DeepSeekVision] ⚠ forceWake : appel coincé depuis " << stuckSec
+                      << "s — watchdog reset\n";
+            ++errorCount_;
+            callInProgress_ = false;
+        }
         // Réinitialiser lastCallTime_ pour bypass throttle
         lastCallTime_ = std::chrono::steady_clock::now()
                         - std::chrono::seconds(MIN_CALL_INTERVAL_SEC + 1);
@@ -80,15 +90,26 @@ void DeepSeekVision::forceWake(const DSMarketContext& ctx) {
 void DeepSeekVision::requestAnalysis(const DSMarketContext& ctx) {
     if (!hasApiKey()) return;
 
-    // Vérification throttling
+    // Vérification throttling + watchdog
     {
         std::lock_guard lk(callMu_);
-        if (callInProgress_) return;
         auto now = std::chrono::steady_clock::now();
+        if (callInProgress_) {
+            // Watchdog : reset si l'appel précédent est coincé depuis > CALL_STUCK_SEC
+            // (ex : TCP SYN sans réponse, thread paniqué, DNS bloqué)
+            long stuckSec = std::chrono::duration_cast<std::chrono::seconds>(
+                                now - callStartTime_).count();
+            if (stuckSec <= CALL_STUCK_SEC) return;  // encore dans le délai normal
+            std::cerr << "[DeepSeekVision] ⚠ appel coincé depuis " << stuckSec
+                      << "s — watchdog reset (callInProgress_ forcé à false)\n";
+            ++errorCount_;
+            callInProgress_ = false;
+        }
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                            now - lastCallTime_).count();
         if (elapsed < MIN_CALL_INTERVAL_SEC) return;
         callInProgress_ = true;
+        callStartTime_  = now;
         lastCallTime_   = now;
     }
 
@@ -401,8 +422,9 @@ std::string DeepSeekVision::httpPost(const std::string& url,
     curl_easy_setopt(curl, CURLOPT_HTTPHEADER,      headers);
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION,   curlWriteDS);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA,       &response);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS,      (long)timeoutMs);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER,  1L);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS,         (long)timeoutMs);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS,  5000L);  // TCP connect max 5s
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER,     1L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST,  2L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION,  1L);
 

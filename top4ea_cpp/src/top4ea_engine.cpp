@@ -31,6 +31,10 @@ TOP4EA_Engine::TOP4EA_Engine(Config cfg)
     intel_       = std::make_unique<IntelligenceEngine>(cfg_);
     marketIntel_ = std::make_unique<MarketIntelligence>();
     marketIntel_->dsSetStaleHardSec(cfg_.dsStaleHardSec);
+    marketIntel_->setDeepSeekStartupTimeout(cfg_.deepseekTimeoutSec);
+    marketIntel_->setVoteGateMinScore(cfg_.voteGateMinScore);
+    marketIntel_->setVoteGateDsConfHigh(cfg_.voteGateDsConfHigh);
+    marketIntel_->setVoteGateDsConfLow(cfg_.voteGateDsConfLow);
 
     // Callbacks bridge
     bridge_->onTick   ([this](const Tick& t)            { onTick(t);    });
@@ -231,6 +235,10 @@ void TOP4EA_Engine::rebuildSubsystems() {
     intel_       = std::make_unique<IntelligenceEngine>(cfg_);
     marketIntel_ = std::make_unique<MarketIntelligence>();
     marketIntel_->dsSetStaleHardSec(cfg_.dsStaleHardSec);
+    marketIntel_->setDeepSeekStartupTimeout(cfg_.deepseekTimeoutSec);
+    marketIntel_->setVoteGateMinScore(cfg_.voteGateMinScore);
+    marketIntel_->setVoteGateDsConfHigh(cfg_.voteGateDsConfHigh);
+    marketIntel_->setVoteGateDsConfLow(cfg_.voteGateDsConfLow);
     vlMgr_       = ProfitLockManager(cfg_);
     log("[BrokerSpec] Sous-systèmes recréés avec config broker détectée");
 }
@@ -894,20 +902,25 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
                 vdNow.dsSignal.signal,
                 vdNow.dsSignal.effectiveConfidence,
                 vdNow.structure,
-                vdNow.dxyResult.signal);
+                vdNow.dxyResult.signal,
+                /*lotsStale=*/false,
+                cfg_.voteGateMinScore,
+                cfg_.voteGateDsConfHigh,
+                cfg_.voteGateDsConfLow);
             log("[VOTE-POST-SS] " + freshVote.reason);
             vdNow.dirVote = freshVote;
         }
 
         // ── Gate vote board — surcharge directionnelle (DS gate prioritaire) ──
-        // Règle de priorité : si DS ≥60% effectif est actif, son gate prime sur le
-        // vote board. Le vote ne peut pas révoquer ce que le DS gate a accordé.
+        // Règle de priorité : si DS ≥ voteGateDsConfHigh% effectif est actif,
+        // son gate prime sur le vote board.
         {
             const DirectionVote& dv    = vdNow.dirVote;
             const DeepSeekSignal& dsSig = vdNow.dsSignal;
-            bool dsGateBuy  = (dsSig.fresh && dsSig.effectiveConfidence >= 60.0
+            double dsGateConf = (double)cfg_.voteGateDsConfHigh;
+            bool dsGateBuy  = (dsSig.fresh && dsSig.effectiveConfidence >= dsGateConf
                                && dsSig.signal == DSSignal::BUY_BIAS);
-            bool dsGateSell = (dsSig.fresh && dsSig.effectiveConfidence >= 60.0
+            bool dsGateSell = (dsSig.fresh && dsSig.effectiveConfidence >= dsGateConf
                                && dsSig.signal == DSSignal::SELL_BIAS);
 
             // dv.bsOnly (vote ≥+2, BUY dir) → bloquer SS — OK sauf si DS SELL_BIAS a forcé SS
@@ -986,7 +999,11 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
                 vdNow.dsSignal.signal,
                 vdNow.dsSignal.effectiveConfidence,
                 vdNow.structure,
-                vdNow.dxyResult.signal);
+                vdNow.dxyResult.signal,
+                /*lotsStale=*/false,
+                cfg_.voteGateMinScore,
+                cfg_.voteGateDsConfHigh,
+                cfg_.voteGateDsConfLow);
             log("[VOTE-POST-BS] " + freshVote.reason);
             vdNow.dirVote = freshVote;
         }
@@ -995,9 +1012,10 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
         {
             const DirectionVote& dv    = vdNow.dirVote;
             const DeepSeekSignal& dsSig = vdNow.dsSignal;
-            bool dsGateBuy  = (dsSig.fresh && dsSig.effectiveConfidence >= 60.0
+            double dsGateConf = (double)cfg_.voteGateDsConfHigh;
+            bool dsGateBuy  = (dsSig.fresh && dsSig.effectiveConfidence >= dsGateConf
                                && dsSig.signal == DSSignal::BUY_BIAS);
-            bool dsGateSell = (dsSig.fresh && dsSig.effectiveConfidence >= 60.0
+            bool dsGateSell = (dsSig.fresh && dsSig.effectiveConfidence >= dsGateConf
                                && dsSig.signal == DSSignal::SELL_BIAS);
 
             if (dv.ssOnly && vdNow.allowBSRecovery && !dsGateBuy) {
@@ -3419,6 +3437,10 @@ std::string TOP4EA_Engine::dashboard() const {
             // ── Ligne de diagnostic : âge signal, appels, erreurs ──
             oss << "║   Signal:" << sigAge << "s | Appel:" << callAge << "s"
                 << " | OK=" << (calls - errors) << " ERR=" << errors << "\n";
+        } else if (marketIntel_->dsTimedOut()) {
+            long callAge = marketIntel_->dsLastCallAge();
+            oss << "║  DeepSeek  : ⚠ TIMEOUT — mode local actif"
+                << " (dernier appel:" << callAge << "s)\n";
         } else {
             long callAge = marketIntel_->dsLastCallAge();
             oss << "║  DeepSeek  : en attente réponse API..."

@@ -230,6 +230,31 @@ void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
         }
     }
 
+    // ── Timeout démarrage DeepSeek ────────────────────────────────────────────
+    // Si DeepSeek a une clé API mais n'a jamais répondu après dsStartupTimeoutSec_
+    // secondes, on bascule en mode local (dsTimedOut_ = true).
+    // Le client asynchrone continue en arrière-plan : dès qu'un signal arrive,
+    // dsTimedOut_ repasse à false automatiquement.
+    if (deepseek_.hasApiKey() && dsStartupTimeoutSec_ > 0) {
+        bool hasSignal = (deepseek_.getLastSignal().signal != DSSignal::UNKNOWN);
+        if (hasSignal) {
+            // Signal reçu → lever le timeout si actif
+            if (dsTimedOut_) {
+                dsTimedOut_ = false;
+                std::cout << "[DeepSeekVision] ✓ signal reçu — mode local levé\n";
+            }
+        } else if (!dsTimedOut_) {
+            long elapsedDs = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::steady_clock::now() - dsStartupBegin_).count();
+            if (elapsedDs >= dsStartupTimeoutSec_) {
+                dsTimedOut_ = true;
+                std::cout << "[DeepSeekVision] ⚠ TIMEOUT STARTUP (" << elapsedDs
+                          << "s sans réponse) — mode local activé\n"
+                             "[DeepSeekVision]   Client en arrière-plan, reprise auto dès réponse.\n";
+            }
+        }
+    }
+
     bool canCallDS = m30Ready || m30Timeout;
     int dsTickMod  = inRecovery ? 3 : 5;  // plus réactif en recovery
     if (deepseek_.hasApiKey() && canCallDS &&
@@ -1195,7 +1220,10 @@ VisualDecision MarketIntelligence::analyze() const {
             ds3.effectiveConfidence,
             st,
             vd.dxyResult.signal,
-            lotsStale
+            lotsStale,
+            voteGateMinScore_,
+            voteGateDsConfHigh_,
+            voteGateDsConfLow_
         );
     }
 

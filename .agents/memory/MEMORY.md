@@ -1,2 +1,4 @@
 - [Replit workflow restarts can orphan processes](workflow-restart-orphaned-processes.md) — long-running native binaries (C++/etc.) started by a workflow shell can survive restarts and multiply; always add a single-instance lock in the binary itself.
 - [Dynamic basket target formula calibration](target-formula-calibration.md) — backtest $/lot rate & bonus tiers against realized pnl before raising them; check dashboard print block stays in sync
+- [AutoML server BASE_DIR must use Path.cwd()](automl-server-basedir.md) — when launched via `cd top4ea_cpp && python3 ../automl/automl_server.py`, __file__ is relative so parent.parent resolves to workspace root, not top4ea_cpp/; use Path.cwd() instead
+- [Adam optimizer θ validation](adam-theta-validation.md) — calibrated θ (atr=2.000, Adam-converged) shows +288% avg P&L improvement over 235 live cycles vs default (atr=0.500); atr hit upper bound [0.20,2.00], may need bound increase

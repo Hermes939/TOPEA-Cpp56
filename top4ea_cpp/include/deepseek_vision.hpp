@@ -166,6 +166,18 @@ public:
     void setStaleHardSec(int sec) noexcept { dsStaleHardSec_ = sec; }
     [[nodiscard]] int staleHardSec() const noexcept { return dsStaleHardSec_; }
 
+    // ─── Watchdog : détecte un appel coincé ──────────────────
+    // Retourne le nombre de secondes écoulées depuis le début du dernier
+    // appel en cours, ou 0 si aucun appel n'est en cours.
+    // CALL_STUCK_SEC : durée au-delà de laquelle callInProgress_ est réinitialisé.
+    static constexpr int CALL_STUCK_SEC = 30;
+    [[nodiscard]] long callProgressSec() const noexcept {
+        std::lock_guard lk(callMu_);
+        if (!callInProgress_) return 0;
+        return std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - callStartTime_).count();
+    }
+
     // ─── Compteur de répétitions courant ─────────────────────
     [[nodiscard]] int consecutiveCount() const noexcept {
         std::lock_guard lk(signalMu_);
@@ -214,10 +226,11 @@ private:
     // Timeout absolu configurable (secondes) — 0 = désactivé
     int dsStaleHardSec_ = 300;
 
-    // Thread d'appel asynchrone
+    // Thread d'appel asynchrone + watchdog
     mutable std::mutex    callMu_;
     bool                  callInProgress_ = false;
     std::chrono::steady_clock::time_point lastCallTime_;
+    std::chrono::steady_clock::time_point callStartTime_;  // horodatage début d'appel (watchdog)
 
     std::atomic<int> callCount_  { 0 };
     std::atomic<int> errorCount_ { 0 };

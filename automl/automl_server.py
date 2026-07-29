@@ -58,9 +58,13 @@ from datetime import datetime
 sys.path.insert(0, str(Path(__file__).parent))
 
 # ── Répertoires ──────────────────────────────────────────────
-BASE_DIR      = Path(__file__).parent.parent
-DATA_DIR      = BASE_DIR / "data"
-AUTOML_DIR    = BASE_DIR / "automl"
+# Le serveur est lancé depuis top4ea_cpp/ via :
+#   cd top4ea_cpp && python3 ../automl/automl_server.py --mode watch
+# BASE_DIR doit donc pointer vers top4ea_cpp/ (répertoire courant),
+# pas vers workspace/ (parent du script).
+BASE_DIR      = Path.cwd()           # répertoire courant = top4ea_cpp/
+DATA_DIR      = BASE_DIR / "data"    # top4ea_cpp/data/
+AUTOML_DIR    = BASE_DIR / "automl"  # top4ea_cpp/automl/
 OUTPUT_DIR    = AUTOML_DIR / "output"
 CKPT_DIR      = AUTOML_DIR / "checkpoints"
 LOG_DIR       = DATA_DIR

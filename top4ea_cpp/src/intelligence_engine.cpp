@@ -651,7 +651,10 @@ DirectionVote computeDirectionVote(
     double          dsEffectiveConf,
     MarketStructure structure,
     DXYSignal       dxySignal,
-    bool            lotsStale) noexcept
+    bool            lotsStale,
+    int             gateMinScore,
+    int             dsConfHigh,
+    int             dsConfLow) noexcept
 {
     DirectionVote vote;
     std::string r;
@@ -690,18 +693,18 @@ DirectionVote computeDirectionVote(
         r += "delta=none ";
     }
 
-    // ── (2) DeepSeek signal — poids ±2 ───────────────────────
-    // ≥60% confiance effective → ±2, ≥40% → ±1
-    if (dsSignal == DSSignal::BUY_BIAS && dsEffectiveConf >= 60.0) {
+    // ── (2) DeepSeek signal — poids ±2 / ±1 (seuils configurables) ────────
+    // dsConfHigh → ±2, dsConfLow → ±1
+    if (dsSignal == DSSignal::BUY_BIAS && dsEffectiveConf >= (double)dsConfHigh) {
         vote.score += 2;
         r += "DS:BUY(" + std::to_string((int)dsEffectiveConf) + "%)(+2) ";
-    } else if (dsSignal == DSSignal::BUY_BIAS && dsEffectiveConf >= 40.0) {
+    } else if (dsSignal == DSSignal::BUY_BIAS && dsEffectiveConf >= (double)dsConfLow) {
         vote.score += 1;
         r += "DS:BUY(" + std::to_string((int)dsEffectiveConf) + "%)(+1) ";
-    } else if (dsSignal == DSSignal::SELL_BIAS && dsEffectiveConf >= 60.0) {
+    } else if (dsSignal == DSSignal::SELL_BIAS && dsEffectiveConf >= (double)dsConfHigh) {
         vote.score -= 2;
         r += "DS:SELL(" + std::to_string((int)dsEffectiveConf) + "%)(-2) ";
-    } else if (dsSignal == DSSignal::SELL_BIAS && dsEffectiveConf >= 40.0) {
+    } else if (dsSignal == DSSignal::SELL_BIAS && dsEffectiveConf >= (double)dsConfLow) {
         vote.score -= 1;
         r += "DS:SELL(" + std::to_string((int)dsEffectiveConf) + "%)(-1) ";
     } else {
@@ -746,8 +749,8 @@ DirectionVote computeDirectionVote(
     if (vote.score < -5) vote.score = -5;
     if (vote.score >  5) vote.score =  5;
 
-    vote.ssOnly = (vote.score <= -2);
-    vote.bsOnly = (vote.score >= +2);
+    vote.ssOnly = (vote.score <= -gateMinScore);
+    vote.bsOnly = (vote.score >= +gateMinScore);
     vote.reason = r + "→score=" + std::to_string(vote.score);
 
     return vote;

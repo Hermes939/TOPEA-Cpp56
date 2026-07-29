@@ -198,6 +198,19 @@ public:
     // ─── Timeout absolu anti-biais statique (depuis conf) ────
     void dsSetStaleHardSec(int sec) noexcept { deepseek_.setStaleHardSec(sec); }
 
+    // ─── Vote board gate — seuils configurables ───────────────
+    void setVoteGateMinScore   (int v) noexcept { voteGateMinScore_    = v; }
+    void setVoteGateDsConfHigh (int v) noexcept { voteGateDsConfHigh_  = v; }
+    void setVoteGateDsConfLow  (int v) noexcept { voteGateDsConfLow_   = v; }
+
+    // ─── Timeout démarrage DeepSeek ───────────────────────────
+    // Configure combien de secondes attendre le premier signal DeepSeek
+    // avant de basculer en mode local. 0 = attente infinie.
+    void setDeepSeekStartupTimeout(int sec) noexcept { dsStartupTimeoutSec_ = sec; }
+
+    // Retourne true si le timeout de démarrage a été atteint sans signal.
+    [[nodiscard]] bool dsTimedOut() const noexcept { return dsTimedOut_; }
+
     // ─── Réchauffement synthétique (cold-start fix) ───────────
     // Pré-popule les déques de barres avec des bougies synthétiques
     // basées sur le prix courant et l'ATR estimé (gridGap × point).
@@ -301,6 +314,17 @@ private:
     mutable VisualDecision lastDecision_;
 
     int tickCount_ = 0;
+
+    // ── Timeout démarrage DeepSeek ────────────────────────────
+    // ── Vote board gate thresholds ────────────────────────────
+    int  voteGateMinScore_   = 2;
+    int  voteGateDsConfHigh_ = 60;
+    int  voteGateDsConfLow_  = 40;
+
+    int  dsStartupTimeoutSec_ = 120;
+    bool dsTimedOut_          = false;
+    std::chrono::steady_clock::time_point dsStartupBegin_{
+        std::chrono::steady_clock::now()};
 
     // ── Couche DeepSeek LLM (async, non-bloquant) ─────────────
     mutable DeepSeekVision deepseek_;

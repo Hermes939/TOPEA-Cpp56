@@ -295,6 +295,28 @@ struct Config {
     // 0 = désactivé. Défaut : 300s (5 min).
     int         dsStaleHardSec  = 300;
 
+    // ─── DeepSeek timeout de démarrage ───────────────────────
+    // Si DeepSeek a une clé API valide mais n'a produit aucun signal
+    // après deepseekTimeoutSec secondes, le moteur bascule en mode local
+    // (décisions basées uniquement sur l'analyse locale iniMTA).
+    // Le client DeepSeek continue en arrière-plan et reprend dès qu'il répond.
+    // 0 = désactivé (attente infinie). Défaut : 120s.
+    int         deepseekTimeoutSec = 120;
+
+    // ─── Vote board gate — seuils configurables ──────────────
+    // voteGateMinScore    : score absolu minimum pour activer bsOnly/ssOnly
+    //                       Ex : 2 → bsOnly si score ≥+2, ssOnly si score ≤-2
+    //                       Augmenter (ex: 3) = gate plus strict (moins de blocages)
+    //                       Diminuer (ex: 1) = gate plus sensible (plus de blocages)
+    // voteGateDsConfHigh  : confidence DeepSeek (%) pour poids ±2 dans le vote
+    //                       ET pour le DS gate override sur le vote board
+    //                       Défaut : 60. (ex: 70 = DS doit être très confiant)
+    // voteGateDsConfLow   : confidence DeepSeek (%) pour poids ±1 dans le vote
+    //                       Défaut : 40. Doit être < voteGateDsConfHigh.
+    int    voteGateMinScore   = 2;    // seuil ±N pour bsOnly/ssOnly [1–5]
+    int    voteGateDsConfHigh = 60;   // conf DS% pour poids ±2 / DS gate override
+    int    voteGateDsConfLow  = 40;   // conf DS% pour poids ±1
+
     // ─── Plafonds de sécurité recovery ───────────────────────
     // maxLots          : plafond absolu de lots total du panier (0 = désactivé)
     //                    Bloque tout nouveau stop si totalLots(orders) >= maxLots

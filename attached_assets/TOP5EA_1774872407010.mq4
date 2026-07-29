@@ -9,8 +9,8 @@
 
 //=== PARAMÈTRES ====================================================
 extern string TradingSymbol       = "XAUUSDm";
-extern double BaseLot             = 0.10;
-extern double LotMultiplier       = 1.15;
+extern double BaseLot             = 0.01;
+extern double LotMultiplier       = 1.5;
 extern double MaxLot              = 10.00;      // cap absolu
 extern int    GridGap             = 500;        // distance initiale SS/BS (points)
 extern int    TrailDistance       = 150;        // trailing serré (points)
@@ -19,7 +19,7 @@ extern double BasketTarget        = 7.0;
 extern int    MaxRecovery         = 20;
 extern int    Magic               = 10400;
 extern int    Slippage            = 3;
-extern double DailyTargetPercent  = 10.0;       // 0 = désactivé
+extern double DailyTargetPercent  = 100.0;       // 0 = désactivé
 extern int    MinMoveAfterTrigger = 150;        // Option B : points depuis double déclenchement
 extern int    ATRPeriod           = 14;         // Option C
 extern double ATRMultiplier       = 2.5;        // Option C

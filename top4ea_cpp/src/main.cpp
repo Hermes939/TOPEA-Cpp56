@@ -106,6 +106,11 @@ static void applyConfigKV(top4ea::Config& cfg,
         else if (key == "reconnect_ms")          cfg.reconnectMs          = std::stoi(val);
         // DeepSeek
         else if (key == "ds_stale_hard_sec")     cfg.dsStaleHardSec       = std::stoi(val);
+        else if (key == "deepseek_timeout_sec")  cfg.deepseekTimeoutSec   = std::stoi(val);
+        // Vote board gate
+        else if (key == "vote_gate_min_score")    cfg.voteGateMinScore     = std::stoi(val);
+        else if (key == "vote_gate_ds_conf_high") cfg.voteGateDsConfHigh   = std::stoi(val);
+        else if (key == "vote_gate_ds_conf_low")  cfg.voteGateDsConfLow    = std::stoi(val);
     } catch (...) {
         std::cerr << "[Config] Erreur parsing: " << key << "=" << val << "\n";
     }
@@ -173,6 +178,10 @@ static const std::vector<std::pair<std::string,std::string>> ENV_KEYS = {
     {"state_poll_ms",               "TOP4EA_STATE_POLL_MS"},
     {"reconnect_ms",                "TOP4EA_RECONNECT_MS"},
     {"ds_stale_hard_sec",           "TOP4EA_DS_STALE_HARD_SEC"},
+    {"deepseek_timeout_sec",        "TOP4EA_DEEPSEEK_TIMEOUT_SEC"},
+    {"vote_gate_min_score",         "TOP4EA_VOTE_GATE_MIN_SCORE"},
+    {"vote_gate_ds_conf_high",      "TOP4EA_VOTE_GATE_DS_CONF_HIGH"},
+    {"vote_gate_ds_conf_low",       "TOP4EA_VOTE_GATE_DS_CONF_LOW"},
 };
 
 // ─── Lecture config depuis fichier INI simplifié ─────────────

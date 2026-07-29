@@ -7,11 +7,11 @@
 #property strict
 
 //--- Paramètres
-extern string TradingSymbol   = "XAUUSDm";
-extern double BaseLot         = 0.10;
-extern double LotMultiplier   = 1.15;
+extern string TradingSymbol   = "XAUUSDc";
+extern double BaseLot         = 0.01;
+extern double LotMultiplier   = 2.0;
 extern int    GridGap         = 500;       // demi-écart en points
-extern double BasketTarget    = 7.0;
+extern double BasketTarget    = 0.70;
 extern int    AntiCascadeSec  = 3;
 extern int    MaxRecovery     = 20;
 extern int    Magic           = 10300;
