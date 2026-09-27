@@ -326,6 +326,31 @@ struct Config {
     //                    Ex: maxRecovery=10 mais maxRecoveryActive=3 → au plus 3 niveaux actifs
     double      maxLots             = 0.0;  // 0 = désactivé
     int         maxRecoveryActive   = 0;    // 0 = désactivé
+
+    // ─── BiLSTM Agent — apprentissage continu online ─────────
+    // lstm_enabled      : active le BiLSTM (false par défaut — opt-in)
+    // lstm_seq_len      : longueur de la fenêtre séquentielle (timesteps)
+    // lstm_hidden       : dimension hidden state par direction (×2 avec Bi)
+    // lstm_layers       : nombre de couches BiLSTM empilées
+    // lstm_heads        : nombre de têtes Multi-Head Attention
+    // lstm_lr           : learning rate Adam du réseau en ligne
+    // lstm_update_every : ticks entre deux mises à jour gradient
+    // lstm_target_update_freq : pas de gradient entre deux syncs target-net
+    // lstm_checkpoint_every   : transitions entre deux sauvegardes poids
+    // lstm_weights_path       : fichier .bin des poids (load/save)
+    // lstm_use_dedicated_binary : si true, IPC via fichiers JSON
+    //                             si false, agent embarqué (inline)
+    bool        lstmEnabled              = false;
+    int         lstmSeqLen               = 32;
+    int         lstmHidden               = 64;
+    int         lstmLayers               = 2;
+    int         lstmHeads                = 4;
+    float       lstmLr                   = 1e-4f;
+    int         lstmUpdateEvery          = 10;
+    int         lstmTargetUpdateFreq     = 50;
+    int         lstmCheckpointEvery      = 200;
+    std::string lstmWeightsPath          = "automl/output/lstm_weights.bin";
+    bool        lstmUseDedicatedBinary   = false;
 };
 
 // ─── Résultat d'une opération de trading ────────────────────

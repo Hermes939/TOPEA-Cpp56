@@ -72,7 +72,7 @@ void DeepSeekVision::forceWake(const DSMarketContext& ctx) {
             if (stuckSec <= CALL_STUCK_SEC) return;  // patience
             std::cerr << "[DeepSeekVision] ⚠ forceWake : appel coincé depuis " << stuckSec
                       << "s — watchdog reset\n";
-            ++errorCount_;
+            recordError();
             callInProgress_ = false;
         }
         // Réinitialiser lastCallTime_ pour bypass throttle
@@ -102,7 +102,7 @@ void DeepSeekVision::requestAnalysis(const DSMarketContext& ctx) {
             if (stuckSec <= CALL_STUCK_SEC) return;  // encore dans le délai normal
             std::cerr << "[DeepSeekVision] ⚠ appel coincé depuis " << stuckSec
                       << "s — watchdog reset (callInProgress_ forcé à false)\n";
-            ++errorCount_;
+            recordError();
             callInProgress_ = false;
         }
         auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
@@ -144,6 +144,13 @@ void DeepSeekVision::requestAnalysis(const DSMarketContext& ctx) {
 
         std::string resp = httpPost(endpoint_, body.str(), 10000);
         DeepSeekSignal sig = parseResponse(resp);
+        if (sig.signal == DSSignal::UNKNOWN) {
+            // Une réponse vide, HTTP en erreur ou JSON inexploitable compte
+            // comme une erreur consécutive pour le mécanisme de fallback.
+            recordError();
+        } else {
+            recordSuccess();
+        }
 
         // Mise à jour du cache et compteur de répétitions sous verrou
         {
@@ -406,7 +413,6 @@ std::string DeepSeekVision::httpPost(const std::string& url,
     CURL* curl = curl_easy_init();
     if (!curl) {
         std::cerr << "[DeepSeekVision] curl_easy_init() échoué\n";
-        ++errorCount_;
         return {};
     }
 
@@ -432,7 +438,6 @@ std::string DeepSeekVision::httpPost(const std::string& url,
     if (rc != CURLE_OK) {
         std::cerr << "[DeepSeekVision] HTTP erreur: "
                   << curl_easy_strerror(rc) << "\n";
-        ++errorCount_;
         response.clear();
     }
 

@@ -1244,20 +1244,23 @@ void TOP4EA_Engine::trailGrid() {
     // Max ±20% sur les facteurs. Ignoré si trail est figé (zone TP).
     if (!trailFrozen) {
         VisualDecision latestVD = marketIntel_->getLastDecision();
-        if (latestVD.dsTrailSSBias != 1.0 || latestVD.dsTrailBSBias != 1.0) {
+        const bool dsFallback = marketIntel_->dsFallbackActive();
+        const double dsTrailSSBias = dsFallback ? 1.0 : latestVD.dsTrailSSBias;
+        const double dsTrailBSBias = dsFallback ? 1.0 : latestVD.dsTrailBSBias;
+        if (dsTrailSSBias != 1.0 || dsTrailBSBias != 1.0) {
             static double prevSSBias = 1.0, prevBSBias = 1.0;
-            if (std::abs(latestVD.dsTrailSSBias - prevSSBias) > 0.01 ||
-                std::abs(latestVD.dsTrailBSBias - prevBSBias) > 0.01) {
+            if (std::abs(dsTrailSSBias - prevSSBias) > 0.01 ||
+                std::abs(dsTrailBSBias - prevBSBias) > 0.01) {
                 log("[DS-TRAIL] Biais appliqué: SS×"
-                    + std::to_string(latestVD.dsTrailSSBias).substr(0, 5)
-                    + " BS×" + std::to_string(latestVD.dsTrailBSBias).substr(0, 5)
+                    + std::to_string(dsTrailSSBias).substr(0, 5)
+                    + " BS×" + std::to_string(dsTrailBSBias).substr(0, 5)
                     + " (DS:" + latestVD.dsSignal.signalName()
                     + " " + std::to_string((int)latestVD.dsSignal.confidence) + "%)");
-                prevSSBias = latestVD.dsTrailSSBias;
-                prevBSBias = latestVD.dsTrailBSBias;
+                prevSSBias = dsTrailSSBias;
+                prevBSBias = dsTrailBSBias;
             }
-            ssGapFactor *= latestVD.dsTrailSSBias;
-            bsGapFactor *= latestVD.dsTrailBSBias;
+            ssGapFactor *= dsTrailSSBias;
+            bsGapFactor *= dsTrailBSBias;
             // Clamp final : éviter des valeurs absurdes
             ssGapFactor = std::clamp(ssGapFactor, 0.40, 4.0);
             bsGapFactor = std::clamp(bsGapFactor, 0.40, 4.0);
@@ -3292,9 +3295,16 @@ std::string TOP4EA_Engine::dashboard() const {
 
         // [3] Biais DeepSeek (dsTrailSSBias/dsTrailBSBias) appliqué dans trailGrid
         oss << std::setprecision(3);
-        oss << "║  [3] DS-Bias: SS×" << latestVD.dsTrailSSBias
-            << "  BS×" << latestVD.dsTrailBSBias;
-        if (latestVD.dsOverride) oss << " ⚡DS";
+        const bool dsFallback = marketIntel_->dsFallbackActive();
+        const double dsTrailSSBias = dsFallback ? 1.0 : latestVD.dsTrailSSBias;
+        const double dsTrailBSBias = dsFallback ? 1.0 : latestVD.dsTrailBSBias;
+        oss << "║  [3] DS-Bias: SS×" << dsTrailSSBias
+            << "  BS×" << dsTrailBSBias;
+        if (dsFallback) {
+            oss << " [DS-FALLBACK]";
+        } else if (latestVD.dsOverride) {
+            oss << " ⚡DS";
+        }
         oss << "\n";
 
         // [4] gapExpansionFactor (calibré par Adam/AutoML)
@@ -3303,8 +3313,8 @@ std::string TOP4EA_Engine::dashboard() const {
 
         // [5] Facteur effectif combiné SS/BS (avant phase-override dans trailGrid)
         // Estimation : Intel × DS-Bias (la phase-override se substitue complètement)
-        double effSS = std::clamp(ia.ssGapFactor * latestVD.dsTrailSSBias, 0.40, 4.0);
-        double effBS = std::clamp(ia.bsGapFactor * latestVD.dsTrailBSBias, 0.40, 4.0);
+        double effSS = std::clamp(ia.ssGapFactor * dsTrailSSBias, 0.40, 4.0);
+        double effBS = std::clamp(ia.bsGapFactor * dsTrailBSBias, 0.40, 4.0);
         oss << "║  [5] Effectif: SS×" << std::setprecision(3) << effSS
             << "  BS×" << effBS
             << "  [clamp 0.40–4.0]\n";

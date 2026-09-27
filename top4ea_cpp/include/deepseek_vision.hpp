@@ -119,6 +119,10 @@ public:
     // ─── Statistiques ─────────────────────────────────────────
     [[nodiscard]] int callCount()  const noexcept { return callCount_.load();  }
     [[nodiscard]] int errorCount() const noexcept { return errorCount_.load(); }
+    // Nombre d'erreurs DeepSeek consécutives depuis la dernière réponse valide.
+    [[nodiscard]] int consecutiveErrorCount() const noexcept {
+        return consecutiveErrorCount_.load();
+    }
 
     // ─── Âge du dernier signal en secondes (0 = tout frais) ───
     [[nodiscard]] long signalAgeSec() const noexcept {
@@ -198,6 +202,15 @@ private:
     // ─── Construction du prompt institutionnel ────────────────
     static std::string buildPrompt(const DSMarketContext& ctx);
 
+    void recordError() noexcept {
+        errorCount_.fetch_add(1);
+        consecutiveErrorCount_.fetch_add(1);
+    }
+
+    void recordSuccess() noexcept {
+        consecutiveErrorCount_.store(0);
+    }
+
     // ─── Parseur de réponse JSON LLM ──────────────────────────
     static DeepSeekSignal parseResponse(const std::string& json);
 
@@ -234,6 +247,7 @@ private:
 
     std::atomic<int> callCount_  { 0 };
     std::atomic<int> errorCount_ { 0 };
+    std::atomic<int> consecutiveErrorCount_ { 0 };
 };
 
 } // namespace top4ea

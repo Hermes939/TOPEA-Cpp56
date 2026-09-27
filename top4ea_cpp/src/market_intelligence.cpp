@@ -255,10 +255,39 @@ void MarketIntelligence::update(const Tick& tick, double /*pointSize*/,
         }
     }
 
+    bool dsFallbackJustEnded = false;
+    if (deepseek_.hasApiKey()) {
+        const auto now = std::chrono::steady_clock::now();
+        if (dsFallbackActive_.load()) {
+            const auto untilMs = dsFallbackUntilMs_.load();
+            const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now.time_since_epoch()).count();
+            if (nowMs >= untilMs) {
+                dsFallbackActive_.store(false);
+                dsFallbackUntilMs_.store(0);
+                deepseek_.resetSignal();
+                dsFallbackJustEnded = true;
+                std::cout << "[DS-FALLBACK] pause terminée — nouvelle tentative automatique\n";
+            }
+        } else if (deepseek_.consecutiveErrorCount() >= DS_FALLBACK_ERROR_THRESHOLD) {
+            const auto until = now + std::chrono::seconds(DS_FALLBACK_DURATION_SEC);
+            const auto untilMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                until.time_since_epoch()).count();
+            dsFallbackUntilMs_.store(untilMs);
+            dsFallbackActive_.store(true);
+            deepseek_.resetSignal();
+            std::cout << "[DS-FALLBACK] " << deepseek_.consecutiveErrorCount()
+                      << " erreurs consécutives — pause de "
+                      << DS_FALLBACK_DURATION_SEC << "s; biais trail = 1.0\n";
+        }
+    }
+
     bool canCallDS = m30Ready || m30Timeout;
     int dsTickMod  = inRecovery ? 3 : 5;  // plus réactif en recovery
     if (deepseek_.hasApiKey() && canCallDS &&
-        ((tickCount_ % dsTickMod == 1) || (tickCount_ % 20 == 0))) {
+        !dsFallbackActive_.load() &&
+        (dsFallbackJustEnded ||
+         (tickCount_ % dsTickMod == 1) || (tickCount_ % 20 == 0))) {
         // ── Source d'indicateurs UNIQUE — même snapshot que le dashboard ──
         // Le prompt DeepSeek utilise EXACTEMENT les mêmes valeurs RSI/MACD/BB
         // que le dashboard : celles de lastDecision_ (mis à jour par analyze()
@@ -998,7 +1027,9 @@ VisualDecision MarketIntelligence::analyze() const {
     DeepSeekSignal ds = deepseek_.getLastSignal();
     vd.dsSignal = ds;
 
-    if (ds.fresh && ds.signal != DSSignal::UNKNOWN) {
+    const bool dsUsable = !dsFallbackActive_.load() &&
+                          ds.fresh && ds.signal != DSSignal::UNKNOWN;
+    if (dsUsable) {
         bool localBullish = (vd.decision == MarketDecision::TRAIL_AGGRESSIVE &&
                              (st == MarketStructure::BULLISH_TREND ||
                               st == MarketStructure::BREAKOUT_UP));
@@ -1101,7 +1132,7 @@ VisualDecision MarketIntelligence::analyze() const {
     // le révoquer (flags dsGateSellActive / dsGateBuyActive protègent le résultat).
     bool dsGateSellActive = false;
     bool dsGateBuyActive  = false;
-    if (ds.fresh && ds.effectiveConfidence >= 60.0) {
+    if (dsUsable && ds.effectiveConfidence >= 60.0) {
         if (ds.signal == DSSignal::SELL_BIAS) {
             vd.allowBSRecovery = false;
             vd.bsBlockReason   = "[BS:DS-GATE SELL_BIAS "
@@ -1133,7 +1164,7 @@ VisualDecision MarketIntelligence::analyze() const {
         // ── Critères qui bloquent BS recovery (BUY Stop) ─────
         bool bsBearStruct    = (st == MarketStructure::BEARISH_TREND);
         bool bsRsiOverbought = (indM5.rsi >= 75.0 && indM30.rsi >= 65.0);
-        bool bsDsConfirm     = (ds2.fresh && ds2.signal == DSSignal::SELL_BIAS
+        bool bsDsConfirm     = (dsUsable && ds2.fresh && ds2.signal == DSSignal::SELL_BIAS
                                 && ds2.effectiveConfidence >= 55.0);
         bool bsOverexposed   = (netDelta > 0.10);
 
@@ -1155,7 +1186,7 @@ VisualDecision MarketIntelligence::analyze() const {
         // ── Critères qui bloquent SS recovery (SELL Stop) ────
         bool ssBullStruct   = (st == MarketStructure::BULLISH_TREND);
         bool ssRsiOversold  = (indM5.rsi <= 25.0 && indM30.rsi <= 35.0);
-        bool ssDsConfirm    = (ds2.fresh && ds2.signal == DSSignal::BUY_BIAS
+        bool ssDsConfirm    = (dsUsable && ds2.fresh && ds2.signal == DSSignal::BUY_BIAS
                                && ds2.effectiveConfidence >= 55.0);
         bool ssOverexposed  = (netDelta < -0.10);
 

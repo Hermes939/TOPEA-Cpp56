@@ -168,6 +168,20 @@ public:
     [[nodiscard]] long  dsLastCallAge()   const noexcept { return deepseek_.lastCallAgeSec(); }
     [[nodiscard]] int   dsCallCount()     const noexcept { return deepseek_.callCount();      }
     [[nodiscard]] int   dsErrorCount()    const noexcept { return deepseek_.errorCount();     }
+    [[nodiscard]] int   dsConsecutiveErrorCount() const noexcept {
+        return deepseek_.consecutiveErrorCount();
+    }
+    [[nodiscard]] bool dsFallbackActive() const noexcept {
+        return dsFallbackActive_.load();
+    }
+    [[nodiscard]] int dsFallbackRemainingSec() const noexcept {
+        if (!dsFallbackActive()) return 0;
+        const auto untilMs = dsFallbackUntilMs_.load();
+        const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        if (untilMs <= nowMs) return 0;
+        return static_cast<int>((untilMs - nowMs + 999) / 1000);
+    }
 
     // ─── Reset forcé du signal (si périmé depuis trop longtemps) ─
     void dsResetIfStale(long maxAgeSec = 300) noexcept {
@@ -325,6 +339,12 @@ private:
     bool dsTimedOut_          = false;
     std::chrono::steady_clock::time_point dsStartupBegin_{
         std::chrono::steady_clock::now()};
+
+    // ── Fallback DeepSeek après erreurs consécutives ───────────
+    static constexpr int DS_FALLBACK_ERROR_THRESHOLD = 10;
+    static constexpr int DS_FALLBACK_DURATION_SEC = 300;
+    std::atomic<bool> dsFallbackActive_ { false };
+    std::atomic<long long> dsFallbackUntilMs_ { 0 };
 
     // ── Couche DeepSeek LLM (async, non-bloquant) ─────────────
     mutable DeepSeekVision deepseek_;
