@@ -48,9 +48,9 @@ LOADER_OBJ := $(BUILDDIR)/loader.o
 LIB_TARGET    := $(BUILDDIR)/libtop4ea.so
 LOADER_TARGET := $(BUILDDIR)/top4ea
 
-.PHONY: all lib loader clean run
+.PHONY: all lib loader validate-calibration check clean run
 
-all: lib loader
+all: lib loader validate-calibration
 	@echo ""
 	@echo "TOP4EA DLL build OK"
 	@echo "  $(LIB_TARGET)"
@@ -69,6 +69,14 @@ $(BUILDDIR)/dll_%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
 
 ## ── Loader thin ──────────────────────────────────────────────
 loader: $(LOADER_TARGET)
+
+## ── Validation forward de l'impact de calibration ─────────────
+validate-calibration:
+	python3 ../tests/test_calibration_impact.py \
+		--csv data/error_log.csv \
+		--params automl/output/params.json
+
+check: all
 
 $(LOADER_TARGET): $(LOADER_OBJ) $(LIB_TARGET) | $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) $< -o $@ -L$(BUILDDIR) -ltop4ea -Wl,-rpath,'$$ORIGIN/../build' $(LDFLAGS)
