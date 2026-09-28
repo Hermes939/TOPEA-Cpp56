@@ -108,7 +108,15 @@ static void applyConfigKV(top4ea::Config& cfg,
         else if (key == "ds_stale_hard_sec")     cfg.dsStaleHardSec       = std::stoi(val);
         else if (key == "deepseek_timeout_sec")  cfg.deepseekTimeoutSec   = std::stoi(val);
         // Vote board gate
-        else if (key == "vote_gate_min_score")    cfg.voteGateMinScore     = std::stoi(val);
+        else if (key == "vote_ss_only_threshold") cfg.voteSsOnlyThreshold  = std::stoi(val);
+        else if (key == "vote_bs_only_threshold") cfg.voteBsOnlyThreshold  = std::stoi(val);
+        else if (key == "ds_hard_gate_pct")       cfg.dsHardGatePct        = std::stod(val);
+        // Legacy aliases
+        else if (key == "vote_gate_min_score") {
+            int threshold = std::stoi(val);
+            cfg.voteSsOnlyThreshold = -std::abs(threshold);
+            cfg.voteBsOnlyThreshold =  std::abs(threshold);
+        }
         else if (key == "vote_gate_ds_conf_high") cfg.voteGateDsConfHigh   = std::stoi(val);
         else if (key == "vote_gate_ds_conf_low")  cfg.voteGateDsConfLow    = std::stoi(val);
     } catch (...) {
@@ -179,6 +187,10 @@ static const std::vector<std::pair<std::string,std::string>> ENV_KEYS = {
     {"reconnect_ms",                "TOP4EA_RECONNECT_MS"},
     {"ds_stale_hard_sec",           "TOP4EA_DS_STALE_HARD_SEC"},
     {"deepseek_timeout_sec",        "TOP4EA_DEEPSEEK_TIMEOUT_SEC"},
+    {"vote_ss_only_threshold",      "TOP4EA_VOTE_SS_ONLY_THRESHOLD"},
+    {"vote_bs_only_threshold",      "TOP4EA_VOTE_BS_ONLY_THRESHOLD"},
+    {"ds_hard_gate_pct",            "TOP4EA_DS_HARD_GATE_PCT"},
+    // Legacy aliases
     {"vote_gate_min_score",         "TOP4EA_VOTE_GATE_MIN_SCORE"},
     {"vote_gate_ds_conf_high",      "TOP4EA_VOTE_GATE_DS_CONF_HIGH"},
     {"vote_gate_ds_conf_low",       "TOP4EA_VOTE_GATE_DS_CONF_LOW"},

@@ -638,10 +638,7 @@ const char* IntelligenceEngine::regimeName(Regime r) noexcept {
 //    (2) Signal DeepSeek effectif : ±2
 //    (3) Structure marché         : ±1
 //    (4) Signal DXY proxy         : ±1
-//  Seuils décision :
-//    score ≤ -2 → SS-only (direction SELL confirmée)
-//    score ≥ +2 → BS-only (direction BUY confirmée)
-//    [-2, +2]   → grille symétrique standard
+//  Seuils décision : ssOnlyThreshold et bsOnlyThreshold (configuration)
 // ────────────────────────────────────────────────────────────
 DirectionVote computeDirectionVote(
     double          buyLots,
@@ -652,7 +649,8 @@ DirectionVote computeDirectionVote(
     MarketStructure structure,
     DXYSignal       dxySignal,
     bool            lotsStale,
-    int             gateMinScore,
+    int             ssOnlyThreshold,
+    int             bsOnlyThreshold,
     int             dsConfHigh,
     int             dsConfLow) noexcept
 {
@@ -749,8 +747,8 @@ DirectionVote computeDirectionVote(
     if (vote.score < -5) vote.score = -5;
     if (vote.score >  5) vote.score =  5;
 
-    vote.ssOnly = (vote.score <= -gateMinScore);
-    vote.bsOnly = (vote.score >= +gateMinScore);
+    vote.ssOnly = (vote.score <= ssOnlyThreshold);
+    vote.bsOnly = (vote.score >= bsOnlyThreshold);
     vote.reason = r + "→score=" + std::to_string(vote.score);
 
     return vote;

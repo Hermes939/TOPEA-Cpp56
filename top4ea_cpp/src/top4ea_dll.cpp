@@ -122,6 +122,24 @@ static top4ea::Config loadConfig(const char* path) {
             else if (key=="state_poll_ms")    cfg.statePollMs       = std::stoi(val);
             else if (key=="reconnect_ms")     cfg.reconnectMs       = std::stoi(val);
             else if (key=="ds_stale_hard_sec") cfg.dsStaleHardSec   = std::stoi(val);
+            // Vote board gate — seuils directionnels et hard-gate DS
+            else if (key=="vote_ss_only_threshold")
+                cfg.voteSsOnlyThreshold = std::stoi(val);
+            else if (key=="vote_bs_only_threshold")
+                cfg.voteBsOnlyThreshold = std::stoi(val);
+            else if (key=="ds_hard_gate_pct")
+                cfg.dsHardGatePct = std::stod(val);
+            // Rétrocompatibilité avec l'ancien seuil partagé ±N
+            else if (key=="vote_gate_min_score") {
+                int threshold = std::stoi(val);
+                cfg.voteSsOnlyThreshold = -std::abs(threshold);
+                cfg.voteBsOnlyThreshold =  std::abs(threshold);
+            }
+            // Seuils de poids DS dans le vote board
+            else if (key=="vote_gate_ds_conf_high")
+                cfg.voteGateDsConfHigh = std::stoi(val);
+            else if (key=="vote_gate_ds_conf_low")
+                cfg.voteGateDsConfLow = std::stoi(val);
         } catch (...) {}
     }
     // digits=0 → auto-détection broker au démarrage
@@ -135,6 +153,9 @@ static top4ea::Config loadConfig(const char* path) {
         std::cout << "[DLL] Config chargé : " << path
                   << " | digits=0 → auto-détection broker activée\n";
     }
+    std::cout << "[DLL] Vote gate : SS≤" << cfg.voteSsOnlyThreshold
+              << " | BS≥" << cfg.voteBsOnlyThreshold
+              << " | DS hard≥" << cfg.dsHardGatePct << "%\n";
     return cfg;
 }
 

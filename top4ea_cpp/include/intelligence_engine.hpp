@@ -42,8 +42,8 @@ namespace top4ea {
 
 // ============================================================
 //  DirectionVote — résultat du vote board directionnel [-5,+5]
-//  Score < -2 → SELL-only (SS uniquement), > +2 → BUY-only (BS uniquement)
-//  [-2, +2]   → grille symétrique standard
+//  Score ≤ ssOnlyThreshold → SELL-only (SS uniquement)
+//  Score ≥ bsOnlyThreshold → BUY-only (BS uniquement)
 // ============================================================
 struct DirectionVote {
     int         score   = 0;        // [-5, +5]
@@ -69,7 +69,8 @@ DirectionVote computeDirectionVote(
     MarketStructure structure,
     DXYSignal    dxySignal,
     bool         lotsStale       = false,
-    int          gateMinScore    = 2,    // seuil ±N pour bsOnly/ssOnly
+    int          ssOnlyThreshold = -2,   // score ≤ seuil → SS-only
+    int          bsOnlyThreshold =  2,   // score ≥ seuil → BS-only
     int          dsConfHigh      = 60,   // conf DS% → poids ±2 / gate override
     int          dsConfLow       = 40) noexcept;  // conf DS% → poids ±1
 

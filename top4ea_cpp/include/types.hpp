@@ -304,16 +304,20 @@ struct Config {
     int         deepseekTimeoutSec = 120;
 
     // ─── Vote board gate — seuils configurables ──────────────
-    // voteGateMinScore    : score absolu minimum pour activer bsOnly/ssOnly
-    //                       Ex : 2 → bsOnly si score ≥+2, ssOnly si score ≤-2
-    //                       Augmenter (ex: 3) = gate plus strict (moins de blocages)
-    //                       Diminuer (ex: 1) = gate plus sensible (plus de blocages)
+    // voteSsOnlyThreshold : score ≤ cette valeur → SS-only (défaut -2)
+    // voteBsOnlyThreshold : score ≥ cette valeur → BS-only (défaut +2)
+    // dsHardGatePct       : confiance DS minimale pour le hard-gate directionnel
+    //                       (défaut 60%, appliqué à la confiance effective)
+    int    voteSsOnlyThreshold = -2;
+    int    voteBsOnlyThreshold =  2;
+    double dsHardGatePct       = 60.0;
+
+    // Alias de compatibilité pour les anciennes clés vote_gate_*.
+    // Ils restent utilisés comme replis si un ancien fichier les définit.
     // voteGateDsConfHigh  : confidence DeepSeek (%) pour poids ±2 dans le vote
-    //                       ET pour le DS gate override sur le vote board
     //                       Défaut : 60. (ex: 70 = DS doit être très confiant)
     // voteGateDsConfLow   : confidence DeepSeek (%) pour poids ±1 dans le vote
     //                       Défaut : 40. Doit être < voteGateDsConfHigh.
-    int    voteGateMinScore   = 2;    // seuil ±N pour bsOnly/ssOnly [1–5]
     int    voteGateDsConfHigh = 60;   // conf DS% pour poids ±2 / DS gate override
     int    voteGateDsConfLow  = 40;   // conf DS% pour poids ±1
 

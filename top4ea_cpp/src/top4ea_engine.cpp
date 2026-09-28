@@ -32,7 +32,9 @@ TOP4EA_Engine::TOP4EA_Engine(Config cfg)
     marketIntel_ = std::make_unique<MarketIntelligence>();
     marketIntel_->dsSetStaleHardSec(cfg_.dsStaleHardSec);
     marketIntel_->setDeepSeekStartupTimeout(cfg_.deepseekTimeoutSec);
-    marketIntel_->setVoteGateMinScore(cfg_.voteGateMinScore);
+    marketIntel_->setVoteSsOnlyThreshold(cfg_.voteSsOnlyThreshold);
+    marketIntel_->setVoteBsOnlyThreshold(cfg_.voteBsOnlyThreshold);
+    marketIntel_->setDsHardGatePct(cfg_.dsHardGatePct);
     marketIntel_->setVoteGateDsConfHigh(cfg_.voteGateDsConfHigh);
     marketIntel_->setVoteGateDsConfLow(cfg_.voteGateDsConfLow);
 
@@ -236,7 +238,9 @@ void TOP4EA_Engine::rebuildSubsystems() {
     marketIntel_ = std::make_unique<MarketIntelligence>();
     marketIntel_->dsSetStaleHardSec(cfg_.dsStaleHardSec);
     marketIntel_->setDeepSeekStartupTimeout(cfg_.deepseekTimeoutSec);
-    marketIntel_->setVoteGateMinScore(cfg_.voteGateMinScore);
+    marketIntel_->setVoteSsOnlyThreshold(cfg_.voteSsOnlyThreshold);
+    marketIntel_->setVoteBsOnlyThreshold(cfg_.voteBsOnlyThreshold);
+    marketIntel_->setDsHardGatePct(cfg_.dsHardGatePct);
     marketIntel_->setVoteGateDsConfHigh(cfg_.voteGateDsConfHigh);
     marketIntel_->setVoteGateDsConfLow(cfg_.voteGateDsConfLow);
     vlMgr_       = ProfitLockManager(cfg_);
@@ -904,7 +908,8 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
                 vdNow.structure,
                 vdNow.dxyResult.signal,
                 /*lotsStale=*/false,
-                cfg_.voteGateMinScore,
+                cfg_.voteSsOnlyThreshold,
+                cfg_.voteBsOnlyThreshold,
                 cfg_.voteGateDsConfHigh,
                 cfg_.voteGateDsConfLow);
             log("[VOTE-POST-SS] " + freshVote.reason);
@@ -912,12 +917,12 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
         }
 
         // ── Gate vote board — surcharge directionnelle (DS gate prioritaire) ──
-        // Règle de priorité : si DS ≥ voteGateDsConfHigh% effectif est actif,
+        // Règle de priorité : si DS ≥ dsHardGatePct% effectif est actif,
         // son gate prime sur le vote board.
         {
             const DirectionVote& dv    = vdNow.dirVote;
             const DeepSeekSignal& dsSig = vdNow.dsSignal;
-            double dsGateConf = (double)cfg_.voteGateDsConfHigh;
+            double dsGateConf = cfg_.dsHardGatePct;
             bool dsGateBuy  = (dsSig.fresh && dsSig.effectiveConfidence >= dsGateConf
                                && dsSig.signal == DSSignal::BUY_BIAS);
             bool dsGateSell = (dsSig.fresh && dsSig.effectiveConfidence >= dsGateConf
@@ -1001,7 +1006,8 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
                 vdNow.structure,
                 vdNow.dxyResult.signal,
                 /*lotsStale=*/false,
-                cfg_.voteGateMinScore,
+                cfg_.voteSsOnlyThreshold,
+                cfg_.voteBsOnlyThreshold,
                 cfg_.voteGateDsConfHigh,
                 cfg_.voteGateDsConfLow);
             log("[VOTE-POST-BS] " + freshVote.reason);

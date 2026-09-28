@@ -1048,10 +1048,10 @@ VisualDecision MarketIntelligence::analyze() const {
 
         // ── [B] DS oriente une décision neutre (TRAIL_NATURAL ou OBSERVE) ──
         // FIX PRINCIPAL : DS était ignoré dans les cas les plus fréquents.
-        // Si DS est confiant (≥60% effectif), il prend la main et oriente activement.
+        // Si DS atteint le seuil configuré, il prend la main et oriente activement.
         bool neutralDecision = (vd.decision == MarketDecision::TRAIL_NATURAL ||
                                 vd.decision == MarketDecision::OBSERVE);
-        if (neutralDecision && ds.effectiveConfidence >= 60.0) {
+        if (neutralDecision && ds.effectiveConfidence >= dsHardGatePct_) {
             if (ds.signal == DSSignal::BUY_BIAS || ds.signal == DSSignal::SELL_BIAS) {
                 std::string dir = (ds.signal == DSSignal::BUY_BIAS) ? "BULL" : "BEAR";
                 vd.decision   = MarketDecision::TRAIL_AGGRESSIVE;
@@ -1108,9 +1108,11 @@ VisualDecision MarketIntelligence::analyze() const {
         }
 
         // ── [E] Biais DS sur les facteurs de trail ──────────────
-        // Proportionnel à la confidence effective (entre 60% et 100%) : max ±20%
-        if (ds.effectiveConfidence >= 60.0) {
-            double intensity  = std::min((ds.effectiveConfidence - 60.0) / 40.0, 1.0); // 0..1
+        // Proportionnel à la confidence effective (du seuil configuré à 100%) : max ±20%
+        if (ds.effectiveConfidence >= dsHardGatePct_) {
+            double confidenceRange = std::max(100.0 - dsHardGatePct_, 1.0);
+            double intensity  = std::min(
+                (ds.effectiveConfidence - dsHardGatePct_) / confidenceRange, 1.0); // 0..1
             double biasFactor = 1.0 + intensity * 0.20;  // 1.0 → 1.20
             if (ds.signal == DSSignal::SELL_BIAS) {
                 // Marché baissier → SS (Sell Stop) plus serré, BS plus large
@@ -1124,7 +1126,7 @@ VisualDecision MarketIntelligence::analyze() const {
         }
     }
 
-    // ── [F] Gate DeepSeek direct (HARD GATE ≥60% effectif) ──────
+    // ── [F] Gate DeepSeek direct (seuil configurable) ──────────
     // Gate symétrique : bloque UN côté ET force-autorise l'AUTRE sans condition.
     //   SELL_BIAS ≥60% → allowBSRecovery=false  ET  allowSSRecovery=true  (force)
     //   BUY_BIAS  ≥60% → allowSSRecovery=false  ET  allowBSRecovery=true  (force)
@@ -1132,18 +1134,20 @@ VisualDecision MarketIntelligence::analyze() const {
     // le révoquer (flags dsGateSellActive / dsGateBuyActive protègent le résultat).
     bool dsGateSellActive = false;
     bool dsGateBuyActive  = false;
-    if (dsUsable && ds.effectiveConfidence >= 60.0) {
+    if (dsUsable && ds.effectiveConfidence >= dsHardGatePct_) {
         if (ds.signal == DSSignal::SELL_BIAS) {
             vd.allowBSRecovery = false;
             vd.bsBlockReason   = "[BS:DS-GATE SELL_BIAS "
-                               + std::to_string((int)ds.effectiveConfidence) + "% ≥60%]";
+                               + std::to_string((int)ds.effectiveConfidence) + "% ≥"
+                               + std::to_string((int)dsHardGatePct_) + "%]";
             vd.allowSSRecovery = true;   // force-allow SS (direction alignée DS)
             vd.ssBlockReason.clear();
             dsGateSellActive = true;
         } else if (ds.signal == DSSignal::BUY_BIAS) {
             vd.allowSSRecovery = false;
             vd.ssBlockReason   = "[SS:DS-GATE BUY_BIAS "
-                               + std::to_string((int)ds.effectiveConfidence) + "% ≥60%]";
+                               + std::to_string((int)ds.effectiveConfidence) + "% ≥"
+                               + std::to_string((int)dsHardGatePct_) + "%]";
             vd.allowBSRecovery = true;   // force-allow BS (direction alignée DS)
             vd.bsBlockReason.clear();
             dsGateBuyActive = true;
@@ -1252,7 +1256,8 @@ VisualDecision MarketIntelligence::analyze() const {
             st,
             vd.dxyResult.signal,
             lotsStale,
-            voteGateMinScore_,
+            voteSsOnlyThreshold_,
+            voteBsOnlyThreshold_,
             voteGateDsConfHigh_,
             voteGateDsConfLow_
         );

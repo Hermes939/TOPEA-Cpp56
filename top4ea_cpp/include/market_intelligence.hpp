@@ -213,7 +213,14 @@ public:
     void dsSetStaleHardSec(int sec) noexcept { deepseek_.setStaleHardSec(sec); }
 
     // ─── Vote board gate — seuils configurables ───────────────
-    void setVoteGateMinScore   (int v) noexcept { voteGateMinScore_    = v; }
+    void setVoteSsOnlyThreshold(int v) noexcept { voteSsOnlyThreshold_ = v; }
+    void setVoteBsOnlyThreshold(int v) noexcept { voteBsOnlyThreshold_ = v; }
+    void setDsHardGatePct     (double v) noexcept { dsHardGatePct_ = v; }
+    // Legacy setter retained for callers using the former shared threshold.
+    void setVoteGateMinScore   (int v) noexcept {
+        voteSsOnlyThreshold_ = -std::abs(v);
+        voteBsOnlyThreshold_ =  std::abs(v);
+    }
     void setVoteGateDsConfHigh (int v) noexcept { voteGateDsConfHigh_  = v; }
     void setVoteGateDsConfLow  (int v) noexcept { voteGateDsConfLow_   = v; }
 
@@ -331,7 +338,9 @@ private:
 
     // ── Timeout démarrage DeepSeek ────────────────────────────
     // ── Vote board gate thresholds ────────────────────────────
-    int  voteGateMinScore_   = 2;
+    int  voteSsOnlyThreshold_ = -2;
+    int  voteBsOnlyThreshold_ =  2;
+    double dsHardGatePct_     = 60.0;
     int  voteGateDsConfHigh_ = 60;
     int  voteGateDsConfLow_  = 40;
 
