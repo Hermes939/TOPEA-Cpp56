@@ -282,6 +282,17 @@ void TOP4EA_Engine::onOrder(const OrderInfo& ord) {
 
 void TOP4EA_Engine::onAccount(const AccountSnapshot& acc) {
     std::lock_guard lk(accMu_);
+    // bridge_->start() lance ses threads juste après le premier snapshot
+    // compte. Initialiser ici la référence évite qu'un tick concurrent ne
+    // compare le solde réel à 0 et ne déclenche immédiatement la pause
+    // journalière.
+    if (dailyStartBalance_ <= 0.0 && acc.balance > 0.0) {
+        dailyStartBalance_ = acc.balance;
+        dailyResetTime_ = Clock::now();
+        dailyTargetReached_ = false;
+        log("Référence objectif journalier initialisée: "
+            + std::to_string(dailyStartBalance_) + " " + acc.currency);
+    }
     account_ = acc;
 }
 
@@ -2879,6 +2890,7 @@ void TOP4EA_Engine::checkDailyTarget() {
         balance  = account_.balance;
         startBal = dailyStartBalance_;
     }
+    if (startBal <= 0.0) return; // snapshot initial encore indisponible
     double profitToday = balance - startBal;
     double target      = startBal * cfg_.dailyTargetPct / 100.0;
     if (profitToday >= target) {

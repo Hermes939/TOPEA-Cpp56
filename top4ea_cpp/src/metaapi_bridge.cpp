@@ -1,7 +1,7 @@
 // ============================================================
 //  TOP4EA — metaapi_bridge.cpp  C++20
 //  Connexion MetaApi :
-//   - REST polling /symbols/{sym}/currentPrice pour ticks fiables
+//   - REST polling /symbols/{sym}/current-price pour ticks fiables
 //   - REST POST /trade pour ordres
 //   - REST polling /positions /orders /accountInformation
 // ============================================================
@@ -280,7 +280,7 @@ std::optional<AccountSnapshot> MetaApiBridge::requestAccount(int /*timeoutMs*/) 
 
 // ============================================================
 //  requestSymbolSpec — Auto-détection spécifications broker
-//  Endpoint : GET /users/current/accounts/{id}/symbols/{sym}
+//  Endpoint : GET /users/current/accounts/{id}/symbols/{sym}/specification
 //  Peut être appelé AVANT start() (appel synchrone HTTP brut)
 //
 //  Champs extraits :
@@ -305,7 +305,7 @@ SymbolSpec MetaApiBridge::requestSymbolSpec(const std::string& symbol,
     }
 
     std::string path = "/users/current/accounts/" + accountId_
-                     + "/symbols/" + symbol;
+                     + "/symbols/" + symbol + "/specification";
     std::cout << "[BrokerSpec] Interrogation broker → " << path << "\n";
 
     std::string resp = httpGet(path);
