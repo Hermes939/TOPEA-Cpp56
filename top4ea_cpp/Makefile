@@ -32,6 +32,7 @@ DLL_SRCS  := $(SRCDIR)/metaapi_bridge.cpp       \
 	     $(SRCDIR)/market_intelligence.cpp   \
 	     $(SRCDIR)/grid_slot_agent.cpp       \
 	     $(SRCDIR)/agent_orchestrator.cpp    \
+     $(SRCDIR)/recycling_agents.cpp      \
 	     $(SRCDIR)/top4ea_engine.cpp         \
 	     $(SRCDIR)/top4ea_dll.cpp
 
@@ -48,7 +49,7 @@ LOADER_OBJ := $(BUILDDIR)/loader.o
 LIB_TARGET    := $(BUILDDIR)/libtop4ea.so
 LOADER_TARGET := $(BUILDDIR)/top4ea
 
-.PHONY: all lib loader validate-calibration check clean run test-grid-units
+.PHONY: all lib loader validate-calibration check clean run test-grid-units test-recycling
 
 all: lib loader validate-calibration
 	@echo ""
@@ -78,6 +79,12 @@ validate-calibration:
 
 test-grid-units: $(BUILDDIR)/test_grid_engine_pips
 	./$(BUILDDIR)/test_grid_engine_pips
+
+test-recycling: $(BUILDDIR)/test_recycling_agents
+	./$(BUILDDIR)/test_recycling_agents
+
+$(BUILDDIR)/test_recycling_agents: tests/test_recycling_agents.cpp $(SRCDIR)/recycling_agents.cpp | $(BUILDDIR)
+	$(CXX) $(CXXFLAGS) $^ -o $@
 
 $(BUILDDIR)/test_grid_engine_pips: tests/test_grid_engine_pips.cpp $(SRCDIR)/grid_engine.cpp | $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) $^ -o $@

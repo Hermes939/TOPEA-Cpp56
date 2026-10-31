@@ -338,6 +338,28 @@ struct Config {
     double      maxLots             = 0.0;  // 0 = désactivé
     int         maxRecoveryActive   = 0;    // 0 = désactivé
 
+    // ─── Agents de recyclage autonomes X/Y/Z ───────────────────
+    // Port de TOP4EA_AgentsRecycleurs.mqh; les seuils portent sur le
+    // P&L flottant net de chaque position et les actions ferment au marché.
+    bool        agentsEnabled          = true;
+    bool        agentClassByLots       = false;
+    double      agentXLotMax           = 0.10;
+    double      agentYLotMax           = 1.00;
+    double      agentXUsdMax           = 10.0;
+    double      agentYUsdMax           = 100.0;
+    double      agentXCapUsd           = 8.0;
+    double      agentYCapUsd           = 80.0;
+    double      agentZDefconUsd        = 150.0;
+    double      agentZSplitFrac        = 0.50;
+    double      agentCapVsFlowMult     = 1.50;
+    double      agentCapAgainstMult    = 0.60;
+    double      agentSacrificePctBase  = 0.30;
+    double      agentSacrificePctEmerg = 1.20;
+    double      agentHarvestUsd        = 0.50;
+    int         agentXCadenceTicks     = 10;
+    int         agentYCadenceTicks     = 10;
+    int         agentZCadenceTicks     = 50;
+
     // ─── BiLSTM Agent — apprentissage continu online ─────────
     // lstm_enabled      : active le BiLSTM (false par défaut — opt-in)
     // lstm_seq_len      : longueur de la fenêtre séquentielle (timesteps)

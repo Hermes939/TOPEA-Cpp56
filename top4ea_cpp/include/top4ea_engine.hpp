@@ -9,6 +9,7 @@
 #include "grid_engine.hpp"
 #include "basket_manager.hpp"
 #include "recovery_engine.hpp"
+#include "recycling_agents.hpp"
 #include "intelligence_engine.hpp"
 #include "market_intelligence.hpp"
 #include "agent_orchestrator.hpp"
@@ -108,6 +109,13 @@ private:
     void closeWavePartial(int wave);  // wave 0=Wave1(50%) wave 1=Wave2(30%)
     void closeOneSide(int sideType);
     void emergencyCloseAll(double currentPnL); // urgence MaxRecoveryHold si basket_max_loss atteint
+    void runRecyclingAgents(std::vector<OrderInfo>& orders,
+                            const AccountSnapshot& account,
+                            const Tick& tick,
+                            const IntelligenceEngine::Analysis& analysis);
+    void executeRecyclingAction(const RecyclingAction& action,
+                                std::vector<OrderInfo>& orders,
+                                const Tick& tick);
 
     // ─── Verrouillage Profit Trailing (V-SS / V-BS) ─────────
     // Met à jour les ordres V-BS et V-SS sur le broker
@@ -164,6 +172,7 @@ private:
     std::unique_ptr<GridEngine>         grid_;
     std::unique_ptr<BasketMonitor>      basketMon_;
     std::unique_ptr<RecoveryEngine>     recovery_;
+    std::unique_ptr<RecyclingAgents>    recyclingAgents_;
     std::unique_ptr<IntelligenceEngine> intel_;
 
     // ─── Multi-Agent Layer ───────────────────────────────────
