@@ -44,6 +44,7 @@ static void applyConfigKV(top4ea::Config& cfg,
         else if (key == "lot_multiplier")   cfg.lotMultiplier       = std::stod(val);
         else if (key == "lot_multiplier_max") cfg.lotMultiplierMax  = std::stod(val);
         else if (key == "grid_gap")         cfg.gridGap             = std::stoi(val);
+        else if (key == "grid_gap_pips")    cfg.gridGapPips         = std::stod(val);
         else if (key == "basket_target")    cfg.basketTarget        = std::stod(val);
         else if (key == "basket_max_loss")  cfg.basketMaxLoss       = std::stod(val);
         else if (key == "cascade_price_dispatch_pct")  cfg.cascadePriceDispatchPct  = std::stod(val);
@@ -62,6 +63,8 @@ static void applyConfigKV(top4ea::Config& cfg,
         else if (key == "atr_mult")             cfg.atrMultiplier       = std::stod(val);
         else if (key == "atr_grid_min")         cfg.atrGridMin          = std::stoi(val);
         else if (key == "atr_grid_max")         cfg.atrGridMax          = std::stoi(val);
+        else if (key == "atr_grid_min_pips")    cfg.atrGridMinPips      = std::stod(val);
+        else if (key == "atr_grid_max_pips")    cfg.atrGridMaxPips      = std::stod(val);
         else if (key == "use_pnl_velocity")     cfg.usePnlVelocity      = (val=="true"||val=="1");
         else if (key == "velocity_alpha")       cfg.velocityAlpha       = std::stod(val);
         else if (key == "velocity_trigger")     cfg.velocityTrigger     = std::stod(val);
@@ -81,7 +84,9 @@ static void applyConfigKV(top4ea::Config& cfg,
         else if (key == "gap_expansion_factor")  cfg.gapExpansionFactor   = std::stod(val);
         else if (key == "trail_asymmetry_factor") cfg.trailAsymmetryFactor = std::stod(val);
         else if (key == "trail_fixed_dist_pts")  cfg.trailFixedDistPts    = std::stoi(val);
+        else if (key == "trail_fixed_dist_pips") cfg.trailFixedDistPips   = std::stod(val);
         else if (key == "trail_min_change_pts")  cfg.trailMinChangePts    = std::stoi(val);
+        else if (key == "trail_min_change_pips") cfg.trailMinChangePips   = std::stod(val);
         // Verrouillage profit trailing
         else if (key == "vl_enabled")            cfg.vlEnabled            = (val=="true"||val=="1");
         else if (key == "vl_activation_pts")     cfg.vlActivationPts      = std::stoi(val);
@@ -93,6 +98,8 @@ static void applyConfigKV(top4ea::Config& cfg,
         else if (key == "aggressive_step_pts")   cfg.aggressiveStepPts    = std::stoi(val);
         else if (key == "natural_bs_dist_pts")   cfg.naturalBsDistPts     = std::stoi(val);
         else if (key == "natural_ss_dist_pts")   cfg.naturalSsDistPts     = std::stoi(val);
+        else if (key == "natural_bs_dist_pips")  cfg.naturalBsDistPips    = std::stod(val);
+        else if (key == "natural_ss_dist_pips")  cfg.naturalSsDistPips    = std::stod(val);
         // Dual Trail BUY (SS AGGRESSIVE miroir)
         else if (key == "x_lock_pips_buy")       cfg.xLockPipsBuy         = std::stoi(val);
         else if (key == "ss_overshoot_pips")     cfg.ssOvershootPips      = std::stoi(val);
@@ -133,6 +140,7 @@ static const std::vector<std::pair<std::string,std::string>> ENV_KEYS = {
     {"lot_multiplier",              "TOP4EA_LOT_MULTIPLIER"},
     {"lot_multiplier_max",          "TOP4EA_LOT_MULTIPLIER_MAX"},
     {"grid_gap",                    "TOP4EA_GRID_GAP"},
+    {"grid_gap_pips",               "TOP4EA_GRID_GAP_PIPS"},
     {"basket_target",               "TOP4EA_BASKET_TARGET"},
     {"basket_max_loss",             "TOP4EA_BASKET_MAX_LOSS"},
     {"max_recovery",                "TOP4EA_MAX_RECOVERY"},
@@ -147,6 +155,8 @@ static const std::vector<std::pair<std::string,std::string>> ENV_KEYS = {
     {"atr_mult",                    "TOP4EA_ATR_MULT"},
     {"atr_grid_min",                "TOP4EA_ATR_GRID_MIN"},
     {"atr_grid_max",                "TOP4EA_ATR_GRID_MAX"},
+    {"atr_grid_min_pips",           "TOP4EA_ATR_GRID_MIN_PIPS"},
+    {"atr_grid_max_pips",           "TOP4EA_ATR_GRID_MAX_PIPS"},
     {"use_pnl_velocity",            "TOP4EA_USE_PNL_VELOCITY"},
     {"velocity_alpha",              "TOP4EA_VELOCITY_ALPHA"},
     {"velocity_trigger",            "TOP4EA_VELOCITY_TRIGGER"},
@@ -165,7 +175,9 @@ static const std::vector<std::pair<std::string,std::string>> ENV_KEYS = {
     {"gap_expansion_factor",        "TOP4EA_GAP_EXPANSION_FACTOR"},
     {"trail_asymmetry_factor",      "TOP4EA_TRAIL_ASYMMETRY_FACTOR"},
     {"trail_fixed_dist_pts",        "TOP4EA_TRAIL_FIXED_DIST_PTS"},
+    {"trail_fixed_dist_pips",       "TOP4EA_TRAIL_FIXED_DIST_PIPS"},
     {"trail_min_change_pts",        "TOP4EA_TRAIL_MIN_CHANGE_PTS"},
+    {"trail_min_change_pips",       "TOP4EA_TRAIL_MIN_CHANGE_PIPS"},
     {"vl_enabled",                  "TOP4EA_VL_ENABLED"},
     {"vl_activation_pts",           "TOP4EA_VL_ACTIVATION_PTS"},
     {"vl_trail_pts",                "TOP4EA_VL_TRAIL_PTS"},
@@ -175,6 +187,8 @@ static const std::vector<std::pair<std::string,std::string>> ENV_KEYS = {
     {"aggressive_step_pts",         "TOP4EA_AGGRESSIVE_STEP_PTS"},
     {"natural_bs_dist_pts",         "TOP4EA_NATURAL_BS_DIST_PTS"},
     {"natural_ss_dist_pts",         "TOP4EA_NATURAL_SS_DIST_PTS"},
+    {"natural_bs_dist_pips",        "TOP4EA_NATURAL_BS_DIST_PIPS"},
+    {"natural_ss_dist_pips",        "TOP4EA_NATURAL_SS_DIST_PIPS"},
     {"x_lock_pips_buy",             "TOP4EA_X_LOCK_PIPS_BUY"},
     {"ss_overshoot_pips",           "TOP4EA_SS_OVERSHOOT_PIPS"},
     {"aggressive_ss_step_pts",      "TOP4EA_AGGRESSIVE_SS_STEP_PTS"},

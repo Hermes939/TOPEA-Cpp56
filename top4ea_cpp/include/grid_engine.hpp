@@ -40,27 +40,27 @@ public:
     // anchorPrice    : origine de la grille (gridOrigin_), jamais le prix courant
     // recovDepth     : profondeur recovery SS → SS placé à anchorPrice - (depth+1)*GridGap
     // gapFactor      : facteur asymétrique (1.0 = neutre, >1 = stop plus éloigné)
-    // distOverridePts: si > 0, remplace trailFixedDistPts (mode NATURAL asymétrique)
+    // distOverridePrice: si > 0, distance exacte en unités de prix
     [[nodiscard]] StopPlacement computeSellStop(
         int    currentTicket,
         double currentLevel,
         double anchorPrice,
         int    recovDepth      = 0,
         double gapFactor       = 1.0,
-        int    distOverridePts = -1) const noexcept;
+        double distOverridePrice = 0.0) const noexcept;
 
     // Calcule le niveau cible BUYSTOP — ancrage géométrique pur
     // anchorPrice    : origine de la grille (gridOrigin_), jamais le prix courant
     // recovDepth     : profondeur recovery BS → BS placé à anchorPrice + (depth+1)*GridGap
     // gapFactor      : facteur asymétrique (1.0 = neutre, >1 = stop plus éloigné)
-    // distOverridePts: si > 0, remplace trailFixedDistPts (mode NATURAL asymétrique)
+    // distOverridePrice: si > 0, distance exacte en unités de prix
     [[nodiscard]] StopPlacement computeBuyStop(
         int    currentTicket,
         double currentLevel,
         double anchorPrice,
         int    recovDepth      = 0,
         double gapFactor       = 1.0,
-        int    distOverridePts = -1) const noexcept;
+        double distOverridePrice = 0.0) const noexcept;
 
     // Mode dual trail côté SELL — NATURAL ou AGGRESSIVE
     // ss_profit_pips : profit flottant des Sell en points (> 0 = en profit)
@@ -104,6 +104,7 @@ public:
 
 private:
     [[nodiscard]] double pointSize()  const noexcept;
+    [[nodiscard]] double pipPrice()  const noexcept;
 
     Config         cfg_;
     math::ATR      atr_;

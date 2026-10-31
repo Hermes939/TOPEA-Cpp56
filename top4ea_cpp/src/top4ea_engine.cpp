@@ -132,6 +132,18 @@ void TOP4EA_Engine::detectAndApplyBrokerSpec() {
             " (digits=" + std::to_string(cfg_.digits) + ","
             " point=" + std::to_string(cfg_.point) + ","
             " tickValue=" + std::to_string(cfg_.tickValue) + ")");
+        const bool hasPipConfig =
+            cfg_.gridGapPips > 0.0 || cfg_.atrGridMinPips > 0.0 ||
+            cfg_.atrGridMaxPips > 0.0 || cfg_.trailFixedDistPips > 0.0 ||
+            cfg_.trailMinChangePips >= 0.0 ||
+            cfg_.naturalBsDistPips > 0.0 || cfg_.naturalSsDistPips > 0.0;
+        if (hasPipConfig && cfg_.digits > 0 && cfg_.point > 0.0) {
+            resolvePipGridConfig();
+        } else if (hasPipConfig) {
+            pipConfigUnresolved_ = true;
+            log("[Units] Spécification broker requise pour les pips — "
+                "placement/modification des stops désactivé jusqu'à détection");
+        }
     }
 }
 
@@ -157,6 +169,8 @@ void TOP4EA_Engine::applySymbolSpec(const SymbolSpec& spec) {
     cfg_.contractSize    = (spec.contractSize > 0.0) ? spec.contractSize
                                                       : cfg_.contractSize;
 
+    resolvePipGridConfig();
+
     // ── Rescale des paramètres grille en points ──────────────
     // Les valeurs dans top4ea.conf (grid_gap=500, atr_grid_min=200…)
     // sont définies pour un broker 2-digit (point=0.01).
@@ -166,9 +180,12 @@ void TOP4EA_Engine::applySymbolSpec(const SymbolSpec& spec) {
     // On rescale pour conserver la même amplitude en $ du prix réel.
     if (oldDigits > 0 && spec.digits != oldDigits) {
         double scale = std::pow(10.0, (double)(spec.digits - oldDigits));
-        cfg_.gridGap         = (int)std::round((double)cfg_.gridGap * scale);
-        cfg_.atrGridMin      = cfg_.atrGridMin * scale;
-        cfg_.atrGridMax      = cfg_.atrGridMax * scale;
+        if (cfg_.gridGapPips <= 0.0)
+            cfg_.gridGap = (int)std::round((double)cfg_.gridGap * scale);
+        if (cfg_.atrGridMinPips <= 0.0)
+            cfg_.atrGridMin *= scale;
+        if (cfg_.atrGridMaxPips <= 0.0)
+            cfg_.atrGridMax *= scale;
         // ── CORRECTION : rescale VL pts en cohérence avec gridGap ──
         // vlActivationPts et vlTrailPts sont définis en "points" référencés
         // au broker 2-digit (point=0.01). Si le broker utilise un nombre de
@@ -176,13 +193,22 @@ void TOP4EA_Engine::applySymbolSpec(const SymbolSpec& spec) {
         cfg_.vlActivationPts = (int)std::round((double)cfg_.vlActivationPts * scale);
         cfg_.vlTrailPts      = (int)std::round((double)cfg_.vlTrailPts * scale);
         // Rescale aussi trail_fixed_dist_pts et cascade_dispatch_pips
-        cfg_.trailFixedDistPts = (int)std::round((double)cfg_.trailFixedDistPts * scale);
+        if (cfg_.trailFixedDistPips <= 0.0)
+            cfg_.trailFixedDistPts =
+                (int)std::round((double)cfg_.trailFixedDistPts * scale);
+        if (cfg_.trailMinChangePips < 0.0)
+            cfg_.trailMinChangePts =
+                (int)std::round((double)cfg_.trailMinChangePts * scale);
         // Rescale dual trail pts (cohérence avec gridGap après changement de digits)
         cfg_.xLockPips           = (int)std::round((double)cfg_.xLockPips           * scale);
         cfg_.bsOvershootPips     = (int)std::round((double)cfg_.bsOvershootPips     * scale);
         cfg_.aggressiveStepPts   = (int)std::round((double)cfg_.aggressiveStepPts   * scale);
-        cfg_.naturalBsDistPts    = (int)std::round((double)cfg_.naturalBsDistPts    * scale);
-        cfg_.naturalSsDistPts    = (int)std::round((double)cfg_.naturalSsDistPts    * scale);
+        if (cfg_.naturalBsDistPips <= 0.0)
+            cfg_.naturalBsDistPts =
+                (int)std::round((double)cfg_.naturalBsDistPts * scale);
+        if (cfg_.naturalSsDistPips <= 0.0)
+            cfg_.naturalSsDistPts =
+                (int)std::round((double)cfg_.naturalSsDistPts * scale);
         // Rescale Dual Trail BUY pts (miroir côté SS AGGRESSIVE)
         cfg_.xLockPipsBuy        = (int)std::round((double)cfg_.xLockPipsBuy        * scale);
         cfg_.ssOvershootPips     = (int)std::round((double)cfg_.ssOvershootPips     * scale);
@@ -223,6 +249,39 @@ void TOP4EA_Engine::applySymbolSpec(const SymbolSpec& spec) {
         + " (était " + std::to_string(oldPt) + ")"
         + " tickValue=" + std::to_string(cfg_.tickValue) + "$/lot/pt"
         + " | " + spec.report());
+}
+
+void TOP4EA_Engine::resolvePipGridConfig() {
+    const bool hasPipGridConfig =
+        cfg_.gridGapPips > 0.0 ||
+        cfg_.atrGridMinPips > 0.0 ||
+        cfg_.atrGridMaxPips > 0.0;
+    if (!hasPipGridConfig) {
+        pipConfigUnresolved_ = false;
+        return;
+    }
+
+    const double pipPrice = pricePerPip(cfg_);
+    if (cfg_.point <= 0.0 || pipPrice <= 0.0) {
+        pipConfigUnresolved_ = true;
+        log("[Units] Conversion pips→points impossible — nouveaux ordres gelés");
+        return;
+    }
+
+    const double pointsPerPip = pipPrice / cfg_.point;
+    if (cfg_.gridGapPips > 0.0)
+        cfg_.gridGap = (int)std::round(cfg_.gridGapPips * pointsPerPip);
+    if (cfg_.atrGridMinPips > 0.0)
+        cfg_.atrGridMin = cfg_.atrGridMinPips * pointsPerPip;
+    if (cfg_.atrGridMaxPips > 0.0)
+        cfg_.atrGridMax = cfg_.atrGridMaxPips * pointsPerPip;
+
+    pipConfigUnresolved_ = false;
+    log("[Units] Grille pips→points : pip=" + std::to_string(pipPrice)
+        + "$, " + std::to_string(pointsPerPip) + " pts/pip"
+        + " | gap=" + std::to_string(cfg_.gridGap) + " pts"
+        + " | ATR min/max=" + std::to_string(cfg_.atrGridMin)
+        + "/" + std::to_string(cfg_.atrGridMax) + " pts");
 }
 
 // ────────────────────────────────────────────────────────────
@@ -1144,6 +1203,16 @@ void TOP4EA_Engine::syncTriggersFallback(const std::vector<OrderInfo>& orders) {
 //  Trail de grille — 4 axes adaptatifs
 // ────────────────────────────────────────────────────────────
 void TOP4EA_Engine::trailGrid() {
+    if (pipConfigUnresolved_) {
+        static bool warned = false;
+        if (!warned) {
+            log("[Units] Stops non gérés : impossible de convertir la configuration "
+                "en pips sans spécification digits/point");
+            warned = true;
+        }
+        return;
+    }
+
     // ── MaxRecoveryHold : aucun nouvel ordre autorisé ────────────
     // processTick() retourne avant d'appeler trailGrid() en mode hold,
     // mais cette garde protège contre les appels directs (géométrique, fallback).
@@ -1155,16 +1224,23 @@ void TOP4EA_Engine::trailGrid() {
     double bsLot = recovery_->buyLot();
 
     // ── Lire la décision Visual AI + DeepSeek (orchestrateur) ────
-    // LOCK_WAIT  : DeepSeek ou VisualAI a détecté une zone de risque élevé
-    //              → on gèle le trailing (ne pas modifier les stops existants)
+    // LOCK_WAIT  : attente stratégique avant une entrée; le trailing existant continue
     // TRAIL_FREEZE: RSI extrême ou désaccord fort DeepSeek → gel protecteur
     // STOP_ORDERS : spread critique / news spike → aucun nouvel ordre
     // NO_TRADE    : session fermée → aucun nouvel ordre
     MarketDecision vdDecision = orchestrator_.currentDecision();
     bool vlDecisionStopsNew   = (vdDecision == MarketDecision::STOP_ORDERS ||
                                  vdDecision == MarketDecision::NO_TRADE);
-    bool vlDecisionFreeze     = (vdDecision == MarketDecision::LOCK_WAIT ||
-                                 vdDecision == MarketDecision::TRAIL_FREEZE);
+    bool vlDecisionFreeze     = (vdDecision == MarketDecision::TRAIL_FREEZE);
+
+    // LOCK_WAIT est une attente stratégique avant une nouvelle entrée, pas une
+    // anomalie du marché. Les stops déjà posés continuent leur trailing pour
+    // protéger les positions ouvertes. TRAIL_FREEZE garde son gel explicite.
+    static bool wasLockWait = false;
+    const bool isLockWait = (vdDecision == MarketDecision::LOCK_WAIT);
+    if (isLockWait && !wasLockWait)
+        log("[DS/VisualAI] LOCK_WAIT stratégique — trailing des stops existants maintenu");
+    wasLockWait = isLockWait;
 
     if (vlDecisionStopsNew) {
         log("[DS/VisualAI] trailGrid bloqué — décision="
@@ -1202,13 +1278,13 @@ void TOP4EA_Engine::trailGrid() {
     if (vlDecisionFreeze && !trailFrozen) {
         log("[DS/VisualAI] Trail gelé par décision="
             + MarketIntelligence::decisionName(vdDecision)
-            + " (LOCK_WAIT ou TRAIL_FREEZE — stops non modifiés)");
+            + " (TRAIL_FREEZE — stops non modifiés)");
         trailFrozen = true;
     }
 
     // ── Trailing session-based + phases de profit ─────────────
-    // Spec : 1 pip = 0.01 prix (XAUUSDm digits=2) = 1 point
-    // Lot 0.10 → $0.10/pip → 10 pips = $1.00
+    // Les distances de cette section sont exprimées en pips,
+    // puis converties en unités de prix pour le symbole détecté.
     //
     //  Phase 0  (P&L < +$8)  : stops initiaux 800 pips — pas de trailing actif
     //  Phase 1  ($8 – $15)   : trail session-based (TOKYO=450p LONDON=800p NY=1050p)
@@ -1221,8 +1297,10 @@ void TOP4EA_Engine::trailGrid() {
         std::vector<OrderInfo> ordCache;
         { std::lock_guard lk(ordersMu_); ordCache = orders_; }
         double pnl      = basketProfit(ordCache);
-        int    halfGap  = grid_->effectiveGridGap() / 2;
-        if (halfGap < 1) halfGap = 1;
+        const double pipPrice = pricePerPip(cfg_);
+        double halfGapPips = (pipPrice > 0.0)
+            ? grid_->halfGap() / pipPrice : 0.0;
+        if (halfGapPips < 1e-6) halfGapPips = 1.0;
 
         static constexpr double TRAIL_ACTIVATE_PNL = 8.0;   // +$8  = +80 pips × 0.10
         static constexpr double TRAIL_TIGHT1_PNL   = 15.0;  // +$15 = +150 pips → 600p
@@ -1230,12 +1308,12 @@ void TOP4EA_Engine::trailGrid() {
 
         if (pnl >= TRAIL_TIGHT2_PNL) {
             // Phase 3 — ultra-serré 400 pips
-            double f = 400.0 / halfGap;
+            double f = 400.0 / halfGapPips;
             ssGapFactor = f;
             bsGapFactor = f;
         } else if (pnl >= TRAIL_TIGHT1_PNL) {
             // Phase 2 — serré 600 pips
-            double f = 600.0 / halfGap;
+            double f = 600.0 / halfGapPips;
             ssGapFactor = f;
             bsGapFactor = f;
         } else if (pnl >= TRAIL_ACTIVATE_PNL) {
@@ -1249,7 +1327,7 @@ void TOP4EA_Engine::trailGrid() {
                 case TradingSession::OVERLAP_LN: pipDist = 1050.0; break; // overlap London-NY = forte volatilité → même distance que NY
                 default:                         pipDist = 800.0;  break;
             }
-            double f = pipDist / halfGap;
+            double f = pipDist / halfGapPips;
             ssGapFactor = f;
             bsGapFactor = f;
         }
@@ -1704,10 +1782,15 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
     // Ancrage géométrique pur : passe gridOrigin_ comme référence fixe
     // Le niveau est toujours à origin - (depth+1) × GridGap × factor
     // Mode NATURAL asymétrique : utilise naturalSsDistPts si trailModeAuto activé
-    int ssDistOverride = -1;
-    if (cfg_.trailModeAuto && cfg_.naturalSsDistPts > 0)
-        ssDistOverride = cfg_.naturalSsDistPts;
-    auto pl = grid_->computeSellStop(ss, ssLevel_.load(), gridOrigin_, recovDepth, gapFactor, ssDistOverride);
+    double ssDistOverridePrice = 0.0;
+    if (cfg_.trailModeAuto) {
+        if (cfg_.naturalSsDistPips > 0.0)
+            ssDistOverridePrice = cfg_.naturalSsDistPips * pricePerPip(cfg_);
+        else if (cfg_.naturalSsDistPts > 0)
+            ssDistOverridePrice = cfg_.naturalSsDistPts * cfg_.point;
+    }
+    auto pl = grid_->computeSellStop(ss, ssLevel_.load(), gridOrigin_,
+                                     recovDepth, gapFactor, ssDistOverridePrice);
 
     if (pl.needsCreate) {
         double curBid  = grid_->bid();
@@ -1765,11 +1848,17 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
             }
         }
 
+        const double ssDistancePrice = curBid - pl.targetPrice;
+        const double ssPipPrice = pricePerPip(cfg_);
+        const double ssDistancePips = (ssPipPrice > 0.0)
+            ? ssDistancePrice / ssPipPrice : 0.0;
         log("SS absent → création @ " + std::to_string(pl.targetPrice)
             + " [origin=" + std::to_string(gridOrigin_)
             + " recov=" + std::to_string(recovDepth)
             + " gap×" + std::to_string(gapFactor)
-            + " dist=" + std::to_string((curBid - pl.targetPrice) / cfg_.point) + "pts]");
+            + " dist=$" + std::to_string(ssDistancePrice)
+            + "/" + std::to_string(ssDistancePips) + "p ("
+            + std::to_string(ssDistancePrice / cfg_.point) + "pts)]");
         TradeCmd cmd = makeSellStop(lot, pl.targetPrice, comment);
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
@@ -1800,8 +1889,12 @@ void TOP4EA_Engine::ensureSellStop(double lot, const std::string& comment,
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             ssLevel_.store(pl.targetPrice);
+            const double pipPrice = pricePerPip(cfg_);
+            const double deltaPips = (pipPrice > 0.0) ? pl.delta / pipPrice : 0.0;
             log("SS ↑ ratchet → " + std::to_string(pl.targetPrice)
-                + " [+" + std::to_string(pl.delta / cfg_.point) + "pts]");
+                + " [+" + std::to_string(pl.delta) + "$ / "
+                + std::to_string(deltaPips) + "p | "
+                + std::to_string(pl.delta / cfg_.point) + "pts]");
         }
     }
 }
@@ -2020,10 +2113,15 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
     // ── Mode NATURAL (ou trailModeAuto=false) ────────────────────
     // Ancrage géométrique pur : passe gridOrigin_ comme référence fixe
     // Le niveau est toujours à origin + (depth+1) × GridGap × factor
-    int bsDistOverride = -1;
-    if (cfg_.trailModeAuto && cfg_.naturalBsDistPts > 0)
-        bsDistOverride = cfg_.naturalBsDistPts;
-    auto pl = grid_->computeBuyStop(bs, bsLevel_.load(), gridOrigin_, recovDepth, gapFactor, bsDistOverride);
+    double bsDistOverridePrice = 0.0;
+    if (cfg_.trailModeAuto) {
+        if (cfg_.naturalBsDistPips > 0.0)
+            bsDistOverridePrice = cfg_.naturalBsDistPips * pricePerPip(cfg_);
+        else if (cfg_.naturalBsDistPts > 0)
+            bsDistOverridePrice = cfg_.naturalBsDistPts * cfg_.point;
+    }
+    auto pl = grid_->computeBuyStop(bs, bsLevel_.load(), gridOrigin_,
+                                    recovDepth, gapFactor, bsDistOverridePrice);
 
     if (pl.needsCreate) {
         double curAsk  = grid_->ask();
@@ -2081,11 +2179,17 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
             }
         }
 
+        const double bsDistancePrice = pl.targetPrice - curAsk;
+        const double bsPipPrice = pricePerPip(cfg_);
+        const double bsDistancePips = (bsPipPrice > 0.0)
+            ? bsDistancePrice / bsPipPrice : 0.0;
         log("BS absent → création @ " + std::to_string(pl.targetPrice)
             + " [origin=" + std::to_string(gridOrigin_)
             + " recov=" + std::to_string(recovDepth)
             + " gap×" + std::to_string(gapFactor)
-            + " dist=" + std::to_string((pl.targetPrice - curAsk) / cfg_.point) + "pts]");
+            + " dist=$" + std::to_string(bsDistancePrice)
+            + "/" + std::to_string(bsDistancePips) + "p ("
+            + std::to_string(bsDistancePrice / cfg_.point) + "pts)]");
         TradeCmd cmd = makeBuyStop(lot, pl.targetPrice, comment);
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
@@ -2116,8 +2220,12 @@ void TOP4EA_Engine::ensureBuyStop(double lot, const std::string& comment,
         auto res = bridge_->sendCommand(cmd);
         if (res.success) {
             bsLevel_.store(pl.targetPrice);
+            const double pipPrice = pricePerPip(cfg_);
+            const double deltaPips = (pipPrice > 0.0) ? pl.delta / pipPrice : 0.0;
             log("BS ↓ ratchet → " + std::to_string(pl.targetPrice)
-                + " [-" + std::to_string(pl.delta / cfg_.point) + "pts]");
+                + " [-" + std::to_string(pl.delta) + "$ / "
+                + std::to_string(deltaPips) + "p | "
+                + std::to_string(pl.delta / cfg_.point) + "pts]");
         }
     }
 }
@@ -3105,10 +3213,14 @@ std::string TOP4EA_Engine::dashboard() const {
         oss << "║  Trail  : " << trailStatus
             << " [" << modeLabelSell << " | " << modeLabelBuy << "]\n";
         oss << "║  SS dist: ";
+        const double pipPrice = pricePerPip(cfg_);
         if (ssLockActive_) {
             oss << std::setprecision(5) << ssLockPrice_ << " [LOCK BUY]";
         } else if (dualTrailModeBuy_ == TrailMode::AGGRESSIVE && aggressiveSsTarget_ > 0.0) {
             oss << std::setprecision(5) << aggressiveSsTarget_ << "→lock";
+        } else if (cfg_.naturalSsDistPips > 0.0) {
+            oss << std::setprecision(1) << cfg_.naturalSsDistPips << "p ($"
+                << std::setprecision(2) << cfg_.naturalSsDistPips * pipPrice << ")";
         } else {
             oss << cfg_.naturalSsDistPts << "pts";
         }
@@ -3117,27 +3229,36 @@ std::string TOP4EA_Engine::dashboard() const {
             oss << std::setprecision(5) << vLockPrice_ << " [LOCK]";
         } else if (dualTrailMode_ == TrailMode::AGGRESSIVE && aggressiveBsTarget_ > 0.0) {
             oss << std::setprecision(5) << aggressiveBsTarget_ << "→lock";
+        } else if (cfg_.naturalBsDistPips > 0.0) {
+            oss << std::setprecision(1) << cfg_.naturalBsDistPips << "p ($"
+                << std::setprecision(2) << cfg_.naturalBsDistPips * pipPrice << ")";
         } else {
             oss << cfg_.naturalBsDistPts << "pts";
         }
         oss << "\n";
         // Profit flottant — côté SELL (positions Sell en profit → BS AGGRESSIVE)
-        int pipSize = (cfg_.digits >= 3) ? 10 : 10;
-        double ssPips = ssProfitPipsCache_ / pipSize;
+        double pipPoints = (cfg_.point > 0.0)
+            ? pricePerPip(cfg_) / cfg_.point : 10.0;
+        if (pipPoints <= 0.0) pipPoints = 10.0;
+        double ssPips = ssProfitPipsCache_ / pipPoints;
         oss << "║  Sell profit: " << std::setprecision(1) << ssProfitPipsCache_
             << "pts (" << ssPips << "pips) seuil=" << cfg_.xLockPips << "pts\n";
         // Profit flottant — côté BUY (positions Buy en profit → SS AGGRESSIVE)
-        double bsPips = bsProfitPipsCache_ / pipSize;
+        double bsPips = bsProfitPipsCache_ / pipPoints;
         oss << "║  Buy  profit: " << bsProfitPipsCache_
             << "pts (" << bsPips << "pips) seuil=" << cfg_.xLockPipsBuy << "pts\n";
         oss << std::setprecision(2);
-    } else if (cfg_.trailFixedDistPts > 0) {
-        int pipSize = (cfg_.digits >= 3) ? 10 : 10;   // 1 pip = 10 points
-        double pips = (double)cfg_.trailFixedDistPts / pipSize;
+    } else if (cfg_.trailFixedDistPips > 0.0 || cfg_.trailFixedDistPts > 0) {
+        double priceDist = cfg_.trailFixedDistPips > 0.0
+            ? cfg_.trailFixedDistPips * pricePerPip(cfg_)
+            : cfg_.trailFixedDistPts * cfg_.point;
+        double pips = pricePerPip(cfg_) > 0.0
+            ? priceDist / pricePerPip(cfg_) : 0.0;
         oss << "║  Trail  : " << (dashFrozen ? "❄FIGÉ (zone TP)" : "ACTIF")
-            << " [FIXE " << cfg_.trailFixedDistPts << "pts≈" << pips << "pips]\n";
-        oss << "║  SS dist: " << cfg_.trailFixedDistPts << "pts"
-            << "  BS dist: " << cfg_.trailFixedDistPts << "pts\n";
+            << " [FIXE " << std::setprecision(1) << pips << "p ≈ $"
+            << std::setprecision(2) << priceDist << "]\n";
+        oss << "║  SS dist: " << pips << "p"
+            << "  BS dist: " << pips << "p\n";
     } else {
         oss << "║  Trail  : " << (dashFrozen ? "❄FIGÉ (zone TP)" : "ACTIF") << "\n";
         oss << "║  SS gap : ×" << std::setprecision(3) << dashSsGap
@@ -3191,8 +3312,14 @@ std::string TOP4EA_Engine::dashboard() const {
     }
     oss << "\n";
     oss << "║  Ordres mkt : " << mkt << "  [ZONE " << zoneStr << "]\n";
-    oss << "║  GridGap   : " << grid_->effectiveGridGap() << " pts"
-        << " (ATR=" << std::setprecision(1) << grid_->atrPoints() << ")\n";
+    const double gapPoints = grid_->effectiveGridGap();
+    const double pipPrice  = pricePerPip(cfg_);
+    const double gapPrice  = gapPoints * cfg_.point;
+    const double gapPips   = (pipPrice > 0.0) ? gapPrice / pipPrice : 0.0;
+    oss << "║  GridGap   : " << std::setprecision(0) << gapPoints << " pts"
+        << " / " << std::setprecision(1) << gapPips << "p ($"
+        << std::setprecision(2) << gapPrice << ")"
+        << " (ATR=" << std::setprecision(1) << grid_->atrPoints() << " pts)\n";
     oss << "║  Régime    : ";
     switch(grid_->regime()) {
         case VolRegime::Low:    oss << "LOW VOL\n";  break;

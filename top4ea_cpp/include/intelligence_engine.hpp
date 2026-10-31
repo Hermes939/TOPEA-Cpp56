@@ -131,6 +131,9 @@ public:
         double       ssGapFactor     = 1.0;   // multiplicateur gap BuyStop  (SS)
         double       bsGapFactor     = 1.0;   // multiplicateur gap SellStop (BS)
         bool         trailFrozen     = false; // stops figés (zone TP proche)
+        bool         trailFreezeByTP       = false;
+        bool         trailFreezeByDisplace = false;
+        bool         trailFreezeByExhaust  = false;
         double       trailTightness  = 1.0;   // serrage global
 
         // === [80%] Score de risque composite (4 axes) ===

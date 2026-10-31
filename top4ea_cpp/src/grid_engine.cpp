@@ -45,8 +45,11 @@ void GridEngine::pushOHLC(double o, double h, double l, double c) noexcept {
 }
 
 double GridEngine::pointSize() const noexcept {
-    return (cfg_.digits == 5 || cfg_.digits == 3)
-           ? cfg_.point : cfg_.point;
+    return cfg_.point;
+}
+
+double GridEngine::pipPrice() const noexcept {
+    return pricePerPip(cfg_);
 }
 
 double GridEngine::atrPoints() const noexcept {
@@ -122,7 +125,7 @@ StopPlacement GridEngine::computeSellStop(
     double /*anchorPrice*/,
     int    /*recovDepth*/,
     double gapFactor,
-    int    distOverridePts) const noexcept
+    double distOverridePrice) const noexcept
 {
     std::lock_guard lk(mu_);
     StopPlacement sp;
@@ -130,14 +133,15 @@ StopPlacement GridEngine::computeSellStop(
     double bid = lastBid_.load(std::memory_order_relaxed);
 
     // ── Calcul de la distance SS/bid ──────────────────────────
-    // distOverridePts > 0 : override explicite (mode NATURAL asymétrique)
-    // Mode fixe (trailFixedDistPts > 0) : distance exacte en points
-    // Mode adaptatif (défaut)            : demi-gap × facteur intel
-    double step;
-    int effectiveDist = (distOverridePts > 0) ? distOverridePts : cfg_.trailFixedDistPts;
-    if (effectiveDist > 0) {
-        step = (double)effectiveDist * pointSize();
-    } else {
+    // Les distances explicites sont en unités de prix, après conversion des pips.
+    // Les anciennes clés en points restent disponibles pour compatibilité.
+    double step = distOverridePrice;
+    if (step <= 0.0 && cfg_.trailFixedDistPips > 0.0)
+        step = cfg_.trailFixedDistPips * pipPrice();
+    if (step <= 0.0 && cfg_.trailFixedDistPts > 0)
+        step = (double)cfg_.trailFixedDistPts * pointSize();
+    const bool fixedDistance = step > 0.0;
+    if (!fixedDistance) {
         step = halfGap() * gapFactor;
     }
     double target = math::normalize(bid - step, cfg_.digits);
@@ -155,13 +159,12 @@ StopPlacement GridEngine::computeSellStop(
     } else {
         sp.delta = target - currentLevel;
         // ── RATCHET HAUT + seuil de réactivité ─────────────────
-        // trailMinChangePts = 0  → réactif à chaque tick (1 point mini)
-        // trailMinChangePts > 0  → bouge seulement si delta > seuil
-        // Mode fixe ou override  → seuil = 1 pt par défaut (quasi-continu)
         double minChange;
-        if (cfg_.trailMinChangePts > 0) {
+        if (cfg_.trailMinChangePips >= 0.0) {
+            minChange = cfg_.trailMinChangePips * pipPrice();
+        } else if (cfg_.trailMinChangePts > 0) {
             minChange = (double)cfg_.trailMinChangePts * pointSize();
-        } else if (effectiveDist > 0) {
+        } else if (fixedDistance) {
             minChange = pointSize();            // 1 point → trail quasi-continu
         } else {
             minChange = halfGap() / 10.0;      // comportement original
@@ -177,7 +180,7 @@ StopPlacement GridEngine::computeBuyStop(
     double /*anchorPrice*/,
     int    /*recovDepth*/,
     double gapFactor,
-    int    distOverridePts) const noexcept
+    double distOverridePrice) const noexcept
 {
     std::lock_guard lk(mu_);
     StopPlacement sp;
@@ -185,16 +188,16 @@ StopPlacement GridEngine::computeBuyStop(
     double ask = lastAsk_.load(std::memory_order_relaxed);
 
     // ── Calcul de la distance BS/ask ──────────────────────────
-    // distOverridePts > 0 : override explicite (mode NATURAL asymétrique)
-    // Mode fixe (trailFixedDistPts > 0) : distance exacte en points
-    // Mode adaptatif (défaut)            : demi-gap × facteur intel
-    double step;
-    int effectiveDist = (distOverridePts > 0) ? distOverridePts : cfg_.trailFixedDistPts;
-    if (effectiveDist > 0) {
-        step = (double)effectiveDist * pointSize();
-    } else {
+    // Les distances explicites sont en unités de prix, après conversion des pips.
+    // Les anciennes clés en points restent disponibles pour compatibilité.
+    double step = distOverridePrice;
+    if (step <= 0.0 && cfg_.trailFixedDistPips > 0.0)
+        step = cfg_.trailFixedDistPips * pipPrice();
+    if (step <= 0.0 && cfg_.trailFixedDistPts > 0)
+        step = (double)cfg_.trailFixedDistPts * pointSize();
+    const bool fixedDistance = step > 0.0;
+    if (!fixedDistance)
         step = halfGap() * gapFactor;
-    }
     double target = math::normalize(ask + step, cfg_.digits);
 
     // Garde broker : respect du STOPLEVEL minimum
@@ -210,13 +213,12 @@ StopPlacement GridEngine::computeBuyStop(
     } else {
         sp.delta = currentLevel - target;
         // ── RATCHET BAS + seuil de réactivité ──────────────────
-        // trailMinChangePts = 0  → réactif à chaque tick (1 point mini)
-        // trailMinChangePts > 0  → bouge seulement si delta > seuil
-        // Mode fixe ou override  → seuil = 1 pt par défaut (quasi-continu)
         double minChange;
-        if (cfg_.trailMinChangePts > 0) {
+        if (cfg_.trailMinChangePips >= 0.0) {
+            minChange = cfg_.trailMinChangePips * pipPrice();
+        } else if (cfg_.trailMinChangePts > 0) {
             minChange = (double)cfg_.trailMinChangePts * pointSize();
-        } else if (effectiveDist > 0) {
+        } else if (fixedDistance) {
             minChange = pointSize();            // 1 point → trail quasi-continu
         } else {
             minChange = halfGap() / 10.0;      // comportement original

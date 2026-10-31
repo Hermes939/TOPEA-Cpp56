@@ -106,6 +106,7 @@ struct Config {
     double      lotMultiplier   = 1.15;   // multiplicateur min (recovery 1)
     double      lotMultiplierMax = 1.66;  // multiplicateur max (recovery maxN)
     int         gridGap         = 500;          // points – valeur initiale
+    double      gridGapPips     = 0.0;          // si > 0, remplace gridGap (conversion après détection broker)
     double      basketTarget    = 7.0;          // $ fixe profit target
     double      basketMaxLoss   = -300.0;       // $ seuil d'urgence si maxRecoveryHold (négatif)
     int         maxRecovery     = 20;
@@ -131,6 +132,8 @@ struct Config {
     double      atrMultiplier   = 0.5;          // gap = ATR * mult
     double      atrGridMin      = 200;          // plancher points
     double      atrGridMax      = 1000;         // plafond points
+    double      atrGridMinPips  = 0.0;          // si > 0, remplace atrGridMin
+    double      atrGridMaxPips  = 0.0;          // si > 0, remplace atrGridMax
 
     bool        usePnlVelocity  = true;         // fermeture prédictive
     double      velocityAlpha   = 0.3;          // EWMA α
@@ -164,12 +167,14 @@ struct Config {
     //     Ex: 100 pts = 10 pips sur XAUUSDm (1 pip = 10 pts / 2 décimales)
     //     Limité par le STOPLEVEL broker (minDistPts) si valeur trop faible.
     int         trailFixedDistPts    = 0;
+    double      trailFixedDistPips   = 0.0;     // si > 0, distance trail en pips
 
     // [6] Seuil minimum de déplacement avant de mettre à jour le trail (en points)
     //     0 = réactif à chaque tick (1 pt minimum interne)
     //     Ex: 25 pts = trail recalculé seulement si prix bouge de 25 pts
     //     Avec trailFixedDistPts > 0 : mettre à 1 pour un suivi quasi-continu
     int         trailMinChangePts    = 0;
+    double      trailMinChangePips   = -1.0;    // si >= 0, seuil trail en pips
 
     // ─── 5 fonctionnalités académiques ──────────────────────
     // [A] Gap OU Optimal (Avellaneda-Lee 2010)
@@ -260,7 +265,7 @@ struct Config {
     // Quand trailModeAuto = true, le moteur surveille le profit flottant de la
     // Sell Stop active et bascule en mode AGGRESSIVE quand profit >= xLockPips.
     //
-    // NATURAL  : comportement symétrique existant (distances naturalSsDistPts / naturalBsDistPts)
+    // NATURAL  : distances en pips prioritaires; anciennes clés *_pts restent compatibles
     // AGGRESSIVE : le BS glisse vers ss_entry + bsOvershootPips par steps de aggressiveStepPts/tick
     //   → une fois le verrou atteint, le BS garantit un profit minimum même si déclenché avant target
     //
@@ -274,6 +279,8 @@ struct Config {
     int         aggressiveStepPts  = 200;   // glissement BS par tick en mode AGGRESSIVE
     int         naturalBsDistPts   = 600;   // distance BS NATURAL (0 = trailFixedDistPts)
     int         naturalSsDistPts   = 600;   // distance SS NATURAL (0 = trailFixedDistPts)
+    double      naturalBsDistPips  = 0.0;   // distance BS depuis le marché, en pips
+    double      naturalSsDistPips  = 0.0;   // distance SS depuis le marché, en pips
     // ── Côté BUY (SS AGGRESSIVE miroir) ──────────────────────
     // Quand le profit flottant des positions BUY >= xLockPipsBuy, la SS glisse
     // progressivement vers bsAvgEntry + ssOvershootPips (AU-DESSUS de l'entrée BUY)
@@ -356,6 +363,20 @@ struct Config {
     std::string lstmWeightsPath          = "automl/output/lstm_weights.bin";
     bool        lstmUseDedicatedBinary   = false;
 };
+
+// Pip convention used by the trading configuration:
+// - XAU/XAG with 2 decimals: 1 pip = 10 points = 0.10 price units.
+// - 3- and 5-decimal symbols: 1 pip = 10 points.
+// - Other precision formats: 1 pip = 1 point.
+[[nodiscard]] inline double pricePerPip(const Config& cfg) noexcept {
+    if (cfg.point <= 0.0) return 0.0;
+    const bool metal = cfg.symbol.rfind("XAU", 0) == 0 ||
+                       cfg.symbol.rfind("XAG", 0) == 0;
+    if (cfg.digits == 3 || cfg.digits == 5 ||
+        (metal && cfg.digits == 2))
+        return cfg.point * 10.0;
+    return cfg.point;
+}
 
 // ─── Résultat d'une opération de trading ────────────────────
 struct TradeResult {

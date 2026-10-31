@@ -61,6 +61,7 @@ static top4ea::Config loadConfig(const char* path) {
             else if (key=="lot_multiplier")    cfg.lotMultiplier      = std::stod(val);
             else if (key=="lot_multiplier_max") cfg.lotMultiplierMax  = std::stod(val);
             else if (key=="grid_gap")         cfg.gridGap           = std::stoi(val);
+            else if (key=="grid_gap_pips")    cfg.gridGapPips       = std::stod(val);
             else if (key=="basket_target")    cfg.basketTarget      = std::stod(val);
             else if (key=="basket_max_loss")  cfg.basketMaxLoss     = std::stod(val);
             else if (key=="max_recovery")     cfg.maxRecovery       = std::stoi(val);
@@ -73,6 +74,8 @@ static top4ea::Config loadConfig(const char* path) {
             else if (key=="atr_mult")         cfg.atrMultiplier     = std::stod(val);
             else if (key=="atr_grid_min")     cfg.atrGridMin        = std::stoi(val);
             else if (key=="atr_grid_max")     cfg.atrGridMax        = std::stoi(val);
+            else if (key=="atr_grid_min_pips") cfg.atrGridMinPips   = std::stod(val);
+            else if (key=="atr_grid_max_pips") cfg.atrGridMaxPips   = std::stod(val);
             else if (key=="use_pnl_velocity") cfg.usePnlVelocity    = (val=="true"||val=="1");
             else if (key=="velocity_alpha")   cfg.velocityAlpha     = std::stod(val);
             else if (key=="velocity_trigger") cfg.velocityTrigger   = std::stod(val);
@@ -83,7 +86,9 @@ static top4ea::Config loadConfig(const char* path) {
             else if (key=="gap_expansion_factor")  cfg.gapExpansionFactor  = std::stod(val);
             else if (key=="trail_asymmetry_factor") cfg.trailAsymmetryFactor= std::stod(val);
             else if (key=="trail_fixed_dist_pts") cfg.trailFixedDistPts   = std::stoi(val);
+            else if (key=="trail_fixed_dist_pips") cfg.trailFixedDistPips = std::stod(val);
             else if (key=="trail_min_change_pts") cfg.trailMinChangePts   = std::stoi(val);
+            else if (key=="trail_min_change_pips") cfg.trailMinChangePips = std::stod(val);
             else if (key=="cascade_price_dispatch_pct")  cfg.cascadePriceDispatchPct  = std::stod(val);
             else if (key=="cascade_price_dispatch_pips") cfg.cascadePriceDispatchPips = std::stoi(val);
             else if (key=="cascade_spread_max_mult")    cfg.cascadeSpreadMaxMult    = std::stod(val);
@@ -102,6 +107,8 @@ static top4ea::Config loadConfig(const char* path) {
             else if (key=="aggressive_step_pts") cfg.aggressiveStepPts = std::stoi(val);
             else if (key=="natural_bs_dist_pts") cfg.naturalBsDistPts  = std::stoi(val);
             else if (key=="natural_ss_dist_pts") cfg.naturalSsDistPts  = std::stoi(val);
+            else if (key=="natural_bs_dist_pips") cfg.naturalBsDistPips = std::stod(val);
+            else if (key=="natural_ss_dist_pips") cfg.naturalSsDistPips = std::stod(val);
             // Dual Trail BUY (SS AGGRESSIVE miroir)
             else if (key=="x_lock_pips_buy")         cfg.xLockPipsBuy        = std::stoi(val);
             else if (key=="ss_overshoot_pips")        cfg.ssOvershootPips     = std::stoi(val);

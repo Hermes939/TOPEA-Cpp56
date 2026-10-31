@@ -80,6 +80,7 @@ private:
     // Appelé dans start() avant bridge_->start() (HTTP synchrone brut).
     void detectAndApplyBrokerSpec();
     void applySymbolSpec(const SymbolSpec& spec);
+    void resolvePipGridConfig();
     void rebuildSubsystems();                  // recrée grid/basket/recovery/intel
 
     // ─── Logique principale ──────────────────────────────────
@@ -158,6 +159,7 @@ private:
     // ─── Membres ─────────────────────────────────────────────
     Config                              cfg_;
     SymbolSpec                          symbolSpec_;   // specs broker détectées
+    bool                                pipConfigUnresolved_ = false;
     std::unique_ptr<MetaApiBridge>      bridge_;
     std::unique_ptr<GridEngine>         grid_;
     std::unique_ptr<BasketMonitor>      basketMon_;

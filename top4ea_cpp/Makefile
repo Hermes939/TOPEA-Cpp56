@@ -48,7 +48,7 @@ LOADER_OBJ := $(BUILDDIR)/loader.o
 LIB_TARGET    := $(BUILDDIR)/libtop4ea.so
 LOADER_TARGET := $(BUILDDIR)/top4ea
 
-.PHONY: all lib loader validate-calibration check clean run
+.PHONY: all lib loader validate-calibration check clean run test-grid-units
 
 all: lib loader validate-calibration
 	@echo ""
@@ -75,6 +75,12 @@ validate-calibration:
 	python3 ../tests/test_calibration_impact.py \
 		--csv data/error_log.csv \
 		--params automl/output/params.json
+
+test-grid-units: $(BUILDDIR)/test_grid_engine_pips
+	./$(BUILDDIR)/test_grid_engine_pips
+
+$(BUILDDIR)/test_grid_engine_pips: tests/test_grid_engine_pips.cpp $(SRCDIR)/grid_engine.cpp | $(BUILDDIR)
+	$(CXX) $(CXXFLAGS) $^ -o $@
 
 check: all
 
