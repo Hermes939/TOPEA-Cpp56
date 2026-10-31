@@ -292,7 +292,13 @@ std::string IntelligenceEngine::buildReasoning(const Analysis& a,
     oss << "[80%] TRAIL: ss×" << std::setprecision(3) << a.ssGapFactor
         << " bs×" << a.bsGapFactor
         << "  asym×" << a.asymmetryMult;
-    if (a.trailFrozen) oss << "  ❄ FIGÉ (P&L " << (pnlRatio * 100.0) << "%)";
+    if (a.trailFrozen) {
+        oss << "  ❄ FIGÉ";
+        if (a.trailFreezeByTP)       oss << " [TP]";
+        if (a.trailFreezeByDisplace) oss << " [DISPLACEMENT]";
+        if (a.trailFreezeByExhaust)  oss << " [EXHAUSTION]";
+        oss << " (P&L " << (pnlRatio * 100.0) << "%)";
+    }
     oss << "\n";
 
     // [80%] Risque
@@ -495,9 +501,12 @@ IntelligenceEngine::Analysis IntelligenceEngine::analyze(
     bool freezeByTP       = (pnlRatio >= cfg_.trailFreezeZone && basketPnL > 0.0);
     bool freezeByExhaust  = (deltaSnap.suggestTrailFreeze);
 
-    a.ssGapFactor  = ssF;
-    a.bsGapFactor  = bsF;
-    a.trailFrozen  = freezeByTP || freezeByDisplace || freezeByExhaust;
+    a.ssGapFactor          = ssF;
+    a.bsGapFactor          = bsF;
+    a.trailFreezeByTP       = freezeByTP;
+    a.trailFreezeByDisplace = freezeByDisplace;
+    a.trailFreezeByExhaust  = freezeByExhaust;
+    a.trailFrozen           = freezeByTP || freezeByDisplace || freezeByExhaust;
     a.trailTightness = (ssF + bsF) * 0.5;
 
     // ── [20%] Vélocité P&L et prédiction ─────────────────────

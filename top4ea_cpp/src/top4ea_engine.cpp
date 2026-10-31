@@ -1255,12 +1255,20 @@ void TOP4EA_Engine::trailGrid() {
     double ssGapFactor = 1.0;
     double bsGapFactor = 1.0;
     bool   trailFrozen = false;
+    std::string trailFreezeReason;
+    auto addFreezeReason = [&](const std::string& reason) {
+        if (!trailFreezeReason.empty()) trailFreezeReason += ",";
+        trailFreezeReason += reason;
+    };
     {
         std::lock_guard lk(intelMu_);
         if (lastIntel_.regime != IntelligenceEngine::Regime::Unknown) {
             ssGapFactor = lastIntel_.ssGapFactor;
             bsGapFactor = lastIntel_.bsGapFactor;
             trailFrozen = lastIntel_.trailFrozen;
+            if (lastIntel_.trailFreezeByTP)       addFreezeReason("TP");
+            if (lastIntel_.trailFreezeByDisplace) addFreezeReason("DISPLACEMENT");
+            if (lastIntel_.trailFreezeByExhaust)  addFreezeReason("EXHAUSTION");
         } else {
             // Fallback statique si intelligence pas encore initialisée
             double af = cfg_.trailAsymmetryFactor;
@@ -1271,6 +1279,7 @@ void TOP4EA_Engine::trailGrid() {
             double pnl  = basketProfit(ord);
             double freezeTgt = effectiveTarget(ord);
             trailFrozen = (pnl >= freezeTgt * cfg_.trailFreezeZone && pnl > 0.0);
+            if (trailFrozen) addFreezeReason("TP");
         }
     }
 
@@ -1280,6 +1289,7 @@ void TOP4EA_Engine::trailGrid() {
             + MarketIntelligence::decisionName(vdDecision)
             + " (TRAIL_FREEZE — stops non modifiés)");
         trailFrozen = true;
+        addFreezeReason("VISUAL_TRAIL_FREEZE");
     }
 
     // ── Trailing session-based + phases de profit ─────────────
@@ -1362,14 +1372,15 @@ void TOP4EA_Engine::trailGrid() {
         }
     }
 
-    // Log transition freeze
-    static bool wasFrozen = false;
-    if (trailFrozen && !wasFrozen) {
-        log("[INTEL/Trail] ❄ FIGÉ — zone TP atteinte, stops conservés");
-        wasFrozen = true;
-    } else if (!trailFrozen && wasFrozen) {
-        log("[INTEL/Trail] ✓ Dégel — trail adaptatif réactivé");
-        wasFrozen = false;
+    // Loguer précisément les gels stratégiques ou les anomalies de marché.
+    static std::string previousFreezeReason;
+    if (trailFrozen && trailFreezeReason != previousFreezeReason) {
+        log("[TrailFreeze] stops inchangés — cause(s)="
+            + (trailFreezeReason.empty() ? "INCONNUE" : trailFreezeReason));
+        previousFreezeReason = trailFreezeReason;
+    } else if (!trailFrozen && !previousFreezeReason.empty()) {
+        log("[TrailFreeze] fin du gel — trailing réactivé");
+        previousFreezeReason.clear();
     }
 
     std::string ssComment = (ssR > 0) ? "SS_R" + std::to_string(ssR) : "SS_GRID";
@@ -3141,12 +3152,17 @@ std::string TOP4EA_Engine::dashboard() const {
 
     // Lire les valeurs intelligence pour le trail
     double dashSsGap = 1.0, dashBsGap = 1.0; bool dashFrozen = false;
+    std::string dashFreezeReason;
     {
         std::lock_guard lk(intelMu_);
         if (lastIntel_.regime != IntelligenceEngine::Regime::Unknown) {
             dashSsGap  = lastIntel_.ssGapFactor;
             dashBsGap  = lastIntel_.bsGapFactor;
             dashFrozen = lastIntel_.trailFrozen;
+            if (lastIntel_.trailFreezeByTP)       dashFreezeReason += "TP,";
+            if (lastIntel_.trailFreezeByDisplace) dashFreezeReason += "DISPLACEMENT,";
+            if (lastIntel_.trailFreezeByExhaust)  dashFreezeReason += "EXHAUSTION,";
+            if (!dashFreezeReason.empty()) dashFreezeReason.pop_back();
         }
     }
 
@@ -3208,7 +3224,9 @@ std::string TOP4EA_Engine::dashboard() const {
         } else {
             modeLabelBuy = "SS NATURAL";
         }
-        std::string trailStatus = dashFrozen ? "❄FIGÉ (zone TP)" : "ACTIF";
+        std::string trailStatus = dashFrozen
+            ? "❄FIGÉ (" + (dashFreezeReason.empty() ? "cause inconnue" : dashFreezeReason) + ")"
+            : "ACTIF";
 
         oss << "║  Trail  : " << trailStatus
             << " [" << modeLabelSell << " | " << modeLabelBuy << "]\n";
@@ -3254,7 +3272,9 @@ std::string TOP4EA_Engine::dashboard() const {
             : cfg_.trailFixedDistPts * cfg_.point;
         double pips = pricePerPip(cfg_) > 0.0
             ? priceDist / pricePerPip(cfg_) : 0.0;
-        oss << "║  Trail  : " << (dashFrozen ? "❄FIGÉ (zone TP)" : "ACTIF")
+        oss << "║  Trail  : " << (dashFrozen
+                ? "❄FIGÉ (" + (dashFreezeReason.empty() ? "cause inconnue" : dashFreezeReason) + ")"
+                : "ACTIF")
             << " [FIXE " << std::setprecision(1) << pips << "p ≈ $"
             << std::setprecision(2) << priceDist << "]\n";
         oss << "║  SS dist: " << pips << "p"
