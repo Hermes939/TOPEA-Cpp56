@@ -54,6 +54,24 @@ static void applyConfigKV(top4ea::Config& cfg,
         else if (key == "max_recovery")         cfg.maxRecovery         = std::stoi(val);
         else if (key == "max_recovery_active")  cfg.maxRecoveryActive   = std::stoi(val);
         else if (key == "max_lots")             cfg.maxLots             = std::stod(val);
+        else if (key == "agents_enabled")       cfg.agentsEnabled       = (val=="true"||val=="1");
+        else if (key == "agent_class_by_lots")  cfg.agentClassByLots    = (val=="true"||val=="1");
+        else if (key == "agent_x_lot_max")      cfg.agentXLotMax        = std::stod(val);
+        else if (key == "agent_y_lot_max")      cfg.agentYLotMax        = std::stod(val);
+        else if (key == "agent_x_usd_max")      cfg.agentXUsdMax        = std::stod(val);
+        else if (key == "agent_y_usd_max")      cfg.agentYUsdMax        = std::stod(val);
+        else if (key == "agent_x_cap_usd")      cfg.agentXCapUsd        = std::stod(val);
+        else if (key == "agent_y_cap_usd")      cfg.agentYCapUsd        = std::stod(val);
+        else if (key == "agent_z_defcon_usd")   cfg.agentZDefconUsd     = std::stod(val);
+        else if (key == "agent_z_split_frac")  cfg.agentZSplitFrac     = std::stod(val);
+        else if (key == "agent_cap_vs_flow_mult") cfg.agentCapVsFlowMult = std::stod(val);
+        else if (key == "agent_cap_against_mult") cfg.agentCapAgainstMult = std::stod(val);
+        else if (key == "agent_sacrifice_pct_base") cfg.agentSacrificePctBase = std::stod(val);
+        else if (key == "agent_sacrifice_pct_emerg") cfg.agentSacrificePctEmerg = std::stod(val);
+        else if (key == "agent_harvest_usd")    cfg.agentHarvestUsd     = std::stod(val);
+        else if (key == "agent_x_cadence_ticks") cfg.agentXCadenceTicks = std::stoi(val);
+        else if (key == "agent_y_cadence_ticks") cfg.agentYCadenceTicks = std::stoi(val);
+        else if (key == "agent_z_cadence_ticks") cfg.agentZCadenceTicks = std::stoi(val);
         else if (key == "magic")                cfg.magic               = std::stoi(val);
         else if (key == "slippage")             cfg.slippage            = std::stoi(val);
         else if (key == "daily_target_pct")     cfg.dailyTargetPct      = std::stod(val);
@@ -146,6 +164,24 @@ static const std::vector<std::pair<std::string,std::string>> ENV_KEYS = {
     {"max_recovery",                "TOP4EA_MAX_RECOVERY"},
     {"max_recovery_active",         "TOP4EA_MAX_RECOVERY_ACTIVE"},
     {"max_lots",                    "TOP4EA_MAX_LOTS"},
+    {"agents_enabled",              "TOP4EA_AGENTS_ENABLED"},
+    {"agent_class_by_lots",         "TOP4EA_AGENT_CLASS_BY_LOTS"},
+    {"agent_x_lot_max",             "TOP4EA_AGENT_X_LOT_MAX"},
+    {"agent_y_lot_max",             "TOP4EA_AGENT_Y_LOT_MAX"},
+    {"agent_x_usd_max",             "TOP4EA_AGENT_X_USD_MAX"},
+    {"agent_y_usd_max",             "TOP4EA_AGENT_Y_USD_MAX"},
+    {"agent_x_cap_usd",             "TOP4EA_AGENT_X_CAP_USD"},
+    {"agent_y_cap_usd",             "TOP4EA_AGENT_Y_CAP_USD"},
+    {"agent_z_defcon_usd",          "TOP4EA_AGENT_Z_DEFCON_USD"},
+    {"agent_z_split_frac",          "TOP4EA_AGENT_Z_SPLIT_FRAC"},
+    {"agent_cap_vs_flow_mult",      "TOP4EA_AGENT_CAP_VS_FLOW_MULT"},
+    {"agent_cap_against_mult",      "TOP4EA_AGENT_CAP_AGAINST_MULT"},
+    {"agent_sacrifice_pct_base",    "TOP4EA_AGENT_SACRIFICE_PCT_BASE"},
+    {"agent_sacrifice_pct_emerg",   "TOP4EA_AGENT_SACRIFICE_PCT_EMERG"},
+    {"agent_harvest_usd",           "TOP4EA_AGENT_HARVEST_USD"},
+    {"agent_x_cadence_ticks",       "TOP4EA_AGENT_X_CADENCE_TICKS"},
+    {"agent_y_cadence_ticks",       "TOP4EA_AGENT_Y_CADENCE_TICKS"},
+    {"agent_z_cadence_ticks",       "TOP4EA_AGENT_Z_CADENCE_TICKS"},
     {"magic",                       "TOP4EA_MAGIC"},
     {"slippage",                    "TOP4EA_SLIPPAGE"},
     {"daily_target_pct",            "TOP4EA_DAILY_TARGET_PCT"},

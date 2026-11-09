@@ -308,13 +308,14 @@ void RecyclingAgents::recordFailure(const RecyclingAction& action) {
 std::string RecyclingAgents::report() const {
     std::lock_guard lock(mutex_);
     std::ostringstream out;
-    out << std::fixed << std::setprecision(2)
-        << "Recyclage X:" << reports_[0].legs << "/" << reports_[0].lots
-        << " (" << reports_[0].pnl << "$)"
-        << " Y:" << reports_[1].legs << "/" << reports_[1].lots
-        << " (" << reports_[1].pnl << "$)"
-        << " Z:" << reports_[2].legs << "/" << reports_[2].lots
-        << " (" << reports_[2].pnl << "$)";
+    out << std::fixed << std::setprecision(2) << "Recyclage";
+    for (size_t i = 0; i < reports_.size(); ++i) {
+        const auto& report = reports_[i];
+        out << " " << className(static_cast<RecyclingClass>(i))
+            << ":" << report.legs << "/" << report.lots
+            << " (" << report.pnl << "$; sacrifié=" << report.sacrificed
+            << "; récolté=" << report.harvested << ")";
+    }
     if (!lastResult_.empty()) out << " | dernier=" << lastResult_;
     return out.str();
 }

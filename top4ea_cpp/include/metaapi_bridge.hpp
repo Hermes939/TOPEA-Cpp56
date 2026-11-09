@@ -145,28 +145,57 @@ struct BridgeResponse {
     std::string msg     = {};
 };
 
+// ── Interface commun aux fournisseurs d'exécution ───────────
+class TradingBridge {
+public:
+    virtual ~TradingBridge() = default;
+
+    virtual void start() = 0;
+    virtual void stop() = 0;
+    [[nodiscard]] virtual bool isConnected() const noexcept = 0;
+    virtual BridgeResponse sendCommand(const TradeCmd& cmd,
+                                       int timeoutMs = 5000) = 0;
+
+    virtual void onTick(TickCallback cb) = 0;
+    virtual void onOrder(OrderCallback cb) = 0;
+    virtual void onAccount(AccountCallback cb) = 0;
+    virtual void onError(ErrorCallback cb) = 0;
+    virtual void onConnect(ConnectCallback cb) = 0;
+
+    [[nodiscard]] virtual std::vector<OrderInfo> requestOrders(
+        int timeoutMs = 3000) = 0;
+    [[nodiscard]] virtual std::optional<AccountSnapshot> requestAccount(
+        int timeoutMs = 3000) = 0;
+    [[nodiscard]] virtual SymbolSpec requestSymbolSpec(
+        const std::string& symbol, int timeoutMs = 8000) = 0;
+    virtual void updateConfig(const Config& cfg) noexcept = 0;
+};
+
 // ============================================================
 //  MetaApiBridge — connexion REST cloud MetaApi
 // ============================================================
-class MetaApiBridge {
+class MetaApiBridge : public TradingBridge {
 public:
     explicit MetaApiBridge(const Config& cfg);
-    ~MetaApiBridge();
+    ~MetaApiBridge() override;
 
-    void start();
-    void stop();
-    [[nodiscard]] bool isConnected() const noexcept { return connected_.load(); }
+    void start() override;
+    void stop() override;
+    [[nodiscard]] bool isConnected() const noexcept override { return connected_.load(); }
 
-    BridgeResponse sendCommand(const TradeCmd& cmd, int timeoutMs = 5000);
+    BridgeResponse sendCommand(const TradeCmd& cmd,
+                               int timeoutMs = 5000) override;
 
-    void onTick   (TickCallback    cb) { tickCb_    = std::move(cb); }
-    void onOrder  (OrderCallback   cb) { orderCb_   = std::move(cb); }
-    void onAccount(AccountCallback cb) { accountCb_ = std::move(cb); }
-    void onError  (ErrorCallback   cb) { errorCb_   = std::move(cb); }
-    void onConnect(ConnectCallback cb) { connectCb_ = std::move(cb); }
+    void onTick   (TickCallback    cb) override { tickCb_    = std::move(cb); }
+    void onOrder  (OrderCallback   cb) override { orderCb_   = std::move(cb); }
+    void onAccount(AccountCallback cb) override { accountCb_ = std::move(cb); }
+    void onError  (ErrorCallback   cb) override { errorCb_   = std::move(cb); }
+    void onConnect(ConnectCallback cb) override { connectCb_ = std::move(cb); }
 
-    [[nodiscard]] std::vector<OrderInfo>         requestOrders (int timeoutMs = 3000);
-    [[nodiscard]] std::optional<AccountSnapshot> requestAccount(int timeoutMs = 3000);
+    [[nodiscard]] std::vector<OrderInfo> requestOrders(
+        int timeoutMs = 3000) override;
+    [[nodiscard]] std::optional<AccountSnapshot> requestAccount(
+        int timeoutMs = 3000) override;
 
     // ── Auto-détection broker (appelable AVANT start()) ──────
     // Interroge /symbols/{symbol} pour obtenir :
@@ -175,10 +204,10 @@ public:
     // Retourne detected=false si le broker ne répond pas (weekend, etc.)
     // → Dans ce cas le moteur conserve les valeurs du fichier config.
     [[nodiscard]] SymbolSpec requestSymbolSpec(const std::string& symbol,
-                                               int timeoutMs = 8000);
+                                               int timeoutMs = 8000) override;
 
     // ── Met à jour la config interne (digits → precision JSON) ─
-    void updateConfig(const Config& cfg) noexcept { cfg_ = cfg; }
+    void updateConfig(const Config& cfg) noexcept override { cfg_ = cfg; }
 
     // ── Plateforme détectée (MT4 ou MT5) ────────────────────
     // Disponible après start() — basé sur accountInformation.platform

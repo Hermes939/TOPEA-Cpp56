@@ -28,6 +28,7 @@ TOP4EA_Engine::TOP4EA_Engine(Config cfg)
     grid_        = std::make_unique<GridEngine>(cfg_);
     basketMon_   = std::make_unique<BasketMonitor>(cfg_);
     recovery_    = std::make_unique<RecoveryEngine>(cfg_);
+    recyclingAgents_ = std::make_unique<RecyclingAgents>(cfg_);
     intel_       = std::make_unique<IntelligenceEngine>(cfg_);
     marketIntel_ = std::make_unique<MarketIntelligence>();
     marketIntel_->dsSetStaleHardSec(cfg_.dsStaleHardSec);
@@ -37,6 +38,9 @@ TOP4EA_Engine::TOP4EA_Engine(Config cfg)
     marketIntel_->setDsHardGatePct(cfg_.dsHardGatePct);
     marketIntel_->setVoteGateDsConfHigh(cfg_.voteGateDsConfHigh);
     marketIntel_->setVoteGateDsConfLow(cfg_.voteGateDsConfLow);
+    log(cfg_.agentsEnabled
+        ? "[Recycling] Agents autonomes X/Y/Z activés"
+        : "[Recycling] Agents X/Y/Z désactivés par configuration");
 
     // Callbacks bridge
     bridge_->onTick   ([this](const Tick& t)            { onTick(t);    });
@@ -293,6 +297,7 @@ void TOP4EA_Engine::rebuildSubsystems() {
     grid_        = std::make_unique<GridEngine>       (cfg_);
     basketMon_   = std::make_unique<BasketMonitor>    (cfg_);
     recovery_    = std::make_unique<RecoveryEngine>   (cfg_);
+    recyclingAgents_ = std::make_unique<RecyclingAgents>(cfg_);
     intel_       = std::make_unique<IntelligenceEngine>(cfg_);
     marketIntel_ = std::make_unique<MarketIntelligence>();
     marketIntel_->dsSetStaleHardSec(cfg_.dsStaleHardSec);
@@ -326,6 +331,7 @@ void TOP4EA_Engine::onTick(const Tick& tick) {
     }
     grid_->onTick(tick);
     recovery_->onTick(tick);  // alimente le CascadeGuard (spread + momentum)
+    if (recyclingAgents_) recyclingAgents_->onTick();
     intel_->onTick(tick);     // alimente les indicateurs intelligence (OU, momentum)
     processTick(tick);
 }
@@ -437,7 +443,14 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
                     + std::to_string(pnl) + "$ <= "
                     + std::to_string(cfg_.basketMaxLoss) + "$ — sortie forcée");
                 emergencyCloseAll(pnl);
+                return;
             }
+
+            AccountSnapshot acc;
+            { std::lock_guard lk(accMu_); acc = account_; }
+            IntelligenceEngine::Analysis analysis;
+            { std::lock_guard lk(intelMu_); analysis = lastIntel_; }
+            runRecyclingAgents(cached, acc, tick, analysis);
         }
         return;  // Aucun trail, aucun nouvel ordre en mode hold
     }
@@ -600,6 +613,7 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
                 + "/100 | DD=" + std::to_string(analysis.drawdownPct) + "%"
                 + (analysis.marginAlert ? " | MARGE CRITIQUE" : ""));
         }
+        runRecyclingAgents(orders, acc, tick, analysis);
     }
 
     // 9. Placement des stops géométriques (utilise gridOrigin_ + lastIntel_)
@@ -3098,6 +3112,124 @@ TradeCmd TOP4EA_Engine::makeBuyStop(double lot, double price, const std::string&
     return cmd;
 }
 
+void TOP4EA_Engine::runRecyclingAgents(
+    std::vector<OrderInfo>& orders,
+    const AccountSnapshot& account,
+    const Tick& tick,
+    const IntelligenceEngine::Analysis& analysis) {
+    if (!recyclingAgents_ || !cfg_.agentsEnabled || basketClosing_.load())
+        return;
+
+    const double urgency = std::max(
+        0.25, std::clamp(analysis.riskScore / 100.0, 0.0, 1.0));
+    const int flowSign = (analysis.cumulativeDelta >= 0.15) ? 1
+                       : (analysis.cumulativeDelta <= -0.15) ? -1 : 0;
+    const bool monoMode = std::abs(analysis.cumulativeDelta) >= 0.60;
+    auto action = recyclingAgents_->step(
+        orders, account.balance, urgency, flowSign, monoMode);
+    if (action) executeRecyclingAction(*action, orders, tick);
+}
+
+void TOP4EA_Engine::executeRecyclingAction(
+    const RecyclingAction& action,
+    std::vector<OrderInfo>& orders,
+    const Tick& tick) {
+    if (!recyclingAgents_) return;
+
+    auto closeTicket = [&](int ticket, double requestedLots) -> std::optional<double> {
+        auto it = std::find_if(orders.begin(), orders.end(),
+            [ticket](const OrderInfo& order) {
+                return order.ticket == ticket &&
+                       (order.type == OrderType::Buy || order.type == OrderType::Sell);
+            });
+        if (it == orders.end() || it->lots <= 0.0 || requestedLots <= 0.0)
+            return std::nullopt;
+
+        const OrderInfo order = *it;
+        const double closeLots = std::min(order.lots, requestedLots);
+        const double price = (order.type == OrderType::Buy) ? tick.bid : tick.ask;
+        TradeCmd cmd = makeClose(order, price);
+        cmd.lots = closeLots;
+        auto response = bridge_->sendCommand(cmd, 2000);
+        if (!response.success) {
+            log("[Recycling] fermeture refusée ticket=" + std::to_string(ticket)
+                + " lots=" + std::to_string(closeLots)
+                + " | " + response.msg);
+            return std::nullopt;
+        }
+
+        const double ratio = closeLots / order.lots;
+        const double realized =
+            (order.profit + order.swap + order.commission) * ratio;
+        cycleRealizedPnL_ += realized;
+
+        // Refléter la fermeture dans le cache immédiatement, sinon le P&L
+        // flottant de l'ordre fermé serait ajouté une seconde fois au cycle.
+        const double targetLots = std::max(0.0, order.lots - closeLots);
+        auto applyCacheClose = [&](std::vector<OrderInfo>& cache) {
+            auto cached = std::find_if(cache.begin(), cache.end(),
+                [ticket](const OrderInfo& item) { return item.ticket == ticket; });
+            if (cached == cache.end()) return;
+            if (targetLots <= 1e-9) {
+                cache.erase(cached);
+                return;
+            }
+            if (cached->lots <= targetLots + cfg_.volumeStep * 0.5) return;
+            const double remainingRatio = targetLots / cached->lots;
+            cached->lots = targetLots;
+            cached->profit *= remainingRatio;
+            cached->swap *= remainingRatio;
+            cached->commission *= remainingRatio;
+        };
+        applyCacheClose(orders);
+        {
+            std::lock_guard lock(ordersMu_);
+            applyCacheClose(orders_);
+        }
+
+        log("[Recycling] position fermée ticket=" + std::to_string(ticket)
+            + " lots=" + std::to_string(closeLots)
+            + "/" + std::to_string(order.lots)
+            + " pnl estimé=" + std::to_string(realized) + "$");
+        return realized;
+    };
+
+    if (action.type == RecyclingActionType::PairClose) {
+        // Fermer d'abord le gagnant partiel; si cette première jambe échoue,
+        // ne pas cristalliser la perte de la jambe opposée.
+        auto winnerPnl = closeTicket(action.companionTicket, action.companionLots);
+        if (!winnerPnl) {
+            recyclingAgents_->recordFailure(action);
+            return;
+        }
+        auto loserPnl = closeTicket(action.ticket, action.closeLots);
+        if (!loserPnl) {
+            recyclingAgents_->recordSuccess(
+                action, *winnerPnl, "paire incomplète; gagnante fermée seulement");
+            log("[Recycling][WARN] la gagnante a été réduite mais la perdante "
+                "n'a pas pu être fermée — vérification au prochain rafraîchissement");
+            return;
+        }
+        const double totalRealized = *winnerPnl + *loserPnl;
+        recyclingAgents_->recordSuccess(action, totalRealized, action.reason);
+        log("[Recycling][Y] paire fermée net estimé="
+            + std::to_string(totalRealized) + "$");
+        return;
+    }
+
+    auto realized = closeTicket(action.ticket, action.closeLots);
+    if (!realized) {
+        recyclingAgents_->recordFailure(action);
+        return;
+    }
+    recyclingAgents_->recordSuccess(action, *realized, action.reason);
+    log("[Recycling][" + std::string(
+            action.agent == RecyclingClass::X ? "X" :
+            action.agent == RecyclingClass::Y ? "Y" : "Z")
+        + "] " + action.reason + " ticket=" + std::to_string(action.ticket)
+        + " réalisé estimé=" + std::to_string(*realized) + "$");
+}
+
 TradeCmd TOP4EA_Engine::makeClose(const OrderInfo& ord, double price) {
     TradeCmd cmd;
     cmd.op     = TradeCmd::Op::CloseOrder;
@@ -3352,6 +3484,8 @@ std::string TOP4EA_Engine::dashboard() const {
     oss << "║  Marge lib : " << freePct << "%\n";
     oss << "║  SS @ " << std::setprecision(5) << ssLevel_.load() << "\n";
     oss << "║  BS @ " << bsLevel_.load() << "\n";
+    if (cfg_.agentsEnabled && recyclingAgents_)
+        oss << "║  " << recyclingAgents_->report() << "\n";
     // ── Verrouillage Profit Trailing (V-BS / V-SS) ────────────
     if (cfg_.vlEnabled) {
         oss << "╠══════ VERROUILLAGE PROFIT (V) ══════╣\n";
