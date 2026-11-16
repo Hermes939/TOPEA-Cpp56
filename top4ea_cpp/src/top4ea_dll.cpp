@@ -51,7 +51,9 @@ static top4ea::Config loadConfig(const char* path) {
         std::string key = trim(line.substr(0, eq));
         std::string val = trim(line.substr(eq + 1));
         try {
-            if      (key=="platform") {
+            if      (key=="trading_provider") cfg.tradingProvider = val;
+            else if (key=="tickerall_server") cfg.tickerallServer = val;
+            else if (key=="platform") {
                 if      (val=="mt5"||val=="MT5") cfg.platform = top4ea::PlatformType::MT5;
                 else if (val=="mt4"||val=="MT4") cfg.platform = top4ea::PlatformType::MT4;
                 else                             cfg.platform = top4ea::PlatformType::Auto;

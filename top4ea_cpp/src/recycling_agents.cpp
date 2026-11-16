@@ -19,7 +19,8 @@ int directionOf(OrderType type) noexcept {
 
 } // namespace
 
-RecyclingClass RecyclingAgents::classify(double lots, double pnl) const noexcept {
+RecyclingClass RecyclingAgents::classify(
+    double lots, double pnl, double usdToAccountScale) const noexcept {
     if (cfg_.agentClassByLots) {
         if (lots < cfg_.agentXLotMax) return RecyclingClass::X;
         if (lots < cfg_.agentYLotMax) return RecyclingClass::Y;
@@ -27,18 +28,21 @@ RecyclingClass RecyclingAgents::classify(double lots, double pnl) const noexcept
     }
 
     const double loss = std::max(0.0, -pnl);
-    if (loss < cfg_.agentXUsdMax) return RecyclingClass::X;
-    if (loss < cfg_.agentYUsdMax) return RecyclingClass::Y;
+    if (loss < cfg_.agentXUsdMax * usdToAccountScale)
+        return RecyclingClass::X;
+    if (loss < cfg_.agentYUsdMax * usdToAccountScale)
+        return RecyclingClass::Y;
     return RecyclingClass::Z;
 }
 
 double RecyclingAgents::capFor(RecyclingClass agent, int direction,
-                                double urgency, int flowSign) const noexcept {
+                                double urgency, int flowSign,
+                                double usdToAccountScale) const noexcept {
     const double base = (agent == RecyclingClass::X) ? cfg_.agentXCapUsd
                        : (agent == RecyclingClass::Y) ? cfg_.agentYCapUsd
                                                        : cfg_.agentZDefconUsd;
     const double u = std::clamp(urgency, 0.0, 1.0);
-    double cap = base * (1.0 - 0.5 * u);
+    double cap = base * usdToAccountScale * (1.0 - 0.5 * u);
     if (flowSign != 0 && direction == flowSign)
         cap *= cfg_.agentCapVsFlowMult;
     else if (flowSign != 0 && direction == -flowSign)
@@ -108,9 +112,12 @@ std::optional<RecyclingAction> RecyclingAgents::step(
     double balance,
     double urgency,
     int flowSign,
-    bool monoMode) {
+    bool monoMode,
+    double usdToAccountScale) {
     std::lock_guard lock(mutex_);
     if (!cfg_.agentsEnabled) return std::nullopt;
+    if (!std::isfinite(usdToAccountScale) || usdToAccountScale <= 0.0)
+        usdToAccountScale = 1.0;
     const auto now = Clock::now();
     if (haveStepped_ && now - lastStepAt_ < std::chrono::seconds(1))
         return std::nullopt;
@@ -130,9 +137,10 @@ std::optional<RecyclingAction> RecyclingAgents::step(
             continue;
         const double pnl = netPnl(order);
         const int direction = directionOf(order.type);
-        const auto agent = classify(order.lots, pnl);
+        const auto agent = classify(order.lots, pnl, usdToAccountScale);
         legs.push_back({&order, agent, pnl, direction,
-                        capFor(agent, direction, u, flowSign)});
+                        capFor(agent, direction, u, flowSign,
+                               usdToAccountScale)});
         totalLots += order.lots;
         deltaLots += direction * order.lots;
     }
@@ -181,11 +189,12 @@ std::optional<RecyclingAction> RecyclingAgents::step(
 
         if (!monoMode) {
             const ClassifiedLeg* best = nullptr;
-            const double harvestMax = std::max(cfg_.agentHarvestUsd * 2.0,
-                                               cfg_.agentXCapUsd);
+            const double harvestMax = std::max(
+                cfg_.agentHarvestUsd * 2.0, cfg_.agentXCapUsd) *
+                usdToAccountScale;
             for (const auto& leg : legs) {
                 if (leg.agent != RecyclingClass::X ||
-                    leg.netPnl < cfg_.agentHarvestUsd ||
+                    leg.netPnl < cfg_.agentHarvestUsd * usdToAccountScale ||
                     leg.netPnl > harvestMax)
                     continue;
                 if (!best || leg.netPnl > best->netPnl) best = &leg;
@@ -305,15 +314,18 @@ void RecyclingAgents::recordFailure(const RecyclingAction& action) {
     lastResult_ = std::string(className(action.agent)) + ": échec " + action.reason;
 }
 
-std::string RecyclingAgents::report() const {
+std::string RecyclingAgents::report(double usdToAccountScale) const {
     std::lock_guard lock(mutex_);
+    if (!std::isfinite(usdToAccountScale) || usdToAccountScale <= 0.0)
+        usdToAccountScale = 1.0;
     std::ostringstream out;
     out << std::fixed << std::setprecision(2) << "Recyclage";
     for (size_t i = 0; i < reports_.size(); ++i) {
         const auto& report = reports_[i];
         out << " " << className(static_cast<RecyclingClass>(i))
             << ":" << report.legs << "/" << report.lots
-            << " (" << report.pnl << "$; sacrifié=" << report.sacrificed
+            << " (" << report.pnl / usdToAccountScale
+            << "$; sacrifié=" << report.sacrificed
             << "; récolté=" << report.harvested << ")";
     }
     if (!lastResult_.empty()) out << " | dernier=" << lastResult_;

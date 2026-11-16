@@ -95,6 +95,9 @@ struct AccountSnapshot {
 
 // ─── Paramètres configurables (équivalent extern MQL4) ──────
 struct Config {
+    std::string tradingProvider = "metaapi"; // metaapi | tickerall
+    std::string tickerallServer = {};
+
     // ─── Plateforme ──────────────────────────────────────────
     // Auto : détecté depuis le compte MetaApi au démarrage
     // MT4  : forcer MT4 (slippage, pas de fillingMode)

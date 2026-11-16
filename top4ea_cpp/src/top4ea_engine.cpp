@@ -3,6 +3,7 @@
 //  Moteur principal C++20 — machine à états centrale
 // ============================================================
 #include "../include/top4ea_engine.hpp"
+#include "../include/tickerall_bridge.hpp"
 #include <iostream>
 #include <sstream>
 #include <iomanip>
@@ -14,6 +15,7 @@
 #include <cmath>
 #include <fstream>
 #include <filesystem>
+#include <stdexcept>
 
 namespace top4ea {
 
@@ -24,7 +26,12 @@ TOP4EA_Engine::TOP4EA_Engine(Config cfg)
     : cfg_(std::move(cfg))
     , vlMgr_(cfg_)
 {
-    bridge_      = std::make_unique<MetaApiBridge>(cfg_);
+    if (cfg_.tradingProvider == "tickerall")
+        bridge_ = std::make_unique<TickerallBridge>(cfg_);
+    else if (cfg_.tradingProvider == "metaapi")
+        bridge_ = std::make_unique<MetaApiBridge>(cfg_);
+    else
+        throw std::invalid_argument("trading_provider doit être metaapi ou tickerall");
     grid_        = std::make_unique<GridEngine>(cfg_);
     basketMon_   = std::make_unique<BasketMonitor>(cfg_);
     recovery_    = std::make_unique<RecoveryEngine>(cfg_);
@@ -81,6 +88,7 @@ void TOP4EA_Engine::start() {
     // Initialisation objectif journalier
     auto acc = bridge_->requestAccount(3000);
     if (acc) {
+        updateAccountMoneyScale(acc->currency);
         std::lock_guard lk(accMu_);
         account_          = *acc;
         dailyStartBalance_= acc->balance;
@@ -346,6 +354,7 @@ void TOP4EA_Engine::onOrder(const OrderInfo& ord) {
 }
 
 void TOP4EA_Engine::onAccount(const AccountSnapshot& acc) {
+    updateAccountMoneyScale(acc.currency);
     std::lock_guard lk(accMu_);
     // bridge_->start() lance ses threads juste après le premier snapshot
     // compte. Initialiser ici la référence évite qu'un tick concurrent ne
@@ -361,13 +370,21 @@ void TOP4EA_Engine::onAccount(const AccountSnapshot& acc) {
     account_ = acc;
 }
 
+void TOP4EA_Engine::updateAccountMoneyScale(const std::string& currency) {
+    const double scale = (currency == "USC") ? 100.0 : 1.0;
+    const double previous =
+        accountMoneyScale_.exchange(scale, std::memory_order_relaxed);
+    if (previous != scale && scale > 1.0)
+        log("[Currency] Compte USC cent détecté — seuils USD convertis ×100");
+}
+
 void TOP4EA_Engine::onError(int code, const std::string& msg) {
     std::cerr << "[MetaApi ERR " << code << "] " << msg << "\n";
 }
 
 void TOP4EA_Engine::onConnect(bool connected) {
     if (connected) {
-        log("MetaApi connecté/reconnecté");
+        log("Fournisseur de trading connecté/reconnecté");
         // NE PAS effacer les tickets SS/BS immédiatement :
         // la fenêtre de reconnexion peut provoquer un fetchOrders() vide ou incomplet.
         // pendingRestore_=true indique à initOrRestore() de retenter jusqu'à 3× (2 s
@@ -377,7 +394,7 @@ void TOP4EA_Engine::onConnect(bool connected) {
         pendingRestore_.store(true);
         state_.store(EAState::Init);
     } else {
-        log("MetaApi déconnecté — en attente de reconnexion");
+        log("Fournisseur de trading déconnecté — en attente de reconnexion");
     }
 }
 
@@ -388,30 +405,17 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
     if (!bridge_->isConnected()) return;
 
     // ── Anti-gel CLOSING ─────────────────────────────────────────
-    // Si l'état est CLOSING depuis plus de 30 secondes sans que basketClosing_
-    // soit actif, c'est un gel : les ordres ont déjà été fermés côté broker
-    // mais le moteur n'a pas reçu confirmation (réseau). Force reset → Init.
+    // Une fermeture partielle doit être retentée avant de réinitialiser le cycle.
     if (state_.load() == EAState::Closing) {
-        bool activeClose = basketClosing_.load();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                           Clock::now() - closingStart_).count();
-        if (!activeClose || elapsed > 30) {
-            log("[WARN] État CLOSING gel détecté (elapsed=" + std::to_string(elapsed)
-                + "s, basketClosing=" + (activeClose ? "OUI" : "NON")
-                + ") — force reset Init + vidage cache");
-            ssTicket_.store(-1); bsTicket_.store(-1);
-            ssLevel_.store(0.0); bsLevel_.store(0.0);
-            recovery_->reset();
-            basketMon_->reset();
+        if (basketClosing_.load()) return;
+        if (Clock::now() - closingStart_ < std::chrono::seconds(2)) return;
+
+        if (!basketClosing_.exchange(true)) {
+            log("[Basket] Nouvelle tentative de fermeture — le cycle reste en CLOSING");
+            closeBasketAtomic();
             basketClosing_.store(false);
-            { std::lock_guard lk(ordersMu_); orders_.clear(); }
-            {
-                Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
-                gridOrigin_ = (t.bid + t.ask) * 0.5;
-            }
-            state_.store(EAState::Init);
         }
-        return;  // Laisser closeBasketAtomic() finir son travail ou attendre reset
+        return;
     }
 
     // ── MaxRecoveryHold — surveillance continue du panier ────────────
@@ -427,20 +431,26 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
             double cyclePnl = cycleRealizedPnL_ + pnl;
             int    totalRec = recovery_->sellCount() + recovery_->buyCount();
             // Tester le target basket (même logique que la section 3 normale)
-            if (!cached.empty() && basketMon_->update(cyclePnl, cached, totalRec)) {
+            if (!cached.empty() && basketMon_->update(
+                    cyclePnl, cached, totalRec, effectiveTarget(cached))) {
                 if (!basketClosing_.exchange(true)) {
                     closingStart_ = Clock::now();
                     log(">>> [MaxRecoveryHold] BASKET TARGET atteint après hold — fermeture en profit"
-                        " cyclePnL=" + std::to_string(cyclePnl) + "$");
+                        " cyclePnL=" + std::to_string(
+                            cyclePnl / accountMoneyScale_.load(
+                                std::memory_order_relaxed)) + "$");
                     closeBasketAtomic();
                     basketClosing_.store(false);
                 }
                 return;
             }
             // Surveillance du seuil d'urgence (basket_max_loss)
-            if (cfg_.basketMaxLoss < 0.0 && pnl <= cfg_.basketMaxLoss) {
+            const double moneyScale =
+                accountMoneyScale_.load(std::memory_order_relaxed);
+            const double emergencyThreshold = cfg_.basketMaxLoss * moneyScale;
+            if (cfg_.basketMaxLoss < 0.0 && pnl <= emergencyThreshold) {
                 log("[MaxRecoveryHold] SEUIL D'URGENCE atteint : P&L="
-                    + std::to_string(pnl) + "$ <= "
+                    + std::to_string(pnl / moneyScale) + "$ <= "
                     + std::to_string(cfg_.basketMaxLoss) + "$ — sortie forcée");
                 emergencyCloseAll(pnl);
                 return;
@@ -487,14 +497,14 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
             state_.store(EAState::Init);
         dailyTargetReached_ = false;
     } else {
-        checkDailyTarget();
-        if (dailyTargetReached_) return;
+        if (checkDailyTarget()) return;
     }
 
     // 2. Détection géométrique pure — CHAQUE tick, aucune gate temporelle
     //    Le prix franchit un niveau de grille → recovery déclenché instantanément
     //    C'est la seule source de vérité pour les déclenchements.
     detectGeometricTriggers(tick);
+    if (state_.load() == EAState::Closing) return;
 
     // 3. Vérification basket P&L à CHAQUE tick sur ordres cachés (< 1µs)
     //    ─ Avant la gate 1 seconde pour ne rater aucune opportunité ≤50ms ─
@@ -504,6 +514,8 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
         double pnl      = basketProfit(cached);
         // P&L total du cycle = profit flottant + profit déjà encaissé (VL partiels)
         double cyclePnl = cycleRealizedPnL_ + pnl;
+        const double moneyScale =
+            accountMoneyScale_.load(std::memory_order_relaxed);
         if (!cached.empty()) {
             // ── TP par vagues ──────────────────────────────────────
             // Exécuté AVANT le target basket global pour capturer les profits intermédiaires
@@ -513,24 +525,26 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
                 // proportionnels au target effectif : wave1=35%, wave2=70%
                 double effTgt      = effectiveTarget(cached);
                 double useWave1    = (cfg_.basketTarget <= 0.0)
-                                     ? effTgt * 0.35 : cfg_.wave1Target;
+                                     ? effTgt * 0.35 : cfg_.wave1Target * moneyScale;
                 double useWave2    = (cfg_.basketTarget <= 0.0)
-                                     ? effTgt * 0.70 : cfg_.wave2Target;
+                                     ? effTgt * 0.70 : cfg_.wave2Target * moneyScale;
                 int ws = waveState_.load();
                 if (ws == 0 && cyclePnl >= useWave1) {
                     if (waveState_.compare_exchange_strong(ws, 1)) {
-                        log(">>> WAVE1 cyclePnL=" + std::to_string(cyclePnl)
-                            + " (réalisé=" + std::to_string(cycleRealizedPnL_)
-                            + " flottant=" + std::to_string(pnl)
-                            + " target=" + std::to_string(useWave1) + ") — fermeture 50%");
+                        log(">>> WAVE1 cyclePnL=" + std::to_string(cyclePnl / moneyScale)
+                            + " (réalisé=" + std::to_string(cycleRealizedPnL_ / moneyScale)
+                            + " flottant=" + std::to_string(pnl / moneyScale)
+                            + " target=" + std::to_string(useWave1 / moneyScale)
+                            + " USD) — fermeture 50%");
                         closeWavePartial(0);
                     }
                 } else if (ws == 1 && cyclePnl >= useWave2) {
                     if (waveState_.compare_exchange_strong(ws, 2)) {
-                        log(">>> WAVE2 cyclePnL=" + std::to_string(cyclePnl)
-                            + " (réalisé=" + std::to_string(cycleRealizedPnL_)
-                            + " flottant=" + std::to_string(pnl)
-                            + " target=" + std::to_string(useWave2) + ") — fermeture 30%");
+                        log(">>> WAVE2 cyclePnL=" + std::to_string(cyclePnl / moneyScale)
+                            + " (réalisé=" + std::to_string(cycleRealizedPnL_ / moneyScale)
+                            + " flottant=" + std::to_string(pnl / moneyScale)
+                            + " target=" + std::to_string(useWave2 / moneyScale)
+                            + " USD) — fermeture 30%");
                         closeWavePartial(1);
                     }
                 }
@@ -542,9 +556,10 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
             if (basketMon_->update(cyclePnl, cached, totalRecov, effTarget)) {
                 if (!basketClosing_.exchange(true)) {
                     closingStart_ = Clock::now();
-                    log(">>> BASKET TARGET ATTEINT cyclePnL=" + std::to_string(cyclePnl)
-                        + " (réalisé=" + std::to_string(cycleRealizedPnL_)
-                        + " flottant=" + std::to_string(pnl) + ") [tick]");
+                    log(">>> BASKET TARGET ATTEINT cyclePnL="
+                        + std::to_string(cyclePnl / moneyScale)
+                        + " USD (réalisé=" + std::to_string(cycleRealizedPnL_ / moneyScale)
+                        + " flottant=" + std::to_string(pnl / moneyScale) + ") [tick]");
                     closeBasketAtomic();
                     basketClosing_.store(false);
                 }
@@ -553,19 +568,20 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
         }
     }
 
-    // 4. Gate HTTP : polling ordres + gestion grille 1×/seconde max
+    // 4. Gate HTTP : polling ordres + gestion grille, intervalle minimal de 500 ms
     //    (limite API broker — ne concerne PAS les déclenchements recovery)
     //    EXCEPTION : si triggerFired_ est levé (trigger géométrique vient
     //    de se produire), on passe la gate immédiatement pour replacer
     //    les nouveaux ordres SS/BS sans délai.
     auto now = Clock::now();
-    using Sec = std::chrono::seconds;
+    const auto managementInterval =
+        std::chrono::milliseconds(std::max(500, cfg_.tickPollMs));
     bool immediatePass = triggerFired_.exchange(false);
     if (!immediatePass &&
-        std::chrono::duration_cast<Sec>(now - lastAction_).count() == 0) return;
+        now - lastAction_ < managementInterval) return;
     lastAction_ = now;
 
-    // 5. Récupérer ordres frais (HTTP polling, 1×/seconde max)
+    // 5. Récupérer ordres frais (HTTP polling, cadence managementInterval)
     auto orders = fetchOrders();
     { std::lock_guard lk(ordersMu_); orders_ = orders; }
 
@@ -577,6 +593,15 @@ void TOP4EA_Engine::processTick(const Tick& tick) {
     // 7. Sync fallback — vérifie que les tickets internes correspondent
     //    à des ordres réels côté broker, corrige silencieusement si décalage.
     syncTriggersFallback(orders);
+    if (orders.empty() && ssTicket_.load() <= 0 && bsTicket_.load() <= 0 &&
+        state_.load() != EAState::Init &&
+        state_.load() != EAState::Closing &&
+        state_.load() != EAState::DailyPause &&
+        state_.load() != EAState::MaxRecoveryHold &&
+        (recovery_->sellCount() > 0 || recovery_->buyCount() > 0 ||
+         std::abs(cycleRealizedPnL_) > 1e-9 || waveState_.load() != 0)) {
+        resetFlatCycle(tick);
+    }
 
     // 7b. Mise à jour des ordres Verrouillage Profit (V-BS / V-SS)
     //     Recalcule avgEntry + ratchet si la composition du panier a changé.
@@ -860,6 +885,40 @@ void TOP4EA_Engine::restoreState(const std::vector<OrderInfo>& orders) {
     lastRestoreCount_.store(static_cast<int>(orders.size()));
 }
 
+void TOP4EA_Engine::resetFlatCycle(const Tick& tick) {
+    {
+        std::lock_guard lock(mu_);
+        ssTicket_.store(-1);
+        bsTicket_.store(-1);
+        ssLevel_.store(0.0);
+        bsLevel_.store(0.0);
+    }
+    recovery_->reset();
+    basketMon_->reset();
+    vlMgr_.reset();
+    waveState_.store(0);
+    cycleRealizedPnL_ = 0.0;
+    dualTrailMode_ = TrailMode::NATURAL;
+    aggressiveBsTarget_ = 0.0;
+    vLockActive_ = false;
+    vLockPrice_ = 0.0;
+    ssProfitPipsCache_ = 0.0;
+    dualTrailModeBuy_ = TrailMode::NATURAL;
+    aggressiveSsTarget_ = 0.0;
+    ssLockActive_ = false;
+    ssLockPrice_ = 0.0;
+    bsProfitPipsCache_ = 0.0;
+    {
+        std::lock_guard lock(ordersMu_);
+        orders_.clear();
+    }
+    gridOrigin_ = (tick.bid + tick.ask) * 0.5;
+    lastRestoreCount_.store(0);
+    state_.store(EAState::GridActive);
+    log("[Cycle] Aucun ordre ni position restante — compteurs recovery réinitialisés"
+        " | nouvelle origin=" + std::to_string(gridOrigin_));
+}
+
 // ────────────────────────────────────────────────────────────
 //  Détection géométrique pure — appelée à CHAQUE tick
 //  Principe institutionnel : le prix franchit un niveau de grille
@@ -1035,7 +1094,9 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
             }
         }
 
-        if (!vdNow.allowRecovery || !vdNow.allowSSRecovery) {
+        if (res.action == TriggerResult::Action::CloseOneSide) {
+            closeOneSide(0);
+        } else if (!vdNow.allowRecovery || !vdNow.allowSSRecovery) {
             // Visual AI bloque le nouveau SS recovery (sécurité directionnelle)
             // Le compteur est déjà incrémenté → lot correct au prochain SS
             log("[AUDIT] Nouveau SS recovery BLOQUÉ par Visual AI"
@@ -1046,8 +1107,6 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
         } else {
             if (res.action == TriggerResult::Action::NewRecovery)
                 state_.store(EAState::Recovery);
-            else if (res.action == TriggerResult::Action::CloseOneSide)
-                closeOneSide(0);
         }
         // ── Relance immédiate du cycle ────────────────────────
         // Force trailGrid() au tick suivant (pas d'attente 1 seconde)
@@ -1129,7 +1188,9 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
             }
         }
 
-        if (!vdNow.allowRecovery || !vdNow.allowBSRecovery) {
+        if (res.action == TriggerResult::Action::CloseOneSide) {
+            closeOneSide(1);
+        } else if (!vdNow.allowRecovery || !vdNow.allowBSRecovery) {
             log("[AUDIT] Nouveau BS recovery BLOQUÉ par Visual AI"
                 " score=" + std::to_string((int)vdNow.recoveryScore)
                 + " raison=" + vdNow.recoveryReason
@@ -1138,8 +1199,6 @@ void TOP4EA_Engine::detectGeometricTriggers(const Tick& tick) {
         } else {
             if (res.action == TriggerResult::Action::NewRecovery)
                 state_.store(EAState::Recovery);
-            else if (res.action == TriggerResult::Action::CloseOneSide)
-                closeOneSide(1);
         }
 
         // ── Fix #2 : Dual Trail — fermeture SELL garantie + reset après BS verrouillé ──
@@ -1217,6 +1276,8 @@ void TOP4EA_Engine::syncTriggersFallback(const std::vector<OrderInfo>& orders) {
 //  Trail de grille — 4 axes adaptatifs
 // ────────────────────────────────────────────────────────────
 void TOP4EA_Engine::trailGrid() {
+    if (state_.load() == EAState::Closing) return;
+
     if (pipConfigUnresolved_) {
         static bool warned = false;
         if (!warned) {
@@ -2315,6 +2376,8 @@ double TOP4EA_Engine::effectiveTarget(
     const std::vector<OrderInfo>& orders) const noexcept
 {
     double lots = totalLots(orders);
+    const double moneyScale =
+        accountMoneyScale_.load(std::memory_order_relaxed);
 
     // ── Mode dynamique par lots (basket_target = 0) ────────────
     if (cfg_.basketTarget <= 0.0) {
@@ -2329,24 +2392,25 @@ double TOP4EA_Engine::effectiveTarget(
         base *= bonus;
 
         // Composante vélocité : +0% à +30% selon la pente EWMA du P&L
-        double vel      = basketMon_->velocity();   // $/tick courant
+        double vel      = basketMon_->velocity() / moneyScale; // USD/tick
         double velNorm  = std::max(0.0, std::min(1.0, vel / 0.5));
         double velAdj   = base * 0.30 * velNorm;
 
         double dynTarget = base + velAdj;
         // Plancher minimum : $1.50 (correspondant à 0.01 lot)
-        return std::max(1.50, dynTarget);
+        return std::max(1.50 * moneyScale, dynTarget);
     }
 
     // ── Mode VABT (basketTarget > 0 && useVABT) ───────────────
     if (cfg_.useVABT) {
         double atrPts = grid_->atrPoints();
         return math::vabtTarget(atrPts, lots, cfg_.tickValue,
-                                cfg_.vabtCoeff, cfg_.basketTarget);
+                                cfg_.vabtCoeff,
+                                cfg_.basketTarget * moneyScale);
     }
 
     // ── Valeur fixe ────────────────────────────────────────────
-    return cfg_.basketTarget;
+    return cfg_.basketTarget * moneyScale;
 }
 
 double TOP4EA_Engine::totalLots(
@@ -2458,7 +2522,8 @@ void TOP4EA_Engine::closeWavePartial(int wave) {
         + "/" + std::to_string(toClose) + " positions fermées sur " + std::to_string(total));
 }
 
-void TOP4EA_Engine::closeBasketAtomic() {
+bool TOP4EA_Engine::closeBasketAtomic() {
+    closingStart_ = Clock::now();
     state_.store(EAState::Closing);
     auto orders = fetchOrders();
 
@@ -2468,8 +2533,10 @@ void TOP4EA_Engine::closeBasketAtomic() {
     int    cycleSsDepth     = recovery_->sellCount();
     int    cycleBsDepth     = recovery_->buyCount();
     int    cycleRecovDepth  = std::max(cycleSsDepth, cycleBsDepth);
-    double cyclePnL         = basketProfit(orders);
-    double cycleTarget      = effectiveTarget(orders);
+    const double moneyScale =
+        accountMoneyScale_.load(std::memory_order_relaxed);
+    double cyclePnL         = basketProfit(orders) / moneyScale;
+    double cycleTarget      = effectiveTarget(orders) / moneyScale;
     double cycleLotUsed     = totalLots(orders);
     double cycleDrawdownPct = 0.0;
     { AccountSnapshot acc; { std::lock_guard lk(accMu_); acc = account_; }
@@ -2511,9 +2578,26 @@ void TOP4EA_Engine::closeBasketAtomic() {
         }
     );
 
+    const int marketOrdersBeforeClose = countMarketOrders(orders);
     auto res = closer.execute(orders, ssTicket_.load(), bsTicket_.load());
     totalPairs_.fetch_add(res.pairsClosedBy);
     totalSingles_.fetch_add(res.singlesClosedOk);
+
+    auto remainingOrders = fetchOrders();
+    const bool allMarketClosesSucceeded =
+        res.pairsClosedBy * 2 + res.singlesClosedOk == marketOrdersBeforeClose;
+    if (!remainingOrders.empty() || !allMarketClosesSucceeded ||
+        res.pendingDeleteFailed) {
+        const auto remainingCount = remainingOrders.size();
+        {
+            std::lock_guard lk(ordersMu_);
+            orders_ = std::move(remainingOrders);
+        }
+        log("[Basket] Fermeture incomplète — "
+            + std::to_string(remainingCount)
+            + " ordre(s) restent ouverts ou une commande a échoué; cycle non réinitialisé");
+        return false;
+    }
 
     // ── Snapshot métriques Dual Trail AVANT le reset ───────────
     //   Les variables sont encore valides ici (reset plus bas)
@@ -2592,6 +2676,7 @@ void TOP4EA_Engine::closeBasketAtomic() {
             + " | θ-calibration appliquée ===");
     }
     state_.store(EAState::Init);
+    return true;
 }
 
 void TOP4EA_Engine::closeOneSide(int sideType) {
@@ -2642,19 +2727,32 @@ void TOP4EA_Engine::closeOneSide(int sideType) {
 //  Appelé depuis processTick() quand en MaxRecoveryHold.
 // ────────────────────────────────────────────────────────────
 void TOP4EA_Engine::emergencyCloseAll(double currentPnL) {
-    log("=== URGENCE MaxRecoveryHold : P&L=" + std::to_string(currentPnL)
+    const double moneyScale =
+        accountMoneyScale_.load(std::memory_order_relaxed);
+    log("=== URGENCE MaxRecoveryHold : P&L="
+        + std::to_string(currentPnL / moneyScale)
         + "$ < seuil=" + std::to_string(cfg_.basketMaxLoss)
         + "$ — FERMETURE TOTALE au marché ===");
 
     // Annuler stops résiduels
     int ss = ssTicket_.load();
     int bs = bsTicket_.load();
-    if (ss > 0) { bridge_->sendCommand(makeDelete(ss)); ssTicket_.store(-1); }
-    if (bs > 0) { bridge_->sendCommand(makeDelete(bs)); bsTicket_.store(-1); }
+    bool pendingDeleteFailed = false;
+    if (ss > 0) {
+        auto r = bridge_->sendCommand(makeDelete(ss));
+        if (r.success) ssTicket_.store(-1);
+        else pendingDeleteFailed = true;
+    }
+    if (bs > 0) {
+        auto r = bridge_->sendCommand(makeDelete(bs));
+        if (r.success) bsTicket_.store(-1);
+        else pendingDeleteFailed = true;
+    }
     ssLevel_.store(0.0); bsLevel_.store(0.0);
 
     // Fermer toutes les positions au marché
     auto orders = fetchOrders();
+    const int marketOrdersBeforeClose = countMarketOrders(orders);
     Tick t; { std::lock_guard lk(tickMu_); t = lastTick_; }
     int closed = 0;
     for (const auto& o : orders) {
@@ -2665,6 +2763,22 @@ void TOP4EA_Engine::emergencyCloseAll(double currentPnL) {
         }
     }
     log("[Urgence] " + std::to_string(closed) + " position(s) fermée(s) @ marché");
+
+    auto remainingOrders = fetchOrders();
+    if (pendingDeleteFailed || closed != marketOrdersBeforeClose ||
+        !remainingOrders.empty()) {
+        const auto remainingCount = remainingOrders.size();
+        {
+            std::lock_guard lk(ordersMu_);
+            orders_ = std::move(remainingOrders);
+        }
+        closingStart_ = Clock::now();
+        state_.store(EAState::Closing);
+        log("[Urgence] Fermeture incomplète — "
+            + std::to_string(remainingCount)
+            + " ordre(s) restants; le moteur retentera sans ouvrir de nouvelle grille");
+        return;
+    }
 
     // Reset complet + nouveau cycle
     vlMgr_.reset();
@@ -3015,24 +3129,30 @@ void TOP4EA_Engine::resetDailyIfNeeded() {
     }
 }
 
-void TOP4EA_Engine::checkDailyTarget() {
-    if (cfg_.dailyTargetPct <= 0.0 || dailyTargetReached_) return;
+bool TOP4EA_Engine::checkDailyTarget() {
+    if (cfg_.dailyTargetPct <= 0.0 || dailyTargetReached_) return false;
     double balance, startBal;
     {
         std::lock_guard lk(accMu_);
         balance  = account_.balance;
         startBal = dailyStartBalance_;
     }
-    if (startBal <= 0.0) return; // snapshot initial encore indisponible
+    if (startBal <= 0.0) return false; // snapshot initial encore indisponible
     double profitToday = balance - startBal;
     double target      = startBal * cfg_.dailyTargetPct / 100.0;
     if (profitToday >= target) {
         log("Objectif journalier ATTEINT: +" + std::to_string(profitToday)
             + "$ (" + std::to_string(cfg_.dailyTargetPct) + "%)");
-        closeBasketAtomic();
-        dailyTargetReached_ = true;
-        state_.store(EAState::DailyPause);
+        if (closeBasketAtomic()) {
+            dailyTargetReached_ = true;
+            state_.store(EAState::DailyPause);
+        } else {
+            log("[DailyTarget] Ordres encore ouverts — trading suspendu pendant "
+                "la nouvelle tentative de fermeture");
+        }
+        return true;
     }
+    return false;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -3126,7 +3246,8 @@ void TOP4EA_Engine::runRecyclingAgents(
                        : (analysis.cumulativeDelta <= -0.15) ? -1 : 0;
     const bool monoMode = std::abs(analysis.cumulativeDelta) >= 0.60;
     auto action = recyclingAgents_->step(
-        orders, account.balance, urgency, flowSign, monoMode);
+        orders, account.balance, urgency, flowSign, monoMode,
+        accountMoneyScale_.load(std::memory_order_relaxed));
     if (action) executeRecyclingAction(*action, orders, tick);
 }
 
@@ -3187,10 +3308,12 @@ void TOP4EA_Engine::executeRecyclingAction(
             applyCacheClose(orders_);
         }
 
+        const double moneyScale =
+            accountMoneyScale_.load(std::memory_order_relaxed);
         log("[Recycling] position fermée ticket=" + std::to_string(ticket)
             + " lots=" + std::to_string(closeLots)
             + "/" + std::to_string(order.lots)
-            + " pnl estimé=" + std::to_string(realized) + "$");
+            + " pnl estimé=" + std::to_string(realized / moneyScale) + "$");
         return realized;
     };
 
@@ -3205,15 +3328,20 @@ void TOP4EA_Engine::executeRecyclingAction(
         auto loserPnl = closeTicket(action.ticket, action.closeLots);
         if (!loserPnl) {
             recyclingAgents_->recordSuccess(
-                action, *winnerPnl, "paire incomplète; gagnante fermée seulement");
+                action, *winnerPnl / accountMoneyScale_.load(
+                            std::memory_order_relaxed),
+                "paire incomplète; gagnante fermée seulement");
             log("[Recycling][WARN] la gagnante a été réduite mais la perdante "
                 "n'a pas pu être fermée — vérification au prochain rafraîchissement");
             return;
         }
         const double totalRealized = *winnerPnl + *loserPnl;
-        recyclingAgents_->recordSuccess(action, totalRealized, action.reason);
+        recyclingAgents_->recordSuccess(
+            action, totalRealized / accountMoneyScale_.load(
+                        std::memory_order_relaxed), action.reason);
         log("[Recycling][Y] paire fermée net estimé="
-            + std::to_string(totalRealized) + "$");
+            + std::to_string(totalRealized / accountMoneyScale_.load(
+                                 std::memory_order_relaxed)) + "$");
         return;
     }
 
@@ -3222,12 +3350,14 @@ void TOP4EA_Engine::executeRecyclingAction(
         recyclingAgents_->recordFailure(action);
         return;
     }
-    recyclingAgents_->recordSuccess(action, *realized, action.reason);
+    const double moneyScale =
+        accountMoneyScale_.load(std::memory_order_relaxed);
+    recyclingAgents_->recordSuccess(action, *realized / moneyScale, action.reason);
     log("[Recycling][" + std::string(
             action.agent == RecyclingClass::X ? "X" :
             action.agent == RecyclingClass::Y ? "Y" : "Z")
         + "] " + action.reason + " ticket=" + std::to_string(action.ticket)
-        + " réalisé estimé=" + std::to_string(*realized) + "$");
+        + " réalisé estimé=" + std::to_string(*realized / moneyScale) + "$");
 }
 
 TradeCmd TOP4EA_Engine::makeClose(const OrderInfo& ord, double price) {
@@ -3309,7 +3439,9 @@ std::string TOP4EA_Engine::dashboard() const {
     if (symbolSpec_.detected) {
         oss << "║  Broker    : " << cfg_.digits << "d"
             << "  pt=" << std::setprecision(symbolSpec_.digits) << cfg_.point
-            << "  tv=" << std::setprecision(2) << cfg_.tickValue << "$/lot/pt"
+            << "  tv=" << std::setprecision(2)
+            << cfg_.tickValue / accountMoneyScale_.load(std::memory_order_relaxed)
+            << "$/lot/pt"
             << "  cs=" << (int)cfg_.contractSize << "\n";
         oss << "║  Vol[" << cfg_.volumeMin << "/"
             << cfg_.volumeMax << "/" << cfg_.volumeStep << "]"
@@ -3327,10 +3459,14 @@ std::string TOP4EA_Engine::dashboard() const {
     oss << std::setprecision(2);
     oss << "║  Bid/Ask   : " << tick.bid << " / " << tick.ask << "\n";
     oss << "╠═══════════════════════════════════╣\n";
-    double cyclePnlDash = cycleRealizedPnL_ + pnl;
-    oss << "║  Basket P&L: " << (pnl>=0?"+":"") << pnl << " $";
+    const double moneyScale =
+        accountMoneyScale_.load(std::memory_order_relaxed);
+    double cyclePnlDash = (cycleRealizedPnL_ + pnl) / moneyScale;
+    const double pnlUsd = pnl / moneyScale;
+    oss << "║  Basket P&L: " << (pnlUsd>=0?"+":"") << pnlUsd << " $";
     if (cycleRealizedPnL_ > 0.01)
-        oss << "  [+réalisé=" << std::setprecision(2) << cycleRealizedPnL_
+        oss << "  [+réalisé=" << std::setprecision(2)
+            << cycleRealizedPnL_ / moneyScale
             << " → cycle=" << (cyclePnlDash>=0?"+":"") << cyclePnlDash << "$]";
     oss << "\n";
     oss << "╠═══════════════════════════════════╣\n";
@@ -3426,24 +3562,27 @@ std::string TOP4EA_Engine::dashboard() const {
     {
         double dynTarget = effectiveTarget(orders);
         double lots      = totalLots(orders);
+        const double targetUsd = dynTarget / moneyScale;
         // ── Ligne Target enrichie ──
         if (cfg_.basketTarget <= 0.0) {
             double bonus = 1.0;
             const char* bonusTag = "";
             if (lots >= 5.0)       { bonus = 1.265; bonusTag = "×1.265"; }
             else if (lots >= 2.0)  { bonus = 1.10;   bonusTag = "×1.10"; }
-            double vel     = basketMon_->velocity();
+            double vel     = basketMon_->velocity() / moneyScale;
             double velNorm = std::max(0.0, std::min(1.0, vel / 0.5));
-            oss << "║  Target    : $" << dynTarget
+            oss << "║  Target    : $" << targetUsd
                 << " (dyn " << std::setprecision(2) << lots << "L"
-                << "×$" << (70.0 * cfg_.tickValue)
+                << "×$" << (70.0 * cfg_.tickValue / moneyScale)
                 << (bonus > 1.0 ? std::string(bonusTag) : "")
                 << (velNorm > 0.0 ? " vel+" + [&]{ std::ostringstream t; t << std::setprecision(0) << std::fixed << (velNorm*30.0); return t.str(); }() + "%" : "")
                 << ")\n";
-        } else if (cfg_.useVABT && dynTarget != cfg_.basketTarget) {
-            oss << "║  Target    : $" << dynTarget << " [VABT base=$" << cfg_.basketTarget << "]\n";
+        } else if (cfg_.useVABT &&
+                   dynTarget != cfg_.basketTarget * moneyScale) {
+            oss << "║  Target    : $" << targetUsd
+                << " [VABT base=$" << cfg_.basketTarget << "]\n";
         } else {
-            oss << "║  Target    : $" << dynTarget << " [fixe]\n";
+            oss << "║  Target    : $" << targetUsd << " [fixe]\n";
         }
         // ── Ligne Lots ──
         oss << "║  Lots      : " << std::setprecision(2) << lots;
@@ -3451,7 +3590,7 @@ std::string TOP4EA_Engine::dashboard() const {
             oss << "/" << cfg_.maxLots << " max";
         oss << "\n";
     }
-    oss << "║  Vélocité  : " << basketMon_->velocity() << " $/tick\n";
+    oss << "║  Vélocité  : " << basketMon_->velocity() / moneyScale << " $/tick\n";
     oss << "╠═══════════════════════════════════╣\n";
     oss << "║  SS Recovery: " << recovery_->sellCount() << " / " << cfg_.maxRecovery;
     if (cfg_.maxRecoveryActive > 0)
@@ -3485,7 +3624,7 @@ std::string TOP4EA_Engine::dashboard() const {
     oss << "║  SS @ " << std::setprecision(5) << ssLevel_.load() << "\n";
     oss << "║  BS @ " << bsLevel_.load() << "\n";
     if (cfg_.agentsEnabled && recyclingAgents_)
-        oss << "║  " << recyclingAgents_->report() << "\n";
+        oss << "║  " << recyclingAgents_->report(moneyScale) << "\n";
     // ── Verrouillage Profit Trailing (V-BS / V-SS) ────────────
     if (cfg_.vlEnabled) {
         oss << "╠══════ VERROUILLAGE PROFIT (V) ══════╣\n";

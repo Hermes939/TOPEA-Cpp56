@@ -102,7 +102,7 @@ BasketCloseResult BasketCloser::execute(std::vector<OrderInfo> orders,
               << (int)zone << " ordres=" << total << "\n";
 
     // Phase 0
-    phase0_purgePending(ssTicket, bsTicket);
+    res.pendingDeleteFailed = phase0_purgePending(ssTicket, bsTicket);
 
     // Séparer BUY / SELL
     std::vector<OrderInfo> buys, sells;
@@ -139,9 +139,11 @@ BasketCloseResult BasketCloser::execute(std::vector<OrderInfo> orders,
     return res;
 }
 
-void BasketCloser::phase0_purgePending(int ssTicket, int bsTicket) {
-    if (ssTicket > 0) deletePending_(ssTicket);
-    if (bsTicket > 0) deletePending_(bsTicket);
+bool BasketCloser::phase0_purgePending(int ssTicket, int bsTicket) {
+    bool failed = false;
+    if (ssTicket > 0 && !deletePending_(ssTicket)) failed = true;
+    if (bsTicket > 0 && !deletePending_(bsTicket)) failed = true;
+    return failed;
 }
 
 int BasketCloser::phase1_netting(std::vector<OrderInfo>& buys,

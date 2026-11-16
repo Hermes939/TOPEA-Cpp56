@@ -70,6 +70,7 @@ private:
     void onTick   (const Tick&            tick);
     void onOrder  (const OrderInfo&       ord);
     void onAccount(const AccountSnapshot& acc);
+    void updateAccountMoneyScale(const std::string& currency);
     void onError  (int code, const std::string& msg);
     void onConnect(bool connected);
 
@@ -86,7 +87,7 @@ private:
 
     // ─── Logique principale ──────────────────────────────────
     void processTick(const Tick& tick);
-    void checkDailyTarget();
+    bool checkDailyTarget();
     void resetDailyIfNeeded();
     void initOrRestore();
     void restoreState(const std::vector<OrderInfo>& orders);
@@ -97,6 +98,7 @@ private:
 
     // Synchronisation fallback — vérifie cohérence tickets avec les ordres réels
     void syncTriggersFallback(const std::vector<OrderInfo>& orders);
+    void resetFlatCycle(const Tick& tick);
 
     void trailGrid();
 
@@ -105,7 +107,7 @@ private:
     void ensureBuyStop (double lot, const std::string& comment,
                         int recovDepth, double gapFactor, bool trailFrozen);
 
-    void closeBasketAtomic();
+    bool closeBasketAtomic();
     void closeWavePartial(int wave);  // wave 0=Wave1(50%) wave 1=Wave2(30%)
     void closeOneSide(int sideType);
     void emergencyCloseAll(double currentPnL); // urgence MaxRecoveryHold si basket_max_loss atteint
@@ -168,7 +170,7 @@ private:
     Config                              cfg_;
     SymbolSpec                          symbolSpec_;   // specs broker détectées
     bool                                pipConfigUnresolved_ = false;
-    std::unique_ptr<MetaApiBridge>      bridge_;
+    std::unique_ptr<TradingBridge>      bridge_;
     std::unique_ptr<GridEngine>         grid_;
     std::unique_ptr<BasketMonitor>      basketMon_;
     std::unique_ptr<RecoveryEngine>     recovery_;
@@ -246,6 +248,7 @@ private:
 
     mutable std::mutex accMu_;
     AccountSnapshot    account_;
+    std::atomic<double> accountMoneyScale_ { 1.0 }; // USC cents per configured USD
 
     mutable std::mutex tickMu_;
     Tick               lastTick_;

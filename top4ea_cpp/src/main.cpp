@@ -34,7 +34,9 @@ static void applyConfigKV(top4ea::Config& cfg,
     if (logOverride)
         std::cout << "[CONFIG] " << key << "=" << val << " (env override)\n";
     try {
-        if      (key == "platform") {
+        if      (key == "trading_provider") cfg.tradingProvider = val;
+        else if (key == "tickerall_server") cfg.tickerallServer = val;
+        else if (key == "platform") {
             if      (val == "mt5" || val == "MT5") cfg.platform = top4ea::PlatformType::MT5;
             else if (val == "mt4" || val == "MT4") cfg.platform = top4ea::PlatformType::MT4;
             else                                   cfg.platform = top4ea::PlatformType::Auto;
@@ -152,6 +154,8 @@ static void applyConfigKV(top4ea::Config& cfg,
 // ─── Table de correspondance clé conf → variable d'environnement ──
 // Format : TOP4EA_<NOM_MAJUSCULE> — ex: grid_gap → TOP4EA_GRID_GAP
 static const std::vector<std::pair<std::string,std::string>> ENV_KEYS = {
+    {"trading_provider",            "TOP4EA_TRADING_PROVIDER"},
+    {"tickerall_server",            "TOP4EA_TICKERALL_SERVER"},
     {"platform",                    "TOP4EA_PLATFORM"},
     {"symbol",                      "TOP4EA_SYMBOL"},
     {"base_lot",                    "TOP4EA_BASE_LOT"},
@@ -300,7 +304,7 @@ void printBanner(const top4ea::Config& cfg) {
     std::cout << R"(
 ╔══════════════════════════════════════════════════╗
 ║        TOP4EA  C++20  v3.1  — INSTITUTIONNEL     ║
-║   Grid Recovery EA — MetaApi MT4 / MT5           ║
+║   Grid Recovery EA — TickerAll / MetaApi          ║
 ╠══════════════════════════════════════════════════╣
 )" << "║  Plateforme: " << platStr      << "\n"
    << "║  Symbole   : " << cfg.symbol       << "\n"

@@ -20,6 +20,7 @@ struct BasketCloseResult {
     int    pairsClosedBy  = 0;    // paires CloseBy réussies
     int    singlesClosedOk= 0;    // singles fermés avec succès
     int    residuals      = 0;    // ordres non fermés après safety net
+    bool   pendingDeleteFailed = false;
     double realizedPnL    = 0.0;  // P&L capturé
     Ms     elapsed        = {};   // durée totale
 };
@@ -107,7 +108,7 @@ public:
 
 private:
     // Phase 0 : purge des ordres pendants
-    void phase0_purgePending(int ssTicket, int bsTicket);
+    bool phase0_purgePending(int ssTicket, int bsTicket);
 
     // Phase 1 : netting CloseBy (paires de lots identiques)
     int phase1_netting(std::vector<OrderInfo>& buys,

@@ -11,13 +11,26 @@
 
 CXX       := g++
 CXXFLAGS  := -std=c++20 -O2 -Wall -Wextra -pthread -I include
-LDFLAGS   := -pthread -lcurl -ldl
+DEPFLAGS  := -MMD -MP
+CURL_CONFIG := $(shell command -v curl-config 2>/dev/null)
+ifeq ($(CURL_CONFIG),)
+CURL_CFLAGS := $(shell pkg-config --cflags libcurl 2>/dev/null)
+CURL_LIBS   := $(shell pkg-config --libs libcurl 2>/dev/null)
+CURL_LIBDIR := $(shell pkg-config --variable=libdir libcurl 2>/dev/null)
+else
+CURL_CFLAGS := $(shell $(CURL_CONFIG) --cflags)
+CURL_LIBS   := $(shell $(CURL_CONFIG) --libs)
+CURL_LIBDIR := $(shell $(CURL_CONFIG) --prefix)/lib
+endif
+CXXFLAGS += $(CURL_CFLAGS)
+LDFLAGS   := -pthread -ldl $(CURL_LIBS) -Wl,-rpath,$(CURL_LIBDIR)
 
 SRCDIR    := src
 BUILDDIR  := build
 
 ## ── Sources DLL (toute la logique, sans loader ni main) ──────
 DLL_SRCS  := $(SRCDIR)/metaapi_bridge.cpp       \
+	     $(SRCDIR)/tickerall_bridge.cpp      \
 	     $(SRCDIR)/grid_engine.cpp           \
 	     $(SRCDIR)/basket_manager.cpp        \
 	     $(SRCDIR)/recovery_engine.cpp       \
@@ -41,15 +54,17 @@ LOADER_SRC := $(SRCDIR)/loader.cpp
 
 ## ── Objets DLL (.o avec -fPIC) ──────────────────────────────
 DLL_OBJS   := $(patsubst $(SRCDIR)/%.cpp, $(BUILDDIR)/dll_%.o, $(DLL_SRCS))
+DLL_DEPS   := $(DLL_OBJS:.o=.d)
 
 ## ── Objet loader ─────────────────────────────────────────────
 LOADER_OBJ := $(BUILDDIR)/loader.o
+LOADER_DEP := $(LOADER_OBJ:.o=.d)
 
 ## ── Outputs ──────────────────────────────────────────────────
 LIB_TARGET    := $(BUILDDIR)/libtop4ea.so
 LOADER_TARGET := $(BUILDDIR)/top4ea
 
-.PHONY: all lib loader validate-calibration check clean run test-grid-units test-recycling
+.PHONY: all lib loader validate-calibration check clean run test-grid-units test-recycling test-tickerall test-basket-manager
 
 all: lib loader validate-calibration
 	@echo ""
@@ -66,7 +81,7 @@ $(LIB_TARGET): $(DLL_OBJS) | $(BUILDDIR)
 
 ## ── DLL objects (Position Independent Code) ─────────────────
 $(BUILDDIR)/dll_%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
-	$(CXX) $(CXXFLAGS) -fPIC -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -fPIC -c $< -o $@
 
 ## ── Loader thin ──────────────────────────────────────────────
 loader: $(LOADER_TARGET)
@@ -83,6 +98,18 @@ test-grid-units: $(BUILDDIR)/test_grid_engine_pips
 test-recycling: $(BUILDDIR)/test_recycling_agents
 	./$(BUILDDIR)/test_recycling_agents
 
+test-tickerall: $(BUILDDIR)/test_tickerall_bridge
+	env -u TICKERALL_API_KEY ./$(BUILDDIR)/test_tickerall_bridge
+
+test-basket-manager: $(BUILDDIR)/test_basket_manager
+	./$(BUILDDIR)/test_basket_manager
+
+$(BUILDDIR)/test_basket_manager: tests/test_basket_manager.cpp $(SRCDIR)/basket_manager.cpp | $(BUILDDIR)
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
+$(BUILDDIR)/test_tickerall_bridge: tests/test_tickerall_bridge.cpp $(SRCDIR)/tickerall_bridge.cpp | $(BUILDDIR)
+	$(CXX) $(CXXFLAGS) $^ -o $@ $(LDFLAGS)
+
 $(BUILDDIR)/test_recycling_agents: tests/test_recycling_agents.cpp $(SRCDIR)/recycling_agents.cpp | $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
@@ -96,7 +123,9 @@ $(LOADER_TARGET): $(LOADER_OBJ) $(LIB_TARGET) | $(BUILDDIR)
 	@echo "Loader OK : $@"
 
 $(LOADER_OBJ): $(LOADER_SRC) | $(BUILDDIR)
-	$(CXX) $(CXXFLAGS) -c $< -o $@
+	$(CXX) $(CXXFLAGS) $(DEPFLAGS) -c $< -o $@
+
+-include $(DLL_DEPS) $(LOADER_DEP)
 
 ## ── Répertoire de build ──────────────────────────────────────
 $(BUILDDIR):

@@ -2,8 +2,8 @@
 
 ## Architecture
 
-Système de trading algorithmique 100% C++20 connecté à MetaTrader 4 **et MetaTrader 5** via MetaApi REST.
-Transformé depuis les scripts MQL4 originaux (v6.03 / v6.04). Compatible MT4/MT5 depuis v3.1.
+Système de trading algorithmique C++20 connecté aux comptes MetaTrader via MetaApi ou TickerAll.
+Le bridge TickerAll valide explicitement le mode démo MT5 avant de démarrer le flux et d'autoriser les ordres.
 
 ## Structure du projet
 
@@ -12,7 +12,8 @@ top4ea_cpp/
 ├── include/
 │   ├── types.hpp           — Types partagés, enums, structs (PlatformType MT4/MT5)
 │   ├── math_core.hpp       — ATR, EWMA, Kelly, vélocité P&L
-│   ├── metaapi_bridge.hpp  — Connexion MetaApi REST MT4/MT5 (header)
+│   ├── metaapi_bridge.hpp  — Interface bridge et MetaApi REST
+│   ├── tickerall_bridge.hpp — Connexion REST/WebSocket TickerAll MT5
 │   ├── grid_engine.hpp     — Calcul niveaux SS/BS adaptatifs
 │   ├── basket_manager.hpp  — Surveillance et fermeture basket
 │   ├── recovery_engine.hpp — Machine recovery + anti-cascade
@@ -20,7 +21,8 @@ top4ea_cpp/
 │   └── top4ea_engine.hpp   — Moteur principal (orchestrateur)
 ├── src/
 │   ├── main.cpp            — Point d'entrée + chargement config
-│   ├── metaapi_bridge.cpp  — Bridge REST MetaApi MT4/MT5
+│   ├── metaapi_bridge.cpp  — Bridge REST MetaApi
+│   ├── tickerall_bridge.cpp — Bridge REST + WebSocket TickerAll
 │   ├── grid_engine.cpp     — GridGap ATR dynamique
 │   ├── basket_manager.cpp  — Pipeline 4 phases fermeture
 │   ├── recovery_engine.cpp — Recovery / anti-cascade
@@ -32,7 +34,20 @@ top4ea_cpp/
 
 ## Workflow
 
-**Commande :** `cd top4ea_cpp && make all && ./build/top4ea top4ea.conf`
+**Démarrage automatique :** le workflow Replit `Project` compile le moteur, puis le superviseur le relance cinq secondes après toute sortie inattendue. Le verrou mono-instance du loader empêche les processus orphelins de lancer une seconde instance sur le même compte. Un arrêt explicite du workflow n'est pas relancé.
+
+Ce superviseur redémarre le moteur tant que le workflow et l'environnement d'hébergement restent actifs. Il ne garantit pas à lui seul une disponibilité 24/7 si Replit suspend ou arrête l'environnement.
+
+Avec `trading_provider = tickerall`, configurez uniquement `TICKERALL_API_KEY`
+dans Replit Secrets. Le moteur découvre le compte par `GET /v1/accounts` et
+sélectionne l'unique compte correspondant à `broker=mt5`, `isDemo=true` et
+`tickerall_server`. Il reste désarmé si aucun compte ou plusieurs comptes
+correspondent, si le compte n'est pas en ligne, ou si les spécifications du
+symbole ne sont pas vérifiées. Aucun identifiant ni mot de passe de courtier
+n'est enregistré par le projet.
+
+Les appels d'écriture TickerAll incluent une clé d'idempotence. Les clés API
+TickerAll donnent le droit de trader ; ne pas utiliser de clé en lecture seule.
 
 ## Compatibilité MT4 / MT5
 
@@ -54,6 +69,10 @@ Variables d'environnement requises :
 - `METAAPI_TOKEN` : token d'authentification
 - `METAAPI_ACCOUNT_ID` : ID du compte MT4 ou MT5
 - `METAAPI_REGION` : région (défaut : `new-york`)
+
+Configurez ces valeurs via le gestionnaire de secrets de l'environnement Replit,
+jamais dans `.replit` ni dans le dépôt. Tout identifiant déjà commité doit être
+révoqué et remplacé avant de redémarrer le moteur.
 
 ## Améliorations mathématiques vs MQL4 original
 

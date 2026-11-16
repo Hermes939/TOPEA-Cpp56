@@ -69,7 +69,7 @@ static void printBanner() {
         "╔══════════════════════════════════════════════════╗\n"
         "║      TOP4EA  C++20  DLL  v1.0                    ║\n"
         "║   Grid Recovery EA — Architecture 100% DLL       ║\n"
-        "║   Connexion : MetaApi REST (libcurl)              ║\n"
+        "║   Connexion : TickerAll / MetaApi (libcurl)       ║\n"
         "╚══════════════════════════════════════════════════╝\n";
     std::cout << "[Loader] " << TOP4EA_Version() << "\n";
 }

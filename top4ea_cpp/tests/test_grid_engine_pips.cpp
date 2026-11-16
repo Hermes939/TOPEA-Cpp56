@@ -16,7 +16,7 @@ int main() {
     cfg.point = 0.01;
     cfg.useAtrGrid = false;
     cfg.gridGap = 200;
-    cfg.trailMinChangePips = 0.5;
+    cfg.trailMinChangePips = 0.1;
 
     assert(near(pricePerPip(cfg), 0.10));
 
@@ -35,25 +35,35 @@ int main() {
     assert(ssCreate.needsCreate && near(ssCreate.targetPrice, 4253.80));
     assert(bsCreate.needsCreate && near(bsCreate.targetPrice, 4257.66));
 
-    // A favorable market move updates the corresponding pending stop once the
-    // configured half-pip threshold is exceeded.
+    // A one-tick favorable move reaches the configured 0.1-pip threshold.
     Tick moved;
-    moved.bid = 4255.80;
-    moved.ask = 4256.06;
+    moved.bid = 4255.61;
+    moved.ask = 4255.87;
     moved.spread = moved.ask - moved.bid;
     grid.onTick(moved);
     const auto ssMove = grid.computeSellStop(
         1, ssCreate.targetPrice, 0.0, 0, 1.0, stopDistance);
-    assert(ssMove.needsModify && near(ssMove.targetPrice, 4254.00));
+    assert(ssMove.needsModify && near(ssMove.targetPrice, 4253.81));
 
     Tick retraced;
-    retraced.bid = 4255.40;
-    retraced.ask = 4255.66;
+    retraced.bid = 4255.59;
+    retraced.ask = 4255.85;
     retraced.spread = retraced.ask - retraced.bid;
     grid.onTick(retraced);
+    const auto ssRetrace = grid.computeSellStop(
+        1, ssMove.targetPrice, 0.0, 0, 1.0, stopDistance);
+    assert(!ssRetrace.needsModify);
     const auto bsMove = grid.computeBuyStop(
         1, bsCreate.targetPrice, 0.0, 0, 1.0, stopDistance);
-    assert(bsMove.needsModify && near(bsMove.targetPrice, 4257.46));
+    assert(bsMove.needsModify && near(bsMove.targetPrice, 4257.65));
+
+    Config zeroThresholdCfg = cfg;
+    zeroThresholdCfg.trailMinChangePips = 0.0;
+    GridEngine zeroThresholdGrid(zeroThresholdCfg);
+    zeroThresholdGrid.onTick(first);
+    const auto unchanged = zeroThresholdGrid.computeSellStop(
+        1, ssCreate.targetPrice, 0.0, 0, 1.0, stopDistance);
+    assert(!unchanged.needsModify);
 
     std::cout << "XAUUSD.c pip distances and stop ratchets: OK\n";
 }

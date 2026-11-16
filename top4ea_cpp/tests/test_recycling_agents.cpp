@@ -43,6 +43,16 @@ int main() {
         RecyclingAgents agents(testConfig());
         agents.onTick();
         const std::vector<OrderInfo> orders{
+            position(151, OrderType::Buy, 0.10, -9.0)
+        };
+        auto action = agents.step(orders, 10000.0, 0.75, 0, false, 100.0);
+        assert(!action);
+    }
+
+    {
+        RecyclingAgents agents(testConfig());
+        agents.onTick();
+        const std::vector<OrderInfo> orders{
             position(201, OrderType::Buy, 0.10, -60.0),
             position(202, OrderType::Sell, 0.20, 100.0)
         };

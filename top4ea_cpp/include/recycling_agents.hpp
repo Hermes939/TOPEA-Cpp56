@@ -50,14 +50,15 @@ public:
         double balance,
         double urgency,
         int flowSign,
-        bool monoMode);
+        bool monoMode,
+        double usdToAccountScale = 1.0);
 
     void recordSuccess(const RecyclingAction& action,
                        double realizedPnl,
                        const std::string& result);
     void recordFailure(const RecyclingAction& action);
 
-    [[nodiscard]] std::string report() const;
+    [[nodiscard]] std::string report(double usdToAccountScale = 1.0) const;
 
 private:
     struct ClassifiedLeg {
@@ -68,9 +69,11 @@ private:
         double cap = 0.0;
     };
 
-    [[nodiscard]] RecyclingClass classify(double lots, double netPnl) const noexcept;
+    [[nodiscard]] RecyclingClass classify(double lots, double netPnl,
+                                          double usdToAccountScale) const noexcept;
     [[nodiscard]] double capFor(RecyclingClass agent, int direction,
-                                double urgency, int flowSign) const noexcept;
+                                double urgency, int flowSign,
+                                double usdToAccountScale) const noexcept;
     [[nodiscard]] double normalizeLots(double lots) const noexcept;
     [[nodiscard]] bool cadenceDue(int cadence, uint64_t& lastCycle,
                                   double urgency) noexcept;

@@ -169,7 +169,7 @@ StopPlacement GridEngine::computeSellStop(
         } else {
             minChange = halfGap() / 10.0;      // comportement original
         }
-        sp.needsModify = (sp.delta > minChange);
+        sp.needsModify = (sp.delta > 0.0 && sp.delta >= minChange);
     }
     return sp;
 }
@@ -223,7 +223,7 @@ StopPlacement GridEngine::computeBuyStop(
         } else {
             minChange = halfGap() / 10.0;      // comportement original
         }
-        sp.needsModify = (sp.delta > minChange);
+        sp.needsModify = (sp.delta > 0.0 && sp.delta >= minChange);
     }
     return sp;
 }
